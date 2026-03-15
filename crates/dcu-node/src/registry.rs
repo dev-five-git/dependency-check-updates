@@ -1,0 +1,463 @@
+//! npm registry client for looking up package versions.
+
+use std::sync::Arc;
+
+use reqwest::Client;
+use serde::Deserialize;
+use tokio::sync::Semaphore;
+use tracing::{debug, trace, warn};
+
+use dcu_core::{DcuError, DependencySpec, ResolvedVersion, TargetLevel};
+
+/// Maximum concurrent registry requests.
+const MAX_CONCURRENT_REQUESTS: usize = 10;
+
+/// Request timeout in seconds.
+const REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// npm registry client for looking up package versions.
+pub struct NpmRegistry {
+    client: Client,
+    semaphore: Arc<Semaphore>,
+    base_url: String,
+}
+
+/// Abbreviated npm package metadata response.
+#[derive(Debug, Deserialize)]
+struct NpmPackageInfo {
+    #[serde(rename = "dist-tags")]
+    dist_tags: Option<DistTags>,
+    versions: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DistTags {
+    latest: Option<String>,
+}
+
+impl NpmRegistry {
+    /// Create a new npm registry client with the default registry URL.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_base_url("https://registry.npmjs.org")
+    }
+
+    /// Create a client with a custom base URL (useful for testing or private registries).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the HTTP client cannot be built (should never happen with default settings).
+    #[must_use]
+    pub fn with_base_url(base_url: &str) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .user_agent(concat!("dcu/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("failed to create HTTP client");
+
+        Self {
+            client,
+            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            base_url: base_url.trim_end_matches('/').to_owned(),
+        }
+    }
+
+    /// Encode a package name for the registry URL.
+    ///
+    /// Scoped packages like `@scope/name` need the `/` encoded as `%2F`.
+    #[must_use]
+    pub fn encode_package_name(name: &str) -> String {
+        if name.starts_with('@') {
+            name.replacen('/', "%2F", 1)
+        } else {
+            name.to_owned()
+        }
+    }
+
+    /// Fetch package info from the npm registry.
+    async fn fetch_package_info(&self, name: &str) -> Result<NpmPackageInfo, DcuError> {
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|e| DcuError::RegistryLookup {
+                package: name.to_owned(),
+                detail: format!("semaphore error: {e}"),
+            })?;
+
+        let encoded = Self::encode_package_name(name);
+        let url = format!("{}/{encoded}", self.base_url);
+
+        debug!(package = name, %url, "fetching package info");
+
+        let response = self
+            .client
+            .get(&url)
+            .header(
+                "Accept",
+                "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*",
+            )
+            .send()
+            .await
+            .map_err(|e| DcuError::RegistryLookup {
+                package: name.to_owned(),
+                detail: e.to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(DcuError::RegistryLookup {
+                package: name.to_owned(),
+                detail: format!("HTTP {status}"),
+            });
+        }
+
+        response.json().await.map_err(|e| DcuError::RegistryLookup {
+            package: name.to_owned(),
+            detail: format!("failed to parse response: {e}"),
+        })
+    }
+
+    /// Resolve the target version for a single dependency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the registry lookup fails.
+    pub async fn resolve_version(
+        &self,
+        dep: &DependencySpec,
+        target: TargetLevel,
+    ) -> Result<ResolvedVersion, DcuError> {
+        let info = self.fetch_package_info(&dep.name).await?;
+
+        let latest = info.dist_tags.as_ref().and_then(|dt| dt.latest.clone());
+        let all_versions = extract_sorted_versions(&info);
+
+        trace!(
+            package = %dep.name,
+            version_count = all_versions.len(),
+            latest = ?latest,
+            "fetched version list"
+        );
+
+        let selected = select_version(&dep.current_req, latest.as_ref(), &all_versions, target);
+
+        // Filter out false positives: if the selected version already satisfies
+        // the current range, there's no manifest change needed.
+        let selected = selected.filter(|v| !satisfies_range(&dep.current_req, v));
+
+        debug!(
+            package = %dep.name,
+            current = %dep.current_req,
+            selected = ?selected,
+            target = %target,
+            "resolved version"
+        );
+
+        Ok(ResolvedVersion { latest, selected })
+    }
+
+    /// Resolve versions for a batch of dependencies concurrently.
+    ///
+    /// Returns `(index, result)` pairs preserving the original ordering.
+    pub async fn resolve_batch(
+        &self,
+        deps: &[DependencySpec],
+        target: TargetLevel,
+    ) -> Vec<(usize, Result<ResolvedVersion, DcuError>)> {
+        let mut handles = Vec::with_capacity(deps.len());
+
+        for (idx, dep) in deps.iter().enumerate() {
+            let dep = dep.clone();
+            let client = self.client.clone();
+            let semaphore = self.semaphore.clone();
+            let base_url = self.base_url.clone();
+
+            let handle = tokio::spawn(async move {
+                let registry = NpmRegistry {
+                    client,
+                    semaphore,
+                    base_url,
+                };
+                let result = registry.resolve_version(&dep, target).await;
+                (idx, result)
+            });
+
+            handles.push(handle);
+        }
+
+        let mut results = Vec::with_capacity(deps.len());
+        for handle in handles {
+            match handle.await {
+                Ok(result) => results.push(result),
+                Err(e) => {
+                    warn!("task join error: {e}");
+                }
+            }
+        }
+
+        results.sort_by_key(|(idx, _)| *idx);
+        results
+    }
+}
+
+impl Default for NpmRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Extract and sort all version strings from package info, excluding pre-releases.
+fn extract_sorted_versions(info: &NpmPackageInfo) -> Vec<node_semver::Version> {
+    let Some(versions) = &info.versions else {
+        return Vec::new();
+    };
+
+    let mut parsed: Vec<node_semver::Version> = versions
+        .keys()
+        .filter_map(|v| node_semver::Version::parse(v).ok())
+        .collect();
+
+    parsed.sort();
+    parsed
+}
+
+/// Select the appropriate version based on target level.
+fn select_version(
+    current_req_str: &str,
+    latest: Option<&String>,
+    all_versions: &[node_semver::Version],
+    target: TargetLevel,
+) -> Option<String> {
+    if all_versions.is_empty() {
+        return latest.cloned();
+    }
+
+    let current_version = parse_base_version(current_req_str);
+
+    match target {
+        TargetLevel::Latest => latest.cloned(),
+        TargetLevel::Greatest | TargetLevel::Newest => {
+            // Highest non-prerelease version.
+            // (Newest would ideally use publish timestamps, but for MVP same as greatest.)
+            all_versions
+                .iter()
+                .rev()
+                .find(|v| v.pre_release.is_empty())
+                .map(std::string::ToString::to_string)
+        }
+        TargetLevel::Minor => {
+            let Some(current) = &current_version else {
+                return latest.cloned();
+            };
+            all_versions
+                .iter()
+                .rev()
+                .find(|v| v.major == current.major && v.pre_release.is_empty())
+                .map(std::string::ToString::to_string)
+        }
+        TargetLevel::Patch => {
+            let Some(current) = &current_version else {
+                return latest.cloned();
+            };
+            all_versions
+                .iter()
+                .rev()
+                .find(|v| {
+                    v.major == current.major && v.minor == current.minor && v.pre_release.is_empty()
+                })
+                .map(std::string::ToString::to_string)
+        }
+    }
+}
+
+/// Check if a version satisfies an npm semver range.
+///
+/// Returns `true` if the version is within the range (no update needed).
+fn satisfies_range(range_str: &str, version_str: &str) -> bool {
+    let Ok(range) = node_semver::Range::parse(range_str) else {
+        return false;
+    };
+    let Ok(version) = node_semver::Version::parse(version_str) else {
+        return false;
+    };
+    range.satisfies(&version)
+}
+
+/// Parse a base version from a requirement string.
+///
+/// Strips leading range operators: `^1.2.3` -> `1.2.3`, `~2.0.0` -> `2.0.0`,
+/// `>=1.0.0` -> `1.0.0`.
+fn parse_base_version(req_str: &str) -> Option<node_semver::Version> {
+    let cleaned = req_str.trim_start_matches(|c: char| !c.is_ascii_digit());
+    node_semver::Version::parse(cleaned).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encode_package_name_regular() {
+        assert_eq!(NpmRegistry::encode_package_name("react"), "react");
+    }
+
+    #[test]
+    fn test_encode_package_name_scoped() {
+        assert_eq!(
+            NpmRegistry::encode_package_name("@types/react"),
+            "@types%2Freact"
+        );
+    }
+
+    #[test]
+    fn test_encode_package_name_scoped_babel() {
+        assert_eq!(
+            NpmRegistry::encode_package_name("@babel/core"),
+            "@babel%2Fcore"
+        );
+    }
+
+    #[test]
+    fn test_parse_base_version_caret() {
+        let v = parse_base_version("^1.2.3").unwrap();
+        assert_eq!(v.major, 1);
+        assert_eq!(v.minor, 2);
+        assert_eq!(v.patch, 3);
+    }
+
+    #[test]
+    fn test_parse_base_version_tilde() {
+        let v = parse_base_version("~1.2.3").unwrap();
+        assert_eq!(v.major, 1);
+        assert_eq!(v.minor, 2);
+        assert_eq!(v.patch, 3);
+    }
+
+    #[test]
+    fn test_parse_base_version_gte() {
+        let v = parse_base_version(">=1.0.0").unwrap();
+        assert_eq!(v.major, 1);
+        assert_eq!(v.minor, 0);
+        assert_eq!(v.patch, 0);
+    }
+
+    #[test]
+    fn test_parse_base_version_bare() {
+        let v = parse_base_version("1.2.3").unwrap();
+        assert_eq!(v.major, 1);
+        assert_eq!(v.minor, 2);
+        assert_eq!(v.patch, 3);
+    }
+
+    #[test]
+    fn test_parse_base_version_star() {
+        // `*` has no digits to parse
+        assert!(parse_base_version("*").is_none());
+    }
+
+    fn make_versions(vers: &[&str]) -> Vec<node_semver::Version> {
+        let mut v: Vec<_> = vers
+            .iter()
+            .filter_map(|s| node_semver::Version::parse(s).ok())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn test_select_version_latest() {
+        let latest = "18.2.0".to_owned();
+        let versions = make_versions(&["18.0.0", "18.1.0", "18.2.0"]);
+        let result = select_version("^18.0.0", Some(&latest), &versions, TargetLevel::Latest);
+        assert_eq!(result, Some("18.2.0".to_owned()));
+    }
+
+    #[test]
+    fn test_select_version_minor() {
+        let latest = "19.0.0".to_owned();
+        let versions = make_versions(&["18.0.0", "18.1.0", "18.2.0", "19.0.0"]);
+        let result = select_version("^18.0.0", Some(&latest), &versions, TargetLevel::Minor);
+        assert_eq!(result, Some("18.2.0".to_owned()));
+    }
+
+    #[test]
+    fn test_select_version_patch() {
+        let latest = "18.2.0".to_owned();
+        let versions = make_versions(&["18.0.0", "18.0.1", "18.0.2", "18.1.0", "18.2.0"]);
+        let result = select_version("^18.0.0", Some(&latest), &versions, TargetLevel::Patch);
+        assert_eq!(result, Some("18.0.2".to_owned()));
+    }
+
+    #[test]
+    fn test_select_version_greatest() {
+        let latest = "18.2.0".to_owned();
+        let versions = make_versions(&["17.0.0", "18.0.0", "18.2.0", "19.0.0"]);
+        let result = select_version("^17.0.0", Some(&latest), &versions, TargetLevel::Greatest);
+        assert_eq!(result, Some("19.0.0".to_owned()));
+    }
+
+    #[test]
+    fn test_select_version_skips_prerelease() {
+        let latest = "18.2.0".to_owned();
+        let versions = make_versions(&["18.0.0", "18.2.0", "19.0.0-beta.1"]);
+        let result = select_version("^18.0.0", Some(&latest), &versions, TargetLevel::Greatest);
+        assert_eq!(result, Some("18.2.0".to_owned()));
+    }
+
+    #[test]
+    fn test_select_version_empty_versions_falls_back_to_latest() {
+        let latest = "1.0.0".to_owned();
+        let versions: Vec<node_semver::Version> = vec![];
+        let result = select_version("^1.0.0", Some(&latest), &versions, TargetLevel::Greatest);
+        assert_eq!(result, Some("1.0.0".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_sorted_versions() {
+        let info = NpmPackageInfo {
+            dist_tags: None,
+            versions: Some({
+                let mut map = serde_json::Map::new();
+                map.insert(
+                    "2.0.0".to_owned(),
+                    serde_json::Value::Object(serde_json::Map::new()),
+                );
+                map.insert(
+                    "1.0.0".to_owned(),
+                    serde_json::Value::Object(serde_json::Map::new()),
+                );
+                map.insert(
+                    "1.5.0".to_owned(),
+                    serde_json::Value::Object(serde_json::Map::new()),
+                );
+                map
+            }),
+        };
+        let versions = extract_sorted_versions(&info);
+        assert_eq!(versions.len(), 3);
+        assert_eq!(versions[0].to_string(), "1.0.0");
+        assert_eq!(versions[1].to_string(), "1.5.0");
+        assert_eq!(versions[2].to_string(), "2.0.0");
+    }
+
+    #[test]
+    fn test_extract_sorted_versions_none() {
+        let info = NpmPackageInfo {
+            dist_tags: None,
+            versions: None,
+        };
+        let versions = extract_sorted_versions(&info);
+        assert!(versions.is_empty());
+    }
+
+    #[test]
+    fn test_select_version_minor_no_match() {
+        // Current is major 5, no version with major 5 exists
+        let latest = "6.0.0".to_owned();
+        let versions = make_versions(&["6.0.0", "7.0.0"]);
+        let result = select_version("^5.0.0", Some(&latest), &versions, TargetLevel::Minor);
+        // No major=5 version found, so None
+        assert_eq!(result, None);
+    }
+}

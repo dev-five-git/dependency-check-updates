@@ -1,0 +1,21 @@
+[package]
+name = "dcu-rust"
+version = "0.1.0"
+description = "Rust ecosystem support for dcu: Cargo.toml parsing (toml_edit) + crates.io registry"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dcu-core.workspace = true
+toml_edit.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+semver = "1.0"
+tracing.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

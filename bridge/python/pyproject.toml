@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "dependency-check-updates"
+requires-python = ">=3.9"
+version = "0.1.0"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+readme = "../../README.md"
+
+[tool.maturin]
+bindings = "bin"
+strip = true

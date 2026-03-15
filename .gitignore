@@ -1,0 +1,17 @@
+target
+node_modules
+.venv
+.git
+.DS_Store
+.idea
+.vscode
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+build_rs_cov.profraw
+.claude
+tarpaulin-report.html
+.sisyphus/**
+.ruff_cache

@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "bridge/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+# Internal
+dcu-core = { path = "crates/dcu-core" }
+dcu-node = { path = "crates/dcu-node" }
+dcu-rust = { path = "crates/dcu-rust" }
+dcu-python = { path = "crates/dcu-python" }
+dcu-cli = { path = "crates/dcu-cli" }
+dcu-testkit = { path = "crates/dcu-testkit" }
+
+# External
+clap = { version = "4.6", features = ["derive"] }
+thiserror = "2.0"
+miette = { version = "7.6", features = ["fancy"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+tokio = { version = "1.50", features = ["rt", "macros"] }
+reqwest = { version = "0.13", features = ["json"] }
+node-semver = "2.2"
+ignore = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml_edit = "0.22"
+
+napi = { version = "3", features = ["tokio_rt"] }
+napi-derive = "3"
+futures = "0.3"
+owo-colors = "4.3"
+insta = "1.46"
+tempfile = "3.27"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

@@ -1,0 +1,263 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+      - LICENSE
+      - '**/*.gitignore'
+      - .editorconfig
+  pull_request: null
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - '3.11'
+          - '3.12'
+          - '3.13'
+          - '3.14'
+        platform:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Install maturin
+        run: uv pip install maturin --system
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install dependencies
+        run: bun install
+      - name: Build
+        run: bun run build
+      - name: Lint
+        run: bun run lint
+      - name: Test
+        run: bun run test
+
+  coverage-test:
+    name: Coverage Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    container:
+      image: xd009642/tarpaulin:develop-nightly
+      options: --security-opt seccomp=unconfined
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Build
+        run: cargo check
+      - name: Lint
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test
+        run: |
+          # rust coverage issue
+          echo 'max_width = 100000' > .rustfmt.toml
+          echo 'tab_spaces = 4' >> .rustfmt.toml
+          echo 'newline_style = "Unix"' >> .rustfmt.toml
+          echo 'fn_call_width = 100000' >> .rustfmt.toml
+          echo 'fn_params_layout = "Compressed"' >> .rustfmt.toml
+          echo 'chain_width = 100000' >> .rustfmt.toml
+          echo 'merge_derives = true' >> .rustfmt.toml
+          echo 'use_small_heuristics = "Default"' >> .rustfmt.toml
+          cargo fmt
+          cargo tarpaulin --out Lcov Stdout --engine llvm
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+          files: lcov.info
+        if: github.ref == 'refs/heads/main'
+
+  node-build:
+    needs:
+      - test
+      - coverage-test
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            build: bun run build --target x86_64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: bun run build --target x86_64-pc-windows-msvc
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build: bun run build --target x86_64-unknown-linux-gnu --use-napi-cross
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: bun run build --target aarch64-apple-darwin
+    name: stable - ${{ matrix.settings.target }} - node@22
+    runs-on: ${{ matrix.settings.host }}
+    env:
+      DEBUG: napi:*
+      MACOSX_DEPLOYMENT_TARGET: '10.13'
+      CARGO_INCREMENTAL: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.settings.target }}
+      - uses: mlugg/setup-zig@v2
+        if: ${{ contains(matrix.settings.target, 'musl') }}
+        with:
+          version: 0.14.1
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        if: ${{ contains(matrix.settings.target, 'musl') }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cargo-zigbuild
+      - name: Install dependencies
+        run: bun install
+      - name: Build
+        run: ${{ matrix.settings.build }}
+        shell: bash
+        working-directory: bridge/node
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: |
+            bridge/node/dcu.*.node
+          if-no-files-found: error
+
+  python-build:
+    needs:
+      - test
+      - coverage-test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64
+            manylinux: auto
+            os: linux
+          - runner: ubuntu-22.04
+            target: aarch64
+            manylinux: auto
+            os: linux
+          - runner: ubuntu-22.04
+            target: armv7
+            manylinux: auto
+            os: linux
+          - runner: ubuntu-22.04
+            target: x86_64
+            manylinux: musllinux_1_2
+            os: musllinux
+          - runner: ubuntu-22.04
+            target: aarch64
+            manylinux: musllinux_1_2
+            os: musllinux
+          - runner: windows-latest
+            target: x64
+            os: windows
+          - runner: macos-14
+            target: x86_64
+            os: macos
+          - runner: macos-14
+            target: aarch64
+            os: macos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build wheels
+        uses: PyO3/maturin-action@main
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          working-directory: bridge/python
+          manylinux: ${{ matrix.manylinux || '' }}
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: bridge/python/dist
+
+  upload-assets:
+    needs:
+      - test
+      - coverage-test
+    permissions:
+      contents: write
+      id-token: write
+    name: Upload Assets for ${{ matrix.platform }}
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            os: linux
+            target: x86_64-unknown-linux-gnu
+            binary_name: dcu-linux-x86_64
+          - platform: windows-2022
+            os: windows
+            target: x86_64-pc-windows-msvc
+            binary_name: dcu-windows-x86_64.exe
+          - platform: macos-14
+            os: macos
+            target: x86_64-apple-darwin
+            binary_name: dcu-darwin-x86_64
+          - platform: macos-14
+            os: macos
+            target: aarch64-apple-darwin
+            binary_name: dcu-darwin-arm64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          components: clippy, rustfmt
+      - name: Build Rust binary
+        run: cargo build --release --target ${{ matrix.target }} -p dcu-cli
+      - name: Rename binary
+        run: mv target/${{ matrix.target }}/release/dcu${{ matrix.os == 'windows' && '.exe' || '' }} ${{ matrix.binary_name }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: ${{ matrix.binary_name }}
