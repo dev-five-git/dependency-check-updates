@@ -241,6 +241,12 @@ jobs:
           args: --release --out dist
           working-directory: bridge/python
           manylinux: ${{ matrix.manylinux || '' }}
+          before-script-linux: |
+            # ring v0.17 requires __ARM_ARCH for ARM assembly;
+            # older manylinux2014 cross-GCC does not define it.
+            # These are target-specific, so harmless on non-ARM builds.
+            export CFLAGS_aarch64_unknown_linux_gnu="${CFLAGS_aarch64_unknown_linux_gnu:-} -D__ARM_ARCH=8"
+            export CFLAGS_armv7_unknown_linux_gnueabihf="${CFLAGS_armv7_unknown_linux_gnueabihf:-} -D__ARM_ARCH=7"
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
