@@ -14,6 +14,7 @@ dcu-core.workspace = true
 dcu-node.workspace = true
 dcu-rust.workspace = true
 dcu-python.workspace = true
+rustls.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 miette.workspace = true
