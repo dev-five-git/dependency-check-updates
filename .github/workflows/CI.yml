@@ -103,10 +103,33 @@ jobs:
           files: lcov.info
         if: github.ref == 'refs/heads/main'
 
+  # publish
+  changepacks:
+    name: changepacks
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    needs:
+      - test
+      - coverage-test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: changepacks/action@main
+        id: changepacks
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      changepacks: ${{ steps.changepacks.outputs.changepacks }}
+      release_assets_urls: ${{ steps.changepacks.outputs.release_assets_urls }}
+
+  # node
   node-build:
     needs:
       - test
       - coverage-test
+      - changepacks
+    if: ${{ contains(needs.changepacks.outputs.changepacks, 'bridge/node/package.json') }}
     strategy:
       fail-fast: false
       matrix:
@@ -168,11 +191,14 @@ jobs:
             bridge/node/dependency-check-updates.*.node
           if-no-files-found: error
 
+  # python
   python-build:
+    runs-on: ${{ matrix.runner }}
+    if: ${{ contains(needs.changepacks.outputs.changepacks, 'bridge/python/pyproject.toml') }}
     needs:
       - test
       - coverage-test
-    runs-on: ${{ matrix.runner }}
+      - changepacks
     strategy:
       fail-fast: false
       matrix:
@@ -253,10 +279,88 @@ jobs:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: bridge/python/dist
 
-  upload-assets:
+  node-publish:
+    name: Node Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     needs:
-      - test
-      - coverage-test
+      - changepacks
+      - node-build
+    if: ${{ contains(needs.changepacks.outputs.changepacks, 'bridge/node/package.json') }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install
+      - name: Build
+        run: bun run build
+        working-directory: bridge/node
+      - name: create npm dirs
+        run: bunx napi create-npm-dirs
+        working-directory: bridge/node
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: bridge/node/artifacts
+      - name: Move artifacts
+        run: bun run artifacts
+        working-directory: bridge/node
+      - name: List packages
+        run: ls -R ./npm
+        working-directory: bridge/node
+      - name: Publish
+        run: |
+          echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
+          npm publish --access public
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: bridge/node
+      - name: Upload Asset
+        uses: owjs3901/upload-github-release-asset@main
+        with:
+          upload_url: ${{ fromJson(needs.changepacks.outputs.release_assets_urls)['bridge/node/package.json'] }}
+          asset_path: bridge/node/npm/*/dependency-check-updates.*.node
+
+  python-publish:
+    name: Python Publish
+    runs-on: ubuntu-latest
+    if: ${{ contains(needs.changepacks.outputs.changepacks, 'bridge/python/pyproject.toml') }}
+    needs:
+      - changepacks
+      - python-build
+    permissions:
+      id-token: write
+      contents: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: 'wheels-*/*'
+      - name: Publish to PyPI
+        uses: PyO3/maturin-action@main
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        with:
+          command: upload
+          args: --non-interactive --skip-existing wheels-*/*
+      - name: List wheels
+        run: ls -R .
+      - name: Upload Asset
+        uses: owjs3901/upload-github-release-asset@main
+        with:
+          upload_url: ${{ fromJson(needs.changepacks.outputs.release_assets_urls)['bridge/python/pyproject.toml'] }}
+          asset_path: '*/*.whl'
+
+  upload-assets:
+    needs: changepacks
+    if: ${{ contains(needs.changepacks.outputs.changepacks, 'crates/cli/Cargo.toml') }}
     permissions:
       contents: write
       id-token: write
@@ -269,19 +373,19 @@ jobs:
           - platform: ubuntu-22.04
             os: linux
             target: x86_64-unknown-linux-gnu
-            binary_name: dcu-linux-x86_64
+            binary_name: dependency-check-updates-linux-x86_64
           - platform: windows-2022
             os: windows
             target: x86_64-pc-windows-msvc
-            binary_name: dcu-windows-x86_64.exe
+            binary_name: dependency-check-updates-windows-x86_64.exe
           - platform: macos-14
             os: macos
             target: x86_64-apple-darwin
-            binary_name: dcu-darwin-x86_64
+            binary_name: dependency-check-updates-darwin-x86_64
           - platform: macos-14
             os: macos
             target: aarch64-apple-darwin
-            binary_name: dcu-darwin-arm64
+            binary_name: dependency-check-updates-darwin-arm64
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -293,8 +397,8 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p dependency-check-updates-cli
       - name: Rename binary
         run: mv target/${{ matrix.target }}/release/dependency-check-updates${{ matrix.os == 'windows' && '.exe' || '' }} ${{ matrix.binary_name }}
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload Asset
+        uses: owjs3901/upload-github-release-asset@main
         with:
-          name: binary-${{ matrix.target }}
-          path: ${{ matrix.binary_name }}
+          upload_url: ${{ fromJson(needs.changepacks.outputs.release_assets_urls)['crates/cli/Cargo.toml'] }}
+          asset_path: ${{ matrix.binary_name }}
