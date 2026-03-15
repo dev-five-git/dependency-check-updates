@@ -2,7 +2,7 @@
   "name": "dependency-check-updates",
   "version": "0.1.0",
   "private": true,
-  "description": "dcu — multi-ecosystem dependency check & update tool",
+  "description": "dependency-check-updates — multi-ecosystem dependency check & update tool",
   "scripts": {
     "build": "cargo build --release && bun --workspaces run build && cd bridge/python && maturin build --release",
     "build:dev": "cargo build && cd bridge/node && bun x napi build --platform && cd ../.. && cd bridge/python && maturin develop",
@@ -11,8 +11,8 @@
     "test": "cargo test && bun --workspaces run test",
     "check": "bun run lint && bun run test",
     "clean": "cargo clean",
-    "run": "cargo run -p dcu-cli --",
-    "run:release": "cargo run -p dcu-cli --release --"
+    "run": "cargo run -p dependency-check-updates-cli --",
+    "run:release": "cargo run -p dependency-check-updates-cli --release --"
   },
   "workspaces": [
     "bridge/node"

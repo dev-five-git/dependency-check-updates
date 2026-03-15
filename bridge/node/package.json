@@ -1,14 +1,15 @@
 {
-  "name": "@dcu/cli",
+  "name": "@dependency-check-updates/cli",
   "version": "0.1.0",
-  "description": "dcu — multi-ecosystem dependency check & update CLI",
+  "description": "dependency-check-updates — multi-ecosystem dependency check & update CLI",
   "main": "main.js",
   "license": "MIT",
   "bin": {
-    "dcu": "./main.js"
+    "dcu": "./main.js",
+    "dependency-check-updates": "./main.js"
   },
   "napi": {
-    "binaryName": "dcu",
+    "binaryName": "dependency-check-updates",
     "targets": [
       "x86_64-pc-windows-msvc",
       "x86_64-apple-darwin",

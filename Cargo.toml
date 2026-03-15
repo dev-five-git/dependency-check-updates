@@ -9,12 +9,12 @@ license = "MIT"
 
 [workspace.dependencies]
 # Internal
-dcu-core = { path = "crates/dcu-core" }
-dcu-node = { path = "crates/dcu-node" }
-dcu-rust = { path = "crates/dcu-rust" }
-dcu-python = { path = "crates/dcu-python" }
-dcu-cli = { path = "crates/dcu-cli" }
-dcu-testkit = { path = "crates/dcu-testkit" }
+dependency-check-updates-core = { path = "crates/core" }
+dependency-check-updates-node = { path = "crates/node" }
+dependency-check-updates-rust = { path = "crates/rust" }
+dependency-check-updates-python = { path = "crates/python" }
+dependency-check-updates-cli = { path = "crates/cli" }
+dependency-check-updates-testkit = { path = "crates/testkit" }
 
 # External
 clap = { version = "4.6", features = ["derive"] }

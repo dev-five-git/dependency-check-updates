@@ -319,14 +319,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52560adf09603e58c9a7ee1fe1dcb95a16927b17c127f0ac02d6e768a0e25bc1"
 
 [[package]]
-name = "dcu-cli"
+name = "dependency-check-updates-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "dcu-core",
- "dcu-node",
- "dcu-python",
- "dcu-rust",
+ "dependency-check-updates-core",
+ "dependency-check-updates-node",
+ "dependency-check-updates-python",
+ "dependency-check-updates-rust",
  "futures",
  "miette",
  "owo-colors",
@@ -338,7 +338,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dcu-core"
+name = "dependency-check-updates-core"
 version = "0.1.0"
 dependencies = [
  "ignore",
@@ -351,10 +351,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dcu-napi"
+name = "dependency-check-updates-napi"
 version = "0.1.0"
 dependencies = [
- "dcu-cli",
+ "dependency-check-updates-cli",
  "napi",
  "napi-build",
  "napi-derive",
@@ -362,10 +362,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dcu-node"
+name = "dependency-check-updates-node"
 version = "0.1.0"
 dependencies = [
- "dcu-core",
+ "dependency-check-updates-core",
  "node-semver",
  "reqwest",
  "serde",
@@ -376,10 +376,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dcu-python"
+name = "dependency-check-updates-python"
 version = "0.1.0"
 dependencies = [
- "dcu-core",
+ "dependency-check-updates-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -390,18 +390,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "dcu-python-bridge"
+name = "dependency-check-updates-python-bridge"
 version = "0.1.0"
 dependencies = [
- "dcu-cli",
+ "dependency-check-updates-cli",
  "tokio",
 ]
 
 [[package]]
-name = "dcu-rust"
+name = "dependency-check-updates-rust"
 version = "0.1.0"
 dependencies = [
- "dcu-core",
+ "dependency-check-updates-core",
  "reqwest",
  "semver",
  "serde",
@@ -413,10 +413,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dcu-testkit"
+name = "dependency-check-updates-testkit"
 version = "0.1.0"
 dependencies = [
- "dcu-core",
+ "dependency-check-updates-core",
  "insta",
  "serde",
  "serde_json",
