@@ -774,4 +774,43 @@ mod tests {
         // Confirm it did NOT pick 19.0.0-rc.1 (which would happen if fast path was skipped)
         assert_ne!(result.selected.as_deref(), Some("19.0.0-rc.1"));
     }
+
+    #[test]
+    fn test_new_creates_registry() {
+        install_crypto_provider();
+        let _registry = NpmRegistry::new();
+        // Just verifying it doesn't panic
+    }
+
+    #[test]
+    fn test_default_creates_registry() {
+        install_crypto_provider();
+        let _registry = NpmRegistry::default();
+    }
+
+    #[test]
+    fn test_satisfies_range_invalid_range() {
+        assert!(!satisfies_range("not a range!!!", "1.0.0"));
+    }
+
+    #[test]
+    fn test_satisfies_range_invalid_version() {
+        assert!(!satisfies_range("^1.0.0", "not.a"));
+    }
+
+    #[test]
+    fn test_select_version_minor_unparseable_falls_back_to_latest() {
+        let latest = "2.0.0".to_owned();
+        let versions = make_versions(&["1.0.0", "2.0.0"]);
+        let result = select_version("*", Some(&latest), &versions, TargetLevel::Minor);
+        assert_eq!(result, Some("2.0.0".to_owned()));
+    }
+
+    #[test]
+    fn test_select_version_patch_unparseable_falls_back_to_latest() {
+        let latest = "2.0.0".to_owned();
+        let versions = make_versions(&["1.0.0", "2.0.0"]);
+        let result = select_version("*", Some(&latest), &versions, TargetLevel::Patch);
+        assert_eq!(result, Some("2.0.0".to_owned()));
+    }
 }

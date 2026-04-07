@@ -327,4 +327,16 @@ mod tests {
 
         assert_eq!(result.selected, Some("1.2.3".to_owned()));
     }
+
+    #[test]
+    fn test_new_creates_registry() {
+        install_crypto_provider();
+        let _registry = PyPiRegistry::new();
+    }
+
+    #[test]
+    fn test_default_creates_registry() {
+        install_crypto_provider();
+        let _registry = PyPiRegistry::default();
+    }
 }

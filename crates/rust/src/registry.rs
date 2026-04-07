@@ -593,4 +593,50 @@ mod tests {
         // 1.0.0 satisfies ^1.0.0, so selected is None
         assert_eq!(result.selected, None);
     }
+
+    #[test]
+    fn test_new_creates_registry() {
+        install_tls_provider();
+        let _registry = CratesIoRegistry::new();
+    }
+
+    #[test]
+    fn test_default_creates_registry() {
+        install_tls_provider();
+        let _registry = CratesIoRegistry::default();
+    }
+
+    #[test]
+    fn test_select_version_empty_versions() {
+        let latest = "1.0.0".to_owned();
+        let versions: Vec<semver::Version> = vec![];
+        let result = select_version("^1.0.0", Some(&latest), &versions, TargetLevel::Latest);
+        assert_eq!(result, Some("1.0.0".to_owned()));
+    }
+
+    #[test]
+    fn test_select_version_minor_unparseable_falls_back() {
+        let latest = "2.0.0".to_owned();
+        let versions = make_versions(&["1.0.0", "2.0.0"]);
+        let result = select_version("*", Some(&latest), &versions, TargetLevel::Minor);
+        assert_eq!(result, Some("2.0.0".to_owned()));
+    }
+
+    #[test]
+    fn test_select_version_patch_unparseable_falls_back() {
+        let latest = "2.0.0".to_owned();
+        let versions = make_versions(&["1.0.0", "2.0.0"]);
+        let result = select_version("*", Some(&latest), &versions, TargetLevel::Patch);
+        assert_eq!(result, Some("2.0.0".to_owned()));
+    }
+
+    #[test]
+    fn test_satisfies_req_invalid_req() {
+        assert!(!satisfies_req("not valid!!!", "1.0.0"));
+    }
+
+    #[test]
+    fn test_satisfies_req_invalid_version() {
+        assert!(!satisfies_req("^1.0.0", "not.valid"));
+    }
 }

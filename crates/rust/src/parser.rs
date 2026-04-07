@@ -505,6 +505,19 @@ serde = "1.0"
     }
 
     #[test]
+    fn test_array_dep_value_skipped() {
+        let toml = r#"
+[dependencies]
+serde = "1.0"
+weird = [1, 2, 3]
+"#;
+        let manifest = CargoTomlManifest::parse(toml).unwrap();
+        // "weird" with array value should be skipped
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].name, "serde");
+    }
+
+    #[test]
     fn test_skip_workspace_true_full_table_form() {
         // Full [dependencies.name] Table form with workspace = true
         let toml = r#"
