@@ -13,7 +13,7 @@ use napi_derive::napi;
 #[napi]
 #[cfg(not(tarpaulin_include))]
 pub async fn main() -> Result<()> {
-    dependency_check_updates_cli::main(&std::env::args().collect::<Vec<String>>())
+    dependency_check_updates::main(&std::env::args().collect::<Vec<String>>())
         .await
         .map_err(|e| Error::from_reason(e.to_string()))
 }
