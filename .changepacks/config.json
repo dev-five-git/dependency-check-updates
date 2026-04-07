@@ -1,7 +1,12 @@
 {
-  "ignore": [],
-  "baseBranch": "main",
-  "latestPackage": null,
-  "publish": {},
-  "updateOn": {}
+  "ignore": [
+    "**/*",
+    "!crates/*/Cargo.toml",
+    "!bridge/node/package.json",
+    "!bridge/python/pyproject.toml"
+  ],
+  "latestPackage": "crates/cli/Cargo.toml",
+  "updateOn": {
+    "crates/*": ["bridge/node/package.json", "bridge/python/pyproject.toml", "crates/cli/Cargo.toml", "crates/cli/Cargo.toml"]
+  }
 }
