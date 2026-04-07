@@ -935,4 +935,57 @@ mod tests {
             DependencySection::OptionalDependencies
         );
     }
+
+    #[test]
+    fn test_find_matching_brace_with_escaped_quotes_in_string() {
+        // String contains escaped quotes - the escape handler (line 279-281) must skip them
+        let text = r#"{ "key": "value with \" escaped \" quotes", "num": 1 }"#;
+        let result = find_matching_brace(text, 0);
+        assert_eq!(result, Some(text.len() - 1));
+    }
+
+    #[test]
+    fn test_find_matching_brace_escaped_backslash_in_string() {
+        // String ends with escaped backslash: "val\\" - must not treat next quote as escaped
+        let text = r#"{ "key": "val\\", "num": 1 }"#;
+        let result = find_matching_brace(text, 0);
+        assert_eq!(result, Some(text.len() - 1));
+    }
+
+    #[test]
+    fn test_scan_for_updates_version_mismatch() {
+        // The `from` version doesn't match what's in the JSON → should not find location
+        let input = "{\n  \"dependencies\": {\n    \"react\": \"^18.0.0\"\n  }\n}\n";
+        let updates = vec![PlannedUpdate {
+            name: "react".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^17.0.0".to_owned(), // doesn't match ^18.0.0 in JSON
+            to: "^19.0.0".to_owned(),
+        }];
+        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        assert!(locations.is_empty());
+    }
+
+    #[test]
+    fn test_scan_version_locations_with_escaped_dep_value() {
+        // Dependency section with value containing escaped chars in other fields
+        let input = r#"{
+  "description": "A \"great\" package",
+  "dependencies": {
+    "react": "^17.0.0"
+  }
+}
+"#;
+        let locations = JsonPatcher::scan_version_locations(input).unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].name, "react");
+    }
+
+    #[test]
+    fn test_find_char_skipping_strings_no_match() {
+        // Target char doesn't exist outside strings
+        let text = r#""contains : colon""#;
+        let result = find_char_skipping_strings(text, ':', 0);
+        assert!(result.is_none());
+    }
 }
