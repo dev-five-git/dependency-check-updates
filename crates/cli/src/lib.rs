@@ -193,15 +193,9 @@ pub async fn run(cli: &Cli) -> Result<bool, Box<dyn std::error::Error + Send + S
             let pypi = &pypi_registry;
             resolve_futures.push(async move {
                 let resolved = match job.manifest_ref.kind {
-                    ManifestKind::PackageJson => {
-                        npm.resolve_batch(&job.deps, cli.target).await
-                    }
-                    ManifestKind::CargoToml => {
-                        crates_io.resolve_batch(&job.deps, cli.target).await
-                    }
-                    ManifestKind::PyProjectToml => {
-                        pypi.resolve_batch(&job.deps, cli.target).await
-                    }
+                    ManifestKind::PackageJson => npm.resolve_batch(&job.deps, cli.target).await,
+                    ManifestKind::CargoToml => crates_io.resolve_batch(&job.deps, cli.target).await,
+                    ManifestKind::PyProjectToml => pypi.resolve_batch(&job.deps, cli.target).await,
                 };
                 (job_idx, resolved)
             });
