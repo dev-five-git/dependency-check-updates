@@ -403,6 +403,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "wiremock",
 ]
 
@@ -419,6 +420,7 @@ dependencies = [
  "tokio",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
  "wiremock",
 ]
 
@@ -444,6 +446,7 @@ dependencies = [
  "tokio",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
  "wiremock",
 ]
 

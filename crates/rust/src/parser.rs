@@ -582,4 +582,29 @@ features = ["derive"]
         assert_eq!(manifest.dependencies[0].name, "serde");
         assert_eq!(manifest.dependencies[0].current_req, "1.0");
     }
+
+    #[test]
+    fn test_apply_updates_unhandled_value_type() {
+        // A dependency entry that is an array (not string/inline-table/table)
+        // hits the catch-all `_ => {}` arm in update_dep_in_table.
+        let toml = r#"
+[dependencies]
+weird-dep = [1, 2, 3]
+serde = "1.0"
+"#;
+        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
+        // Array-valued dep is not collected as a dependency
+        assert_eq!(manifest.dependencies.len(), 1);
+
+        // Attempting to update the array-valued dep should succeed silently
+        let updates = vec![PlannedUpdate {
+            name: "weird-dep".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "1.0".to_owned(),
+            to: "2.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates).unwrap();
+        // Original value unchanged — the catch-all arm is a no-op
+        assert!(result.contains("weird-dep = [1, 2, 3]"));
+    }
 }

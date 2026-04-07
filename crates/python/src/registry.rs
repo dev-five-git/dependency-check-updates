@@ -149,17 +149,22 @@ impl PyPiRegistry {
             handles.push(handle);
         }
 
-        let mut results = Vec::with_capacity(deps.len());
-        for handle in handles {
-            match handle.await {
-                Ok(result) => results.push(result),
-                Err(e) => warn!("task join error: {e}"),
-            }
-        }
-
+        let mut results = collect_task_results(handles).await;
         results.sort_unstable_by_key(|(idx, _)| *idx);
         results
     }
+}
+
+/// Collect results from spawned tasks, logging any `JoinError`s (e.g. panics).
+async fn collect_task_results<T>(handles: Vec<tokio::task::JoinHandle<T>>) -> Vec<T> {
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => warn!("task join error: {e}"),
+        }
+    }
+    results
 }
 
 impl Default for PyPiRegistry {
@@ -338,5 +343,33 @@ mod tests {
     fn test_default_creates_registry() {
         install_crypto_provider();
         let _registry = PyPiRegistry::default();
+    }
+
+    #[tokio::test]
+    async fn test_collect_task_results_join_error() {
+        use dependency_check_updates_core::{DcuError, ResolvedVersion};
+
+        // Suppress panic output from the intentionally-panicking task.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let handles: Vec<tokio::task::JoinHandle<(usize, Result<ResolvedVersion, DcuError>)>> = vec![
+            tokio::spawn(async {
+                (
+                    0,
+                    Ok(ResolvedVersion {
+                        latest: Some("1.0.0".into()),
+                        selected: None,
+                    }),
+                )
+            }),
+            tokio::spawn(async { panic!("simulated join error") }),
+        ];
+        let results = super::collect_task_results(handles).await;
+
+        std::panic::set_hook(prev_hook);
+
+        // The panicking task is dropped; only 1 result survives.
+        assert_eq!(results.len(), 1);
     }
 }

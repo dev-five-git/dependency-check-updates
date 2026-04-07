@@ -21,6 +21,7 @@ thiserror.workspace = true
 wiremock.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 rustls.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

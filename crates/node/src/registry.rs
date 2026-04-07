@@ -192,19 +192,22 @@ impl NpmRegistry {
             handles.push(handle);
         }
 
-        let mut results = Vec::with_capacity(deps.len());
-        for handle in handles {
-            match handle.await {
-                Ok(result) => results.push(result),
-                Err(e) => {
-                    warn!("task join error: {e}");
-                }
-            }
-        }
-
+        let mut results = collect_task_results(handles).await;
         results.sort_unstable_by_key(|(idx, _)| *idx);
         results
     }
+}
+
+/// Collect results from spawned tasks, logging any `JoinError`s (e.g. panics).
+async fn collect_task_results<T>(handles: Vec<tokio::task::JoinHandle<T>>) -> Vec<T> {
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => warn!("task join error: {e}"),
+        }
+    }
+    results
 }
 
 impl Default for NpmRegistry {
@@ -812,5 +815,77 @@ mod tests {
         let versions = make_versions(&["1.0.0", "2.0.0"]);
         let result = select_version("*", Some(&latest), &versions, TargetLevel::Patch);
         assert_eq!(result, Some("2.0.0".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_non_latest_with_tracing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_crypto_provider();
+
+        // Install a trace-level subscriber so trace!() arguments are evaluated.
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_test_writer()
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/react"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(npm_response_body("19.0.0", &["17.0.0", "18.0.0", "19.0.0"])),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let registry = NpmRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "react".to_owned(),
+            current_req: "~17.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Greatest)
+            .await
+            .unwrap();
+        assert_eq!(result.selected.as_deref(), Some("19.0.0"));
+    }
+
+    #[tokio::test]
+    async fn test_collect_task_results_join_error() {
+        // Suppress panic output from the intentionally-panicking task.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let handles: Vec<tokio::task::JoinHandle<(usize, Result<ResolvedVersion, DcuError>)>> = vec![
+            tokio::spawn(async {
+                (
+                    0,
+                    Ok(ResolvedVersion {
+                        latest: Some("1.0.0".into()),
+                        selected: None,
+                    }),
+                )
+            }),
+            tokio::spawn(async { panic!("simulated join error") }),
+            tokio::spawn(async {
+                (
+                    2,
+                    Ok(ResolvedVersion {
+                        latest: Some("2.0.0".into()),
+                        selected: None,
+                    }),
+                )
+            }),
+        ];
+        let results = collect_task_results(handles).await;
+
+        std::panic::set_hook(prev_hook);
+
+        // The panicking task is dropped; only 2 results survive.
+        assert_eq!(results.len(), 2);
     }
 }

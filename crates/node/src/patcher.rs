@@ -59,19 +59,7 @@ impl JsonPatcher {
 
         for &(section, section_key) in DEPENDENCY_SECTIONS {
             if let Some(serde_json::Value::Object(deps)) = parsed.get(section_key) {
-                // Find the byte position of this section key in the text
-                let Some(section_key_pos) = find_json_key_position(text, section_key, 0) else {
-                    continue;
-                };
-
-                // Find the opening { of the section's value object
-                let search_from = section_key_pos + section_key.len() + 2; // skip past `"key"`
-                let Some(obj_start) = find_char_skipping_strings(text, '{', search_from) else {
-                    continue;
-                };
-
-                // Find the matching closing }
-                let Some(obj_end) = find_matching_brace(text, obj_start) else {
+                let Some((obj_start, obj_end)) = find_section_bounds(text, section_key) else {
                     continue;
                 };
 
@@ -128,17 +116,7 @@ impl JsonPatcher {
                 continue;
             };
 
-            // Find the byte position of this section key in the text
-            let Some(section_key_pos) = find_json_key_position(text, section_key, 0) else {
-                continue;
-            };
-
-            let search_from = section_key_pos + section_key.len() + 2;
-            let Some(obj_start) = find_char_skipping_strings(text, '{', search_from) else {
-                continue;
-            };
-
-            let Some(obj_end) = find_matching_brace(text, obj_start) else {
+            let Some((obj_start, obj_end)) = find_section_bounds(text, section_key) else {
                 continue;
             };
 
@@ -196,6 +174,19 @@ impl JsonPatcher {
 
         Ok(result)
     }
+}
+
+/// Find the byte range `(obj_start, obj_end)` of a dependency-section object
+/// in the raw JSON text.
+///
+/// Returns `None` if the section key cannot be located, the opening `{` is
+/// missing, or the matching `}` is missing.
+fn find_section_bounds(text: &str, section_key: &str) -> Option<(usize, usize)> {
+    let section_key_pos = find_json_key_position(text, section_key, 0)?;
+    let search_from = section_key_pos + section_key.len() + 2; // skip past `"key"`
+    let obj_start = find_char_skipping_strings(text, '{', search_from)?;
+    let obj_end = find_matching_brace(text, obj_start)?;
+    Some((obj_start, obj_end))
 }
 
 /// Find the byte position of a JSON key string in the text.
@@ -987,5 +978,58 @@ mod tests {
         let text = r#""contains : colon""#;
         let result = find_char_skipping_strings(text, ':', 0);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_section_bounds_key_not_found() {
+        // Section key doesn't exist in text at all
+        assert!(find_section_bounds("{}", "dependencies").is_none());
+    }
+
+    #[test]
+    fn test_find_section_bounds_no_brace_after_key() {
+        // Key exists and is followed by `:`, but no `{` after it (truncated text)
+        let text = r#"{"dependencies": "#;
+        assert!(find_section_bounds(text, "dependencies").is_none());
+    }
+
+    #[test]
+    fn test_find_section_bounds_no_matching_close_brace() {
+        // Key exists and `{` found, but no matching `}`
+        let text = r#"{"dependencies": {"#;
+        assert!(find_section_bounds(text, "dependencies").is_none());
+    }
+
+    #[test]
+    fn test_find_section_bounds_valid() {
+        let text = r#"{"dependencies": {"react": "^17.0.0"}}"#;
+        let bounds = find_section_bounds(text, "dependencies");
+        assert!(bounds.is_some());
+        let (start, end) = bounds.unwrap();
+        assert_eq!(&text[start..=end], r#"{"react": "^17.0.0"}"#);
+    }
+
+    #[test]
+    fn test_scan_version_locations_unicode_escaped_section_key() {
+        // serde_json decodes \u0065 → 'e', seeing "dependencies" as the key.
+        // But find_section_bounds searches for literal "dependencies" in the
+        // raw text and won't find "depend\u0065ncies" — exercises the continue.
+        let input = "{\"depend\\u0065ncies\": {\"react\": \"^17.0.0\"}}";
+        let locations = JsonPatcher::scan_version_locations(input).unwrap();
+        assert!(locations.is_empty());
+    }
+
+    #[test]
+    fn test_find_char_skipping_whitespace_empty_from_end() {
+        // When `from == text.len()`, the slice is empty → None
+        let text = "abc";
+        assert_eq!(find_char_skipping_whitespace(text, ':', text.len()), None);
+    }
+
+    #[test]
+    fn test_find_next_quote_empty_from_end() {
+        // When `from == text.len()`, the slice is empty → None
+        let text = "abc";
+        assert_eq!(find_next_quote(text, text.len()), None);
     }
 }
