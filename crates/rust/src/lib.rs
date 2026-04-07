@@ -48,3 +48,41 @@ impl ManifestHandler for RustHandler {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dependency_check_updates_core::DependencySection;
+    use dependency_check_updates_core::manifest::ManifestHandler;
+    use std::path::Path;
+
+    #[test]
+    fn test_rust_handler_parse() {
+        let handler = RustHandler;
+        let text = "[dependencies]\nserde = \"1.0\"\n";
+        let result = handler.parse(text, Path::new("Cargo.toml")).unwrap();
+        assert_eq!(result.dependencies.len(), 1);
+        assert_eq!(result.manifest_ref.kind, ManifestKind::CargoToml);
+    }
+
+    #[test]
+    fn test_rust_handler_parse_invalid() {
+        let handler = RustHandler;
+        let result = handler.parse("invalid [[[toml", Path::new("Cargo.toml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rust_handler_apply_updates() {
+        let handler = RustHandler;
+        let text = "[dependencies]\nserde = \"1.0\"\n";
+        let updates = vec![PlannedUpdate {
+            name: "serde".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "1.0".to_owned(),
+            to: "2.0".to_owned(),
+        }];
+        let result = handler.apply_updates(text, &updates).unwrap();
+        assert!(result.contains("\"2.0\""));
+    }
+}

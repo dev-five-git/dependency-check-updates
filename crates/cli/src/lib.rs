@@ -372,3 +372,244 @@ fn init_tracing(verbose: u8) {
         .compact()
         .init();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dependency_check_updates_core::{
+        DcuError, DependencySection, DependencySpec, ResolvedVersion,
+    };
+
+    #[test]
+    fn test_compute_updates_basic() {
+        let deps = vec![DependencySpec {
+            name: "react".to_owned(),
+            current_req: "^17.0.0".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("18.2.0".to_owned()),
+                selected: Some("18.2.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].name, "react");
+        assert_eq!(updates[0].to, "^18.2.0");
+    }
+
+    #[test]
+    fn test_compute_updates_already_up_to_date() {
+        let deps = vec![DependencySpec {
+            name: "react".to_owned(),
+            current_req: "^18.2.0".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("18.2.0".to_owned()),
+                selected: Some("18.2.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn test_compute_updates_preserves_tilde_prefix() {
+        let deps = vec![DependencySpec {
+            name: "lodash".to_owned(),
+            current_req: "~4.17.0".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("4.17.21".to_owned()),
+                selected: Some("4.17.21".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].to, "~4.17.21");
+    }
+
+    #[test]
+    fn test_compute_updates_preserves_gte_prefix() {
+        let deps = vec![DependencySpec {
+            name: "pkg".to_owned(),
+            current_req: ">=1.0.0".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("2.0.0".to_owned()),
+                selected: Some("2.0.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates[0].to, ">=2.0.0");
+    }
+
+    #[test]
+    fn test_compute_updates_no_prefix() {
+        let deps = vec![DependencySpec {
+            name: "pkg".to_owned(),
+            current_req: "1.0.0".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("2.0.0".to_owned()),
+                selected: Some("2.0.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates[0].to, "2.0.0");
+    }
+
+    #[test]
+    fn test_compute_updates_skips_failed_resolution() {
+        let deps = vec![DependencySpec {
+            name: "missing".to_owned(),
+            current_req: "^1.0.0".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved: Vec<(usize, Result<ResolvedVersion, DcuError>)> = vec![(
+            0,
+            Err(DcuError::RegistryLookup {
+                package: "missing".to_owned(),
+                detail: "not found".to_owned(),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn test_compute_updates_skips_no_selected() {
+        let deps = vec![DependencySpec {
+            name: "pkg".to_owned(),
+            current_req: "^1.0.0".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: None,
+                selected: None,
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn test_filter_deps_no_filters() {
+        let deps = vec![
+            DependencySpec {
+                name: "react".to_owned(),
+                current_req: "^18.0.0".to_owned(),
+                section: DependencySection::Dependencies,
+            },
+            DependencySpec {
+                name: "lodash".to_owned(),
+                current_req: "^4.0.0".to_owned(),
+                section: DependencySection::Dependencies,
+            },
+        ];
+        let result = filter_deps(&deps, &[], &[]);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_deps_include() {
+        let deps = vec![
+            DependencySpec {
+                name: "react".to_owned(),
+                current_req: "^18.0.0".to_owned(),
+                section: DependencySection::Dependencies,
+            },
+            DependencySpec {
+                name: "lodash".to_owned(),
+                current_req: "^4.0.0".to_owned(),
+                section: DependencySection::Dependencies,
+            },
+        ];
+        let include = vec!["react".to_owned()];
+        let result = filter_deps(&deps, &include, &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "react");
+    }
+
+    #[test]
+    fn test_filter_deps_exclude() {
+        let deps = vec![
+            DependencySpec {
+                name: "react".to_owned(),
+                current_req: "^18.0.0".to_owned(),
+                section: DependencySection::Dependencies,
+            },
+            DependencySpec {
+                name: "lodash".to_owned(),
+                current_req: "^4.0.0".to_owned(),
+                section: DependencySection::Dependencies,
+            },
+        ];
+        let exclude = vec!["lodash".to_owned()];
+        let result = filter_deps(&deps, &[], &exclude);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "react");
+    }
+
+    #[test]
+    fn test_filter_deps_include_and_exclude() {
+        let deps = vec![
+            DependencySpec {
+                name: "react".to_owned(),
+                current_req: "^18.0.0".to_owned(),
+                section: DependencySection::Dependencies,
+            },
+            DependencySpec {
+                name: "react-dom".to_owned(),
+                current_req: "^18.0.0".to_owned(),
+                section: DependencySection::Dependencies,
+            },
+            DependencySpec {
+                name: "lodash".to_owned(),
+                current_req: "^4.0.0".to_owned(),
+                section: DependencySection::Dependencies,
+            },
+        ];
+        let include = vec!["react".to_owned()];
+        let exclude = vec!["react-dom".to_owned()];
+        let result = filter_deps(&deps, &include, &exclude);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "react");
+    }
+
+    #[test]
+    fn test_filter_deps_partial_match() {
+        let deps = vec![
+            DependencySpec {
+                name: "@types/react".to_owned(),
+                current_req: "^18.0.0".to_owned(),
+                section: DependencySection::Dependencies,
+            },
+            DependencySpec {
+                name: "lodash".to_owned(),
+                current_req: "^4.0.0".to_owned(),
+                section: DependencySection::Dependencies,
+            },
+        ];
+        let include = vec!["react".to_owned()];
+        let result = filter_deps(&deps, &include, &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "@types/react");
+    }
+}

@@ -217,4 +217,109 @@ mod tests {
         assert!(output.contains("\"react\""));
         assert!(output.contains("\"^18.2.0\""));
     }
+
+    #[test]
+    fn test_colorize_version_major_with_color() {
+        let result = colorize_version("^2.0.0", BumpType::Major, true);
+        // Should contain ANSI escape codes for red
+        assert!(result.contains("2.0.0"));
+        assert_ne!(result, "^2.0.0"); // Should have color codes
+    }
+
+    #[test]
+    fn test_colorize_version_minor_with_color() {
+        let result = colorize_version("^1.1.0", BumpType::Minor, true);
+        assert!(result.contains("1.1.0"));
+        assert_ne!(result, "^1.1.0");
+    }
+
+    #[test]
+    fn test_colorize_version_patch_with_color() {
+        let result = colorize_version("^1.0.1", BumpType::Patch, true);
+        assert!(result.contains("1.0.1"));
+        assert_ne!(result, "^1.0.1");
+    }
+
+    #[test]
+    fn test_colorize_version_no_color() {
+        let result = colorize_version("^2.0.0", BumpType::Major, false);
+        assert_eq!(result, "^2.0.0");
+    }
+
+    #[test]
+    fn test_render_table_with_color() {
+        let updates = vec![PlannedUpdate {
+            name: "react".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^17.0.0".to_owned(),
+            to: "^18.2.0".to_owned(),
+        }];
+        let output = render_table(&updates, true);
+        assert!(output.contains("react"));
+        assert!(output.contains("^17.0.0"));
+        // Colored version should have ANSI codes
+        assert!(output.len() > "react  ^17.0.0  ->  ^18.2.0\n".len());
+    }
+
+    #[test]
+    fn test_render_footer_no_updates_with_color() {
+        let output = render_footer("package.json", false, false, true);
+        assert!(output.contains("All dependencies match"));
+    }
+
+    #[test]
+    fn test_render_footer_dry_run_with_color() {
+        let output = render_footer("package.json", false, true, true);
+        assert!(output.contains("dependency-check-updates -u"));
+    }
+
+    #[test]
+    fn test_render_header_checking() {
+        let output = render_header("package.json", false);
+        assert_eq!(output, "Checking package.json\n");
+    }
+
+    #[test]
+    fn test_render_header_upgrading() {
+        let output = render_header("Cargo.toml", true);
+        assert_eq!(output, "Upgrading Cargo.toml\n");
+    }
+
+    #[test]
+    fn test_parse_version_parts_with_prerelease() {
+        // "3-beta.1" should parse major=3
+        let (major, minor, patch) = parse_version_parts("3.0.0-beta.1");
+        assert_eq!(major, 3);
+        assert_eq!(minor, 0);
+        assert_eq!(patch, 0);
+    }
+
+    #[test]
+    fn test_render_json_empty() {
+        let output = render_json(&[]);
+        assert_eq!(output, "{}");
+    }
+
+    #[test]
+    fn test_render_json_multiple() {
+        let updates = vec![
+            PlannedUpdate {
+                name: "a".to_owned(),
+                section: DependencySection::Dependencies,
+                from: "1.0".to_owned(),
+                to: "2.0".to_owned(),
+            },
+            PlannedUpdate {
+                name: "b".to_owned(),
+                section: DependencySection::DevDependencies,
+                from: "3.0".to_owned(),
+                to: "4.0".to_owned(),
+            },
+        ];
+        let output = render_json(&updates);
+        assert!(output.contains("\"a\""));
+        assert!(output.contains("\"b\""));
+        assert!(output.contains("\"2.0\""));
+        assert!(output.contains("\"4.0\""));
+    }
 }

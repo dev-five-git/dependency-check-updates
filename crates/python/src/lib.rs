@@ -48,3 +48,41 @@ impl ManifestHandler for PythonHandler {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dependency_check_updates_core::DependencySection;
+    use dependency_check_updates_core::manifest::ManifestHandler;
+    use std::path::Path;
+
+    #[test]
+    fn test_python_handler_parse() {
+        let handler = PythonHandler;
+        let text = "[project]\nname = \"test\"\ndependencies = [\"requests>=2.28.0\"]\n";
+        let result = handler.parse(text, Path::new("pyproject.toml")).unwrap();
+        assert_eq!(result.dependencies.len(), 1);
+        assert_eq!(result.manifest_ref.kind, ManifestKind::PyProjectToml);
+    }
+
+    #[test]
+    fn test_python_handler_parse_invalid() {
+        let handler = PythonHandler;
+        let result = handler.parse("invalid [[[toml", Path::new("pyproject.toml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_python_handler_apply_updates() {
+        let handler = PythonHandler;
+        let text = "[project]\nname = \"test\"\ndependencies = [\"requests>=2.28.0\"]\n";
+        let updates = vec![PlannedUpdate {
+            name: "requests".to_owned(),
+            section: DependencySection::ProjectDependencies,
+            from: ">=2.28.0".to_owned(),
+            to: ">=2.31.0".to_owned(),
+        }];
+        let result = handler.apply_updates(text, &updates).unwrap();
+        assert!(result.contains("requests>=2.31.0"));
+    }
+}

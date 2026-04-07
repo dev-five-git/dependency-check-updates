@@ -438,4 +438,157 @@ dependencies = [
         assert_eq!(normalize_pep503("my.package"), "my_package");
         assert_eq!(normalize_pep503("MY_PACKAGE"), "my_package");
     }
+
+    #[test]
+    fn test_apply_updates_pep621() {
+        let toml = r#"
+[project]
+name = "my-project"
+dependencies = [
+    "requests>=2.28.0",
+    "flask~=2.0",
+]
+"#;
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "requests".to_owned(),
+            section: DependencySection::ProjectDependencies,
+            from: ">=2.28.0".to_owned(),
+            to: ">=2.31.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates).unwrap();
+        assert!(result.contains("requests>=2.31.0"));
+        assert!(result.contains("flask~=2.0"));
+    }
+
+    #[test]
+    fn test_apply_updates_poetry() {
+        let toml = r#"
+[tool.poetry.dependencies]
+python = "^3.8"
+requests = "^2.28.0"
+flask = "^2.0"
+"#;
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "requests".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^2.28.0".to_owned(),
+            to: "^2.31.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates).unwrap();
+        assert!(result.contains("\"^2.31.0\""));
+        assert!(result.contains("flask = \"^2.0\""));
+    }
+
+    #[test]
+    fn test_apply_updates_empty() {
+        let toml = r#"
+[project]
+name = "my-project"
+dependencies = [
+    "requests>=2.28.0",
+]
+"#;
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let result = manifest.apply_updates(&[]).unwrap();
+        assert!(result.contains("requests>=2.28.0"));
+    }
+
+    #[test]
+    fn test_apply_updates_pep508_with_extras() {
+        let toml = r#"
+[project]
+dependencies = [
+    "requests[security]>=2.28.0",
+]
+"#;
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].name, "requests");
+
+        let updates = vec![PlannedUpdate {
+            name: "requests".to_owned(),
+            section: DependencySection::ProjectDependencies,
+            from: ">=2.28.0".to_owned(),
+            to: ">=2.31.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates).unwrap();
+        assert!(result.contains("requests[security]>=2.31.0"));
+    }
+
+    #[test]
+    fn test_apply_updates_pep508_with_markers() {
+        let toml = r#"
+[project]
+dependencies = [
+    "pywin32>=300; sys_platform == 'win32'",
+]
+"#;
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "pywin32".to_owned(),
+            section: DependencySection::ProjectDependencies,
+            from: ">=300".to_owned(),
+            to: ">=306".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates).unwrap();
+        assert!(result.contains("pywin32>=306; sys_platform == 'win32'"));
+    }
+
+    #[test]
+    fn test_spec_str_matches_name_normalized() {
+        assert!(spec_str_matches_name("My-Package>=1.0", "my_package"));
+        assert!(spec_str_matches_name("my.package>=1.0", "my-package"));
+        assert!(!spec_str_matches_name("other>=1.0", "my-package"));
+    }
+
+    #[test]
+    fn test_replace_version_with_extras_and_markers() {
+        let result = replace_version_in_pep508(
+            "requests[security]>=2.28.0; python_version >= '3.8'",
+            ">=2.31.0",
+        );
+        assert_eq!(
+            result,
+            "requests[security]>=2.31.0; python_version >= '3.8'"
+        );
+    }
+
+    #[test]
+    fn test_parse_pep508_bare_name() {
+        let dep = parse_pep508_spec("requests", DependencySection::ProjectDependencies);
+        assert!(dep.is_none());
+    }
+
+    #[test]
+    fn test_parse_pep508_empty_name() {
+        let dep = parse_pep508_spec("", DependencySection::ProjectDependencies);
+        assert!(dep.is_none());
+    }
+
+    #[test]
+    fn test_invalid_toml_returns_error() {
+        let result = PyProjectManifest::parse("not valid [[[toml");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_poetry_table_form_version() {
+        let toml = r#"
+[tool.poetry.dependencies]
+python = "^3.8"
+
+[tool.poetry.dependencies.sqlalchemy]
+version = "^2.0"
+extras = ["asyncio"]
+"#;
+        let manifest = PyProjectManifest::parse(toml).unwrap();
+        let sa = manifest
+            .dependencies
+            .iter()
+            .find(|d| d.name == "sqlalchemy");
+        assert!(sa.is_some());
+        assert_eq!(sa.unwrap().current_req, "^2.0");
+    }
 }

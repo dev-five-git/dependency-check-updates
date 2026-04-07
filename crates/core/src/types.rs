@@ -234,4 +234,70 @@ mod tests {
     fn test_manifest_kind_display() {
         assert_eq!(ManifestKind::PackageJson.to_string(), "package.json");
     }
+
+    #[test]
+    fn test_manifest_kind_display_cargo_toml() {
+        assert_eq!(ManifestKind::CargoToml.to_string(), "Cargo.toml");
+    }
+
+    #[test]
+    fn test_manifest_kind_display_pyproject_toml() {
+        assert_eq!(ManifestKind::PyProjectToml.to_string(), "pyproject.toml");
+    }
+
+    #[test]
+    fn test_manifest_kind_from_path_cargo_toml() {
+        let path = std::path::Path::new("Cargo.toml");
+        assert_eq!(ManifestKind::from_path(path), Some(ManifestKind::CargoToml));
+    }
+
+    #[test]
+    fn test_manifest_kind_from_path_pyproject_toml() {
+        let path = std::path::Path::new("pyproject.toml");
+        assert_eq!(
+            ManifestKind::from_path(path),
+            Some(ManifestKind::PyProjectToml)
+        );
+    }
+
+    #[test]
+    fn test_dependency_section_display() {
+        assert_eq!(DependencySection::Dependencies.to_string(), "dependencies");
+        assert_eq!(
+            DependencySection::DevDependencies.to_string(),
+            "devDependencies"
+        );
+        assert_eq!(
+            DependencySection::PeerDependencies.to_string(),
+            "peerDependencies"
+        );
+        assert_eq!(
+            DependencySection::OptionalDependencies.to_string(),
+            "optionalDependencies"
+        );
+        assert_eq!(
+            DependencySection::BuildDependencies.to_string(),
+            "build-dependencies"
+        );
+        assert_eq!(
+            DependencySection::WorkspaceDependencies.to_string(),
+            "workspace.dependencies"
+        );
+        assert_eq!(
+            DependencySection::ProjectDependencies.to_string(),
+            "project.dependencies"
+        );
+    }
+
+    #[test]
+    fn test_dependency_section_label_peer_optional() {
+        assert_eq!(
+            DependencySection::PeerDependencies.label(),
+            "peerDependencies"
+        );
+        assert_eq!(
+            DependencySection::OptionalDependencies.label(),
+            "optionalDependencies"
+        );
+    }
 }

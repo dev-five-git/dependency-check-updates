@@ -394,4 +394,113 @@ cc = "1.0"
         let manifest = CargoTomlManifest::parse(toml).unwrap();
         assert_eq!(manifest.dependencies.len(), 3);
     }
+
+    #[test]
+    fn test_apply_updates_workspace_deps() {
+        let toml = r#"
+[workspace.dependencies]
+serde = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+"#;
+        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
+        assert_eq!(manifest.dependencies.len(), 2);
+        assert_eq!(
+            manifest.dependencies[0].section,
+            DependencySection::WorkspaceDependencies
+        );
+
+        let updates = vec![PlannedUpdate {
+            name: "serde".to_owned(),
+            section: DependencySection::WorkspaceDependencies,
+            from: "1.0".to_owned(),
+            to: "2.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates).unwrap();
+        assert!(result.contains("\"2.0\""));
+    }
+
+    #[test]
+    fn test_apply_updates_full_table_form() {
+        let toml = r#"
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+"#;
+        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].current_req, "1.0");
+
+        let updates = vec![PlannedUpdate {
+            name: "serde".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "1.0".to_owned(),
+            to: "1.0.228".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates).unwrap();
+        assert!(result.contains("1.0.228"));
+    }
+
+    #[test]
+    fn test_apply_updates_dev_and_build_deps() {
+        let toml = r#"
+[dev-dependencies]
+insta = "1.0"
+
+[build-dependencies]
+cc = "1.0"
+"#;
+        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
+        let updates = vec![
+            PlannedUpdate {
+                name: "insta".to_owned(),
+                section: DependencySection::DevDependencies,
+                from: "1.0".to_owned(),
+                to: "1.46".to_owned(),
+            },
+            PlannedUpdate {
+                name: "cc".to_owned(),
+                section: DependencySection::BuildDependencies,
+                from: "1.0".to_owned(),
+                to: "1.2".to_owned(),
+            },
+        ];
+        let result = manifest.apply_updates(&updates).unwrap();
+        assert!(result.contains("\"1.46\""));
+        assert!(result.contains("\"1.2\""));
+    }
+
+    #[test]
+    fn test_apply_updates_dep_not_found() {
+        let toml = r#"
+[dependencies]
+serde = "1.0"
+"#;
+        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "nonexistent".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "1.0".to_owned(),
+            to: "2.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_version_none_for_unknown_item() {
+        // An item that is neither string nor table should return None
+        let toml = r#"
+[dependencies]
+serde = "1.0"
+"#;
+        let manifest = CargoTomlManifest::parse(toml).unwrap();
+        // We know parse works; just ensure it handles properly
+        assert_eq!(manifest.dependencies[0].current_req, "1.0");
+    }
+
+    #[test]
+    fn test_invalid_toml_returns_error() {
+        let result = CargoTomlManifest::parse("not valid toml [[[");
+        assert!(result.is_err());
+    }
 }

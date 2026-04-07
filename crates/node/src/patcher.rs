@@ -649,4 +649,107 @@ mod tests {
         // Verify it's still valid JSON
         let _: serde_json::Value = serde_json::from_str(&result).unwrap();
     }
+
+    #[test]
+    fn test_scan_for_updates_basic() {
+        let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
+        let updates = vec![PlannedUpdate {
+            name: "react".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^17.0.0".to_owned(),
+            to: "^18.2.0".to_owned(),
+        }];
+        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].name, "react");
+        assert_eq!(locations[0].current_value, "^17.0.0");
+        assert_eq!(
+            &input[locations[0].value_start..locations[0].value_end],
+            "^17.0.0"
+        );
+    }
+
+    #[test]
+    fn test_scan_for_updates_empty() {
+        let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
+        let locations = JsonPatcher::scan_for_updates(input, &[]).unwrap();
+        assert!(locations.is_empty());
+    }
+
+    #[test]
+    fn test_scan_for_updates_multiple_sections() {
+        let input = r#"{
+  "dependencies": {
+    "react": "^17.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^4.0.0"
+  }
+}
+"#;
+        let updates = vec![
+            PlannedUpdate {
+                name: "react".to_owned(),
+                section: DependencySection::Dependencies,
+                from: "^17.0.0".to_owned(),
+                to: "^18.2.0".to_owned(),
+            },
+            PlannedUpdate {
+                name: "typescript".to_owned(),
+                section: DependencySection::DevDependencies,
+                from: "^4.0.0".to_owned(),
+                to: "^5.3.0".to_owned(),
+            },
+        ];
+        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        assert_eq!(locations.len(), 2);
+        let react = locations.iter().find(|l| l.name == "react").unwrap();
+        let ts = locations.iter().find(|l| l.name == "typescript").unwrap();
+        assert_eq!(react.section, DependencySection::Dependencies);
+        assert_eq!(ts.section, DependencySection::DevDependencies);
+    }
+
+    #[test]
+    fn test_scan_for_updates_only_targets_requested() {
+        let input = r#"{
+  "dependencies": {
+    "react": "^17.0.0",
+    "lodash": "^4.17.0"
+  }
+}
+"#;
+        // Only update react, not lodash
+        let updates = vec![PlannedUpdate {
+            name: "react".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^17.0.0".to_owned(),
+            to: "^18.2.0".to_owned(),
+        }];
+        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].name, "react");
+    }
+
+    #[test]
+    fn test_scan_for_updates_apply_roundtrip() {
+        let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
+        let expected = "{\n  \"dependencies\": {\n    \"react\": \"^18.2.0\"\n  }\n}\n";
+        let updates = vec![PlannedUpdate {
+            name: "react".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^17.0.0".to_owned(),
+            to: "^18.2.0".to_owned(),
+        }];
+        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        let patches: Vec<Patch> = locations
+            .iter()
+            .map(|loc| Patch {
+                start: loc.value_start,
+                end: loc.value_end,
+                new_value: "^18.2.0".to_owned(),
+            })
+            .collect();
+        let result = JsonPatcher::apply_patches(input, &patches).unwrap();
+        assert_eq!(result, expected);
+    }
 }

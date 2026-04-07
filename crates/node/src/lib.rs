@@ -83,3 +83,106 @@ pub fn is_node_ecosystem(dep: &DependencySpec) -> bool {
             | dependency_check_updates_core::DependencySection::OptionalDependencies
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dependency_check_updates_core::manifest::ManifestHandler;
+    use dependency_check_updates_core::{DependencySection, PlannedUpdate};
+    use std::path::Path;
+
+    #[test]
+    fn test_node_handler_parse() {
+        let handler = NodeHandler;
+        let text = r#"{"dependencies": {"react": "^18.0.0", "lodash": "^4.17.0"}}"#;
+        let result = handler.parse(text, Path::new("package.json")).unwrap();
+        assert_eq!(result.dependencies.len(), 2);
+        assert_eq!(result.manifest_ref.kind, ManifestKind::PackageJson);
+    }
+
+    #[test]
+    fn test_node_handler_parse_empty() {
+        let handler = NodeHandler;
+        let text = r#"{"name": "test"}"#;
+        let result = handler.parse(text, Path::new("package.json")).unwrap();
+        assert!(result.dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_node_handler_parse_invalid_json() {
+        let handler = NodeHandler;
+        let result = handler.parse("not json", Path::new("package.json"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_node_handler_apply_updates() {
+        let handler = NodeHandler;
+        let text = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
+        let updates = vec![PlannedUpdate {
+            name: "react".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^17.0.0".to_owned(),
+            to: "^18.2.0".to_owned(),
+        }];
+        let result = handler.apply_updates(text, &updates).unwrap();
+        assert!(result.contains("\"^18.2.0\""));
+        assert!(!result.contains("\"^17.0.0\""));
+    }
+
+    #[test]
+    fn test_node_handler_apply_updates_multiple() {
+        let handler = NodeHandler;
+        let text = r#"{
+  "dependencies": {
+    "react": "^17.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^4.0.0"
+  }
+}
+"#;
+        let updates = vec![
+            PlannedUpdate {
+                name: "react".to_owned(),
+                section: DependencySection::Dependencies,
+                from: "^17.0.0".to_owned(),
+                to: "^18.2.0".to_owned(),
+            },
+            PlannedUpdate {
+                name: "typescript".to_owned(),
+                section: DependencySection::DevDependencies,
+                from: "^4.0.0".to_owned(),
+                to: "^5.3.0".to_owned(),
+            },
+        ];
+        let result = handler.apply_updates(text, &updates).unwrap();
+        assert!(result.contains("\"^18.2.0\""));
+        assert!(result.contains("\"^5.3.0\""));
+    }
+
+    #[test]
+    fn test_node_handler_apply_updates_empty() {
+        let handler = NodeHandler;
+        let text = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
+        let result = handler.apply_updates(text, &[]).unwrap();
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_is_node_ecosystem() {
+        let dep = DependencySpec {
+            name: "react".to_owned(),
+            current_req: "^18.0.0".to_owned(),
+            section: DependencySection::Dependencies,
+        };
+        assert!(is_node_ecosystem(&dep));
+
+        let dep = DependencySpec {
+            name: "pkg".to_owned(),
+            current_req: "^1.0".to_owned(),
+            section: DependencySection::BuildDependencies,
+        };
+        assert!(!is_node_ecosystem(&dep));
+    }
+}
