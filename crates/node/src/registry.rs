@@ -466,4 +466,312 @@ mod tests {
         // No major=5 version found, so None
         assert_eq!(result, None);
     }
+
+    /// Install the rustls ring provider once per process so reqwest (rustls-no-provider) works.
+    fn install_crypto_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    fn npm_response_body(latest: &str, versions: &[&str]) -> serde_json::Value {
+        let mut vers_map = serde_json::Map::new();
+        for v in versions {
+            vers_map.insert(
+                (*v).to_owned(),
+                serde_json::Value::Object(serde_json::Map::new()),
+            );
+        }
+        serde_json::json!({
+            "dist-tags": { "latest": latest },
+            "versions": vers_map
+        })
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_latest() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_crypto_provider();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/react"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(npm_response_body(
+                "18.2.0",
+                &["17.0.0", "18.0.0", "18.2.0", "19.0.0-beta.1"],
+            )))
+            .mount(&mock_server)
+            .await;
+
+        let registry = NpmRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "react".to_owned(),
+            current_req: "^17.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .unwrap();
+        assert_eq!(result.latest.as_deref(), Some("18.2.0"));
+        // ^17.0.0 does not satisfy 18.2.0, so selected should be Some
+        assert_eq!(result.selected.as_deref(), Some("18.2.0"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_minor() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_crypto_provider();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/react"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(npm_response_body(
+                "19.0.0",
+                &["17.0.0", "17.1.0", "17.2.0", "18.0.0", "18.2.0", "19.0.0"],
+            )))
+            .mount(&mock_server)
+            .await;
+
+        let registry = NpmRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "react".to_owned(),
+            // ~17.0.0 means >=17.0.0 <17.1.0, so 17.2.0 won't satisfy → update needed
+            current_req: "~17.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Minor)
+            .await
+            .unwrap();
+        // Minor stays on same major (17), picks highest: 17.2.0; outside ~17.0.0 range
+        assert_eq!(result.selected.as_deref(), Some("17.2.0"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_patch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_crypto_provider();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/react"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(npm_response_body(
+                "18.2.0",
+                &["17.0.0", "17.0.1", "17.0.2", "17.1.0", "18.0.0", "18.2.0"],
+            )))
+            .mount(&mock_server)
+            .await;
+
+        let registry = NpmRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "react".to_owned(),
+            // =17.0.0 is exact pin, so 17.0.2 won't satisfy → update needed
+            current_req: "=17.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Patch)
+            .await
+            .unwrap();
+        // Patch stays on same major.minor (17.0), picks highest patch: 17.0.2
+        assert_eq!(result.selected.as_deref(), Some("17.0.2"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_already_satisfied() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_crypto_provider();
+        let mock_server = MockServer::start().await;
+        // latest is 17.0.1 which satisfies ^17.0.0
+        Mock::given(method("GET"))
+            .and(path("/react"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(npm_response_body("17.0.1", &["17.0.0", "17.0.1"])),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let registry = NpmRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "react".to_owned(),
+            current_req: "^17.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .unwrap();
+        // 17.0.1 satisfies ^17.0.0, so selected should be None (no update needed)
+        assert_eq!(result.selected, None);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_404() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_crypto_provider();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/nonexistent-pkg"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let registry = NpmRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "nonexistent-pkg".to_owned(),
+            current_req: "^1.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry.resolve_version(&dep, TargetLevel::Latest).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("404") || err_str.contains("nonexistent-pkg"),
+            "unexpected error: {err_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_batch_concurrent() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_crypto_provider();
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/react"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(npm_response_body("18.2.0", &["17.0.0", "18.0.0", "18.2.0"])),
+            )
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/lodash"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(npm_response_body(
+                "4.17.21",
+                &["4.0.0", "4.17.0", "4.17.21"],
+            )))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/axios"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(npm_response_body("1.6.0", &["0.27.0", "1.0.0", "1.6.0"])),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let registry = NpmRegistry::with_base_url(&mock_server.uri());
+        let deps = vec![
+            DependencySpec {
+                name: "react".to_owned(),
+                current_req: "^17.0.0".to_owned(),
+                section: dependency_check_updates_core::DependencySection::Dependencies,
+            },
+            DependencySpec {
+                name: "lodash".to_owned(),
+                current_req: "^4.0.0".to_owned(),
+                section: dependency_check_updates_core::DependencySection::Dependencies,
+            },
+            DependencySpec {
+                name: "axios".to_owned(),
+                current_req: "^0.27.0".to_owned(),
+                section: dependency_check_updates_core::DependencySection::Dependencies,
+            },
+        ];
+
+        let results = registry.resolve_batch(&deps, TargetLevel::Latest).await;
+        assert_eq!(results.len(), 3);
+
+        // Results are ordered by original index
+        let (idx0, ref res0) = results[0];
+        let (idx1, ref res1) = results[1];
+        let (idx2, ref res2) = results[2];
+        assert_eq!(idx0, 0);
+        assert_eq!(idx1, 1);
+        assert_eq!(idx2, 2);
+
+        assert_eq!(res0.as_ref().unwrap().latest.as_deref(), Some("18.2.0"));
+        assert_eq!(res1.as_ref().unwrap().latest.as_deref(), Some("4.17.21"));
+        assert_eq!(res2.as_ref().unwrap().latest.as_deref(), Some("1.6.0"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_scoped_package() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_crypto_provider();
+        let mock_server = MockServer::start().await;
+        // Scoped package @types/react -> URL path /@types%2Freact
+        Mock::given(method("GET"))
+            .and(path("/@types%2Freact"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(npm_response_body("18.2.0", &["17.0.0", "18.0.0", "18.2.0"])),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let registry = NpmRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "@types/react".to_owned(),
+            current_req: "^17.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .unwrap();
+        assert_eq!(result.latest.as_deref(), Some("18.2.0"));
+        assert_eq!(result.selected.as_deref(), Some("18.2.0"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_latest_fast_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_crypto_provider();
+        let mock_server = MockServer::start().await;
+        // Provide versions that include pre-releases; Latest fast path should return
+        // dist-tags.latest directly without filtering pre-releases from version list.
+        Mock::given(method("GET"))
+            .and(path("/react"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(npm_response_body(
+                "18.2.0",
+                &["18.0.0", "18.2.0", "19.0.0-beta.1", "19.0.0-rc.1"],
+            )))
+            .mount(&mock_server)
+            .await;
+
+        let registry = NpmRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "react".to_owned(),
+            current_req: "^17.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .unwrap();
+        // Fast path: should return exactly dist-tags.latest, not the highest version
+        assert_eq!(result.latest.as_deref(), Some("18.2.0"));
+        assert_eq!(result.selected.as_deref(), Some("18.2.0"));
+        // Confirm it did NOT pick 19.0.0-rc.1 (which would happen if fast path was skipped)
+        assert_ne!(result.selected.as_deref(), Some("19.0.0-rc.1"));
+    }
 }

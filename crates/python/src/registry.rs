@@ -170,11 +170,161 @@ impl Default for PyPiRegistry {
 
 #[cfg(test)]
 mod tests {
+    use super::PyPiRegistry;
+
+    /// Install the rustls ring provider once per process so reqwest (rustls-no-provider) works.
+    fn install_crypto_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     #[test]
     fn test_normalized_name() {
         // PyPI normalizes names: underscores -> hyphens, lowercase
         let name = "My_Package";
         let normalized = name.to_lowercase().replace('_', "-");
         assert_eq!(normalized, "my-package");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_latest() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        install_crypto_provider();
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/requests/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": "2.31.0"}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = PyPiRegistry::with_base_url(&mock_server.uri());
+        let dep = dependency_check_updates_core::DependencySpec {
+            name: "requests".to_owned(),
+            current_req: ">=2.28.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::ProjectDependencies,
+        };
+
+        let result = registry
+            .resolve_version(&dep, dependency_check_updates_core::TargetLevel::Latest)
+            .await
+            .expect("resolve_version should succeed");
+
+        assert_eq!(result.selected, Some("2.31.0".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_404() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        install_crypto_provider();
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/nonexistent-package/json"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let registry = PyPiRegistry::with_base_url(&mock_server.uri());
+        let dep = dependency_check_updates_core::DependencySpec {
+            name: "nonexistent-package".to_owned(),
+            current_req: ">=1.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::ProjectDependencies,
+        };
+
+        let result = registry
+            .resolve_version(&dep, dependency_check_updates_core::TargetLevel::Latest)
+            .await;
+
+        assert!(result.is_err(), "expected error for 404 response");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_batch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        install_crypto_provider();
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/requests/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": "2.31.0"}
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/flask/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": "3.0.0"}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = PyPiRegistry::with_base_url(&mock_server.uri());
+        let deps = vec![
+            dependency_check_updates_core::DependencySpec {
+                name: "requests".to_owned(),
+                current_req: ">=2.28.0".to_owned(),
+                section: dependency_check_updates_core::DependencySection::ProjectDependencies,
+            },
+            dependency_check_updates_core::DependencySpec {
+                name: "flask".to_owned(),
+                current_req: ">=2.0.0".to_owned(),
+                section: dependency_check_updates_core::DependencySection::ProjectDependencies,
+            },
+        ];
+
+        let results = registry
+            .resolve_batch(&deps, dependency_check_updates_core::TargetLevel::Latest)
+            .await;
+
+        assert_eq!(results.len(), 2);
+        let (idx0, ref res0) = results[0];
+        let (idx1, ref res1) = results[1];
+        assert_eq!(idx0, 0);
+        assert_eq!(idx1, 1);
+        assert_eq!(
+            res0.as_ref().expect("requests should resolve").selected,
+            Some("2.31.0".to_owned())
+        );
+        assert_eq!(
+            res1.as_ref().expect("flask should resolve").selected,
+            Some("3.0.0".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_normalized_name() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        install_crypto_provider();
+
+        let mock_server = MockServer::start().await;
+        // URL must use normalized name: My_Package -> my-package
+        Mock::given(method("GET"))
+            .and(path("/my-package/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": "1.2.3"}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = PyPiRegistry::with_base_url(&mock_server.uri());
+        let dep = dependency_check_updates_core::DependencySpec {
+            name: "My_Package".to_owned(),
+            current_req: ">=1.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::ProjectDependencies,
+        };
+
+        let result = registry
+            .resolve_version(&dep, dependency_check_updates_core::TargetLevel::Latest)
+            .await
+            .expect("resolve_version should succeed with normalized name");
+
+        assert_eq!(result.selected, Some("1.2.3".to_owned()));
     }
 }

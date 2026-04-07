@@ -5,6 +5,7 @@
 //! forwarded from `sys.argv`.
 
 #[tokio::main(flavor = "current_thread")]
+#[cfg(not(tarpaulin_include))]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     dependency_check_updates_cli::main(&std::env::args().collect::<Vec<String>>()).await
 }

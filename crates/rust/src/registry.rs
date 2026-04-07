@@ -255,6 +255,10 @@ fn parse_base_version(req_str: &str) -> Option<semver::Version> {
 mod tests {
     use super::*;
 
+    fn install_tls_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     fn make_versions(vers: &[&str]) -> Vec<semver::Version> {
         let mut v: Vec<_> = vers
             .iter()
@@ -306,5 +310,287 @@ mod tests {
         let versions = make_versions(&["1.0.0", "2.0.0-rc.1"]);
         let result = select_version("^1.0.0", Some(&latest), &versions, TargetLevel::Latest);
         assert_eq!(result, Some("1.0.0".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_latest() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_tls_provider();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/crates/serde/versions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [
+                    {"num": "2.0.0", "yanked": false},
+                    {"num": "1.5.0", "yanked": false},
+                    {"num": "1.0.0", "yanked": false},
+                    {"num": "0.9.0", "yanked": true}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "serde".to_owned(),
+            current_req: "^1.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .unwrap();
+        assert_eq!(result.latest, Some("2.0.0".to_owned()));
+        assert_eq!(result.selected, Some("2.0.0".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_minor() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_tls_provider();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/crates/serde/versions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [
+                    {"num": "2.0.0", "yanked": false},
+                    {"num": "1.5.0", "yanked": false},
+                    {"num": "1.0.0", "yanked": false}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "serde".to_owned(),
+            current_req: "=1.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Minor)
+            .await
+            .unwrap();
+        // Minor: stays on same major (1.x), highest is 1.5.0
+        assert_eq!(result.selected, Some("1.5.0".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_patch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_tls_provider();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/crates/serde/versions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [
+                    {"num": "1.1.0", "yanked": false},
+                    {"num": "1.0.5", "yanked": false},
+                    {"num": "1.0.3", "yanked": false},
+                    {"num": "1.0.0", "yanked": false},
+                    {"num": "2.0.0", "yanked": false}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "serde".to_owned(),
+            current_req: "=1.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Patch)
+            .await
+            .unwrap();
+        // Patch: stays on same major.minor (1.0.x), highest is 1.0.5
+        assert_eq!(result.selected, Some("1.0.5".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_skips_yanked() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_tls_provider();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/crates/serde/versions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [
+                    {"num": "2.0.0", "yanked": true},
+                    {"num": "1.5.0", "yanked": false},
+                    {"num": "1.0.0", "yanked": false}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "serde".to_owned(),
+            current_req: "=1.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .unwrap();
+        // 2.0.0 is yanked, so latest non-yanked is 1.5.0
+        assert_eq!(result.latest, Some("1.5.0".to_owned()));
+        assert_eq!(result.selected, Some("1.5.0".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_already_satisfied() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_tls_provider();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/crates/serde/versions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [
+                    {"num": "1.5.0", "yanked": false},
+                    {"num": "1.0.0", "yanked": false}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
+        // current_req ^1.0.0 already satisfies 1.5.0 (caret allows minor/patch bumps)
+        let dep = DependencySpec {
+            name: "serde".to_owned(),
+            current_req: "^1.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .unwrap();
+        // 1.5.0 satisfies ^1.0.0, so selected should be None
+        assert_eq!(result.selected, None);
+        assert_eq!(result.latest, Some("1.5.0".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_404() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_tls_provider();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/crates/nonexistent/versions"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "nonexistent".to_owned(),
+            current_req: "^1.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry.resolve_version(&dep, TargetLevel::Latest).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DcuError::RegistryLookup { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_batch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_tls_provider();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/crates/serde/versions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [
+                    {"num": "2.0.0", "yanked": false},
+                    {"num": "1.0.0", "yanked": false}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/crates/tokio/versions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [
+                    {"num": "1.40.0", "yanked": false},
+                    {"num": "1.0.0", "yanked": false}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
+        let deps = vec![
+            DependencySpec {
+                name: "serde".to_owned(),
+                current_req: "^1.0.0".to_owned(),
+                section: dependency_check_updates_core::DependencySection::Dependencies,
+            },
+            DependencySpec {
+                name: "tokio".to_owned(),
+                current_req: "^1.0.0".to_owned(),
+                section: dependency_check_updates_core::DependencySection::Dependencies,
+            },
+        ];
+        let results = registry.resolve_batch(&deps, TargetLevel::Latest).await;
+        assert_eq!(results.len(), 2);
+        // Results are sorted by index
+        let (idx0, ref res0) = results[0];
+        let (idx1, ref res1) = results[1];
+        assert_eq!(idx0, 0);
+        assert_eq!(idx1, 1);
+        assert_eq!(res0.as_ref().unwrap().latest, Some("2.0.0".to_owned()));
+        assert_eq!(res1.as_ref().unwrap().latest, Some("1.40.0".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_skips_prerelease() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_tls_provider();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/crates/serde/versions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [
+                    {"num": "2.0.0-alpha.1", "yanked": false},
+                    {"num": "1.5.0-rc.1", "yanked": false},
+                    {"num": "1.0.0", "yanked": false}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "serde".to_owned(),
+            current_req: "^1.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .unwrap();
+        // Pre-release versions should be skipped; only stable 1.0.0 is available
+        assert_eq!(result.latest, Some("1.0.0".to_owned()));
+        // 1.0.0 satisfies ^1.0.0, so selected is None
+        assert_eq!(result.selected, None);
     }
 }

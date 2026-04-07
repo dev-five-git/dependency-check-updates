@@ -591,4 +591,68 @@ extras = ["asyncio"]
         assert!(sa.is_some());
         assert_eq!(sa.unwrap().current_req, "^2.0");
     }
+
+    #[test]
+    fn test_poetry_inline_table_version() {
+        let toml = r#"
+[tool.poetry.dependencies]
+python = "^3.8"
+flask = {version = "^2.0", optional = true}
+"#;
+        let manifest = PyProjectManifest::parse(toml).unwrap();
+        let flask = manifest.dependencies.iter().find(|d| d.name == "flask");
+        assert!(flask.is_some());
+        assert_eq!(flask.unwrap().current_req, "^2.0");
+    }
+
+    #[test]
+    fn test_apply_updates_poetry_table_form() {
+        let toml = r#"
+[tool.poetry.dependencies]
+python = "^3.8"
+requests = "^2.28.0"
+"#;
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "requests".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^2.28.0".to_owned(),
+            to: "^2.31.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates).unwrap();
+        assert!(result.contains("\"^2.31.0\""));
+        // python constraint should remain unchanged
+        assert!(result.contains("python = \"^3.8\""));
+    }
+
+    #[test]
+    fn test_apply_updates_nonexistent_dep_silently_skipped() {
+        let toml = r#"
+[project]
+dependencies = ["requests>=2.28.0"]
+"#;
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "nonexistent".to_owned(),
+            section: DependencySection::ProjectDependencies,
+            from: ">=1.0".to_owned(),
+            to: ">=2.0".to_owned(),
+        }];
+        // Should succeed without error, just skip the missing dep
+        let result = manifest.apply_updates(&updates).unwrap();
+        assert!(result.contains("requests>=2.28.0"));
+    }
+
+    #[test]
+    fn test_extract_poetry_version_bool_returns_none() {
+        // A boolean value should return None from extract_poetry_version
+        let toml = r#"
+[tool.poetry.dependencies]
+python = "^3.8"
+my-pkg = true
+"#;
+        let manifest = PyProjectManifest::parse(toml).unwrap();
+        // "my-pkg = true" is not a valid version spec, should be skipped
+        assert_eq!(manifest.dependencies.len(), 0);
+    }
 }

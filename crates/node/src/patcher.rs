@@ -752,4 +752,187 @@ mod tests {
         let result = JsonPatcher::apply_patches(input, &patches).unwrap();
         assert_eq!(result, expected);
     }
+
+    #[test]
+    fn test_overlapping_patches_error() {
+        let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
+        let patches = vec![
+            Patch {
+                start: 5,
+                end: 15,
+                new_value: "a".to_owned(),
+            },
+            Patch {
+                start: 10,
+                end: 20,
+                new_value: "b".to_owned(),
+            },
+        ];
+        let result = JsonPatcher::apply_patches(input, &patches);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_scan_version_locations_escaped_strings() {
+        // JSON with escaped quotes in a value - should still find deps correctly
+        let input = r#"{
+  "name": "test \"project\"",
+  "dependencies": {
+    "react": "^17.0.0"
+  }
+}
+"#;
+        let locations = JsonPatcher::scan_version_locations(input).unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].name, "react");
+    }
+
+    #[test]
+    fn test_scan_version_locations_nested_braces() {
+        // JSON with nested objects that aren't dependency sections
+        let input = r#"{
+  "scripts": {
+    "build": "echo {test}"
+  },
+  "dependencies": {
+    "react": "^17.0.0"
+  }
+}
+"#;
+        let locations = JsonPatcher::scan_version_locations(input).unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].name, "react");
+    }
+
+    #[test]
+    fn test_scan_version_locations_no_dep_sections() {
+        let input = r#"{"name": "test", "version": "1.0.0"}"#;
+        let locations = JsonPatcher::scan_version_locations(input).unwrap();
+        assert!(locations.is_empty());
+    }
+
+    #[test]
+    fn test_scan_for_updates_missing_section() {
+        // Update requests a section that doesn't exist in JSON
+        let input = r#"{"dependencies": {"react": "^17.0.0"}}"#;
+        let updates = vec![PlannedUpdate {
+            name: "typescript".to_owned(),
+            section: DependencySection::DevDependencies,
+            from: "^4.0.0".to_owned(),
+            to: "^5.3.0".to_owned(),
+        }];
+        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        assert!(locations.is_empty());
+    }
+
+    #[test]
+    fn test_scan_for_updates_dep_not_found_in_section() {
+        let input = r#"{"dependencies": {"react": "^17.0.0"}}"#;
+        let updates = vec![PlannedUpdate {
+            name: "nonexistent".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^1.0.0".to_owned(),
+            to: "^2.0.0".to_owned(),
+        }];
+        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        assert!(locations.is_empty());
+    }
+
+    #[test]
+    fn test_find_matching_brace_with_string_containing_braces() {
+        let text = r#"{ "a": "}{}{", "b": 1 }"#;
+        let result = find_matching_brace(text, 0);
+        assert_eq!(result, Some(text.len() - 1));
+    }
+
+    #[test]
+    fn test_find_matching_brace_not_a_brace() {
+        assert_eq!(find_matching_brace("abc", 0), None);
+    }
+
+    #[test]
+    fn test_find_matching_brace_unmatched() {
+        assert_eq!(find_matching_brace("{ unclosed", 0), None);
+    }
+
+    #[test]
+    fn test_find_char_skipping_strings_with_escaped_quotes() {
+        // Find `:` while skipping a string that contains escaped quotes
+        let text = r#""key with \" escaped": value"#;
+        let result = find_char_skipping_strings(text, ':', 0);
+        // The colon after the key string
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_find_json_key_position_skips_value_match() {
+        // "dependencies" appears as a value, not a key - should be skipped
+        let input = r#"{"name": "dependencies", "dependencies": {"react": "^17.0.0"}}"#;
+        let pos = find_json_key_position(input, "dependencies", 0);
+        assert!(pos.is_some());
+        // Should find the key, not the value
+        let found_pos = pos.unwrap();
+        assert!(found_pos > 10); // Should be after the value occurrence
+    }
+
+    #[test]
+    fn test_find_json_key_position_not_found() {
+        let input = r#"{"name": "test"}"#;
+        let pos = find_json_key_position(input, "nonexistent", 0);
+        assert!(pos.is_none());
+    }
+
+    #[test]
+    fn test_find_char_skipping_whitespace_no_match() {
+        // Non-whitespace, non-target character found first
+        let result = find_char_skipping_whitespace("abc:", ':', 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_char_skipping_whitespace_immediate() {
+        let result = find_char_skipping_whitespace(":rest", ':', 0);
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn test_find_next_quote_non_quote_char() {
+        let result = find_next_quote("abc\"", 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_next_quote_with_whitespace() {
+        let result = find_next_quote("  \"hello\"", 0);
+        assert_eq!(result, Some(2));
+    }
+
+    #[test]
+    fn test_scan_version_locations_peer_dependencies() {
+        let input = r#"{
+  "peerDependencies": {
+    "react": "^17.0.0 || ^18.0.0"
+  }
+}
+"#;
+        let locations = JsonPatcher::scan_version_locations(input).unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].section, DependencySection::PeerDependencies);
+    }
+
+    #[test]
+    fn test_scan_version_locations_optional_dependencies() {
+        let input = r#"{
+  "optionalDependencies": {
+    "fsevents": "^2.3.0"
+  }
+}
+"#;
+        let locations = JsonPatcher::scan_version_locations(input).unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(
+            locations[0].section,
+            DependencySection::OptionalDependencies
+        );
+    }
 }

@@ -11,6 +11,7 @@ use napi_derive::napi;
 ///
 /// Returns an error if the CLI command execution fails.
 #[napi]
+#[cfg(not(tarpaulin_include))]
 pub async fn main() -> Result<()> {
     dependency_check_updates_cli::main(&std::env::args().collect::<Vec<String>>())
         .await

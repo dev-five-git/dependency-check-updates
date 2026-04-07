@@ -503,4 +503,70 @@ serde = "1.0"
         let result = CargoTomlManifest::parse("not valid toml [[[");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_skip_workspace_true_full_table_form() {
+        // Full [dependencies.name] Table form with workspace = true
+        let toml = r#"
+[dependencies.serde]
+workspace = true
+
+[dependencies]
+tokio = "1.0"
+"#;
+        let manifest = CargoTomlManifest::parse(toml).unwrap();
+        // serde with workspace=true should be skipped
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].name, "tokio");
+    }
+
+    #[test]
+    fn test_apply_updates_non_applicable_section() {
+        // ProjectDependencies is not a Cargo.toml section - should be silently skipped
+        let toml = r#"
+[dependencies]
+serde = "1.0"
+"#;
+        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "requests".to_owned(),
+            section: DependencySection::ProjectDependencies,
+            from: ">=2.28.0".to_owned(),
+            to: ">=2.31.0".to_owned(),
+        }];
+        // Should not error - just skip the non-applicable section
+        let result = manifest.apply_updates(&updates).unwrap();
+        assert!(result.contains("serde = \"1.0\""));
+    }
+
+    #[test]
+    fn test_apply_updates_workspace_table_form() {
+        let toml = r#"
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+"#;
+        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "serde".to_owned(),
+            section: DependencySection::WorkspaceDependencies,
+            from: "1.0".to_owned(),
+            to: "1.0.228".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates).unwrap();
+        assert!(result.contains("\"1.0.228\""));
+    }
+
+    #[test]
+    fn test_full_table_form_version() {
+        // Full table form: [dependencies.serde] version = "1.0"
+        let toml = r#"
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+"#;
+        let manifest = CargoTomlManifest::parse(toml).unwrap();
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].name, "serde");
+        assert_eq!(manifest.dependencies[0].current_req, "1.0");
+    }
 }

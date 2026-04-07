@@ -24,5 +24,13 @@ tracing-subscriber.workspace = true
 futures.workspace = true
 owo-colors.workspace = true
 
+[dev-dependencies]
+wiremock.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tempfile.workspace = true
+dependency-check-updates-node.workspace = true
+dependency-check-updates-rust.workspace = true
+dependency-check-updates-python.workspace = true
+
 [lints]
 workspace = true
