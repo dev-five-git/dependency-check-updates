@@ -1,6 +1,6 @@
 {
   "name": "@dependency-check-updates/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "dependency-check-updates — multi-ecosystem dependency check & update CLI",
   "main": "main.js",
   "license": "MIT",

@@ -1,6 +1,6 @@
 [package]
 name = "dependency-check-updates-python"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python ecosystem support for dependency-check-updates: pyproject.toml parsing (toml_edit) + PyPI registry"
 edition.workspace = true
 rust-version.workspace = true
