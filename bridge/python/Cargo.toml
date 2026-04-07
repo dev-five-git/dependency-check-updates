@@ -8,7 +8,7 @@ readme = "../../README.md"
 publish = false
 
 [dependencies]
-dependency-check-updates-cli.workspace = true
+dependency-check-updates.workspace = true
 tokio.workspace = true
 
 [[bin]]

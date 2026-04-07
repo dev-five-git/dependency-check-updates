@@ -346,7 +346,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
 
 [[package]]
-name = "dependency-check-updates-cli"
+name = "dependency-check-updates"
 version = "0.1.0"
 dependencies = [
  "clap",
@@ -383,7 +383,7 @@ dependencies = [
 name = "dependency-check-updates-napi"
 version = "0.1.0"
 dependencies = [
- "dependency-check-updates-cli",
+ "dependency-check-updates",
  "napi",
  "napi-build",
  "napi-derive",
@@ -428,7 +428,7 @@ dependencies = [
 name = "dependency-check-updates-python-bridge"
 version = "0.1.0"
 dependencies = [
- "dependency-check-updates-cli",
+ "dependency-check-updates",
  "tokio",
 ]
 

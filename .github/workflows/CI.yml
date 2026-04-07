@@ -394,7 +394,7 @@ jobs:
           target: ${{ matrix.target }}
           components: clippy, rustfmt
       - name: Build Rust binary
-        run: cargo build --release --target ${{ matrix.target }} -p dependency-check-updates-cli
+        run: cargo build --release --target ${{ matrix.target }} -p dependency-check-updates
       - name: Rename binary
         run: mv target/${{ matrix.target }}/release/dependency-check-updates${{ matrix.os == 'windows' && '.exe' || '' }} ${{ matrix.binary_name }}
       - name: Upload Asset

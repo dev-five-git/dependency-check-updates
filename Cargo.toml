@@ -13,7 +13,7 @@ dependency-check-updates-core = { path = "crates/core" }
 dependency-check-updates-node = { path = "crates/node" }
 dependency-check-updates-rust = { path = "crates/rust" }
 dependency-check-updates-python = { path = "crates/python" }
-dependency-check-updates-cli = { path = "crates/cli" }
+dependency-check-updates = { path = "crates/cli" }
 dependency-check-updates-testkit = { path = "crates/testkit" }
 
 # External
