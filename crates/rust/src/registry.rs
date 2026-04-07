@@ -13,10 +13,11 @@ const MAX_CONCURRENT_REQUESTS: usize = 10;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// crates.io registry client.
+#[derive(Clone)]
 pub struct CratesIoRegistry {
     client: Client,
     semaphore: Arc<Semaphore>,
-    base_url: String,
+    base_url: Arc<str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,7 +57,7 @@ impl CratesIoRegistry {
         Self {
             client,
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
-            base_url: base_url.trim_end_matches('/').to_owned(),
+            base_url: Arc::from(base_url.trim_end_matches('/')),
         }
     }
 
@@ -122,7 +123,7 @@ impl CratesIoRegistry {
             .filter(|v| !v.yanked)
             .filter_map(|v| semver::Version::parse(&v.num).ok())
             .collect();
-        versions.sort();
+        versions.sort_unstable();
 
         trace!(
             crate_name = %dep.name,
@@ -164,16 +165,9 @@ impl CratesIoRegistry {
 
         for (idx, dep) in deps.iter().enumerate() {
             let dep = dep.clone();
-            let client = self.client.clone();
-            let semaphore = self.semaphore.clone();
-            let base_url = self.base_url.clone();
+            let registry = self.clone();
 
             let handle = tokio::spawn(async move {
-                let registry = CratesIoRegistry {
-                    client,
-                    semaphore,
-                    base_url,
-                };
                 let result = registry.resolve_version(&dep, target).await;
                 (idx, result)
             });
@@ -189,7 +183,7 @@ impl CratesIoRegistry {
             }
         }
 
-        results.sort_by_key(|(idx, _)| *idx);
+        results.sort_unstable_by_key(|(idx, _)| *idx);
         results
     }
 }

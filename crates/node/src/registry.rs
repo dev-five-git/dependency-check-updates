@@ -16,10 +16,11 @@ const MAX_CONCURRENT_REQUESTS: usize = 10;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// npm registry client for looking up package versions.
+#[derive(Clone)]
 pub struct NpmRegistry {
     client: Client,
     semaphore: Arc<Semaphore>,
-    base_url: String,
+    base_url: Arc<str>,
 }
 
 /// Abbreviated npm package metadata response.
@@ -61,7 +62,7 @@ impl NpmRegistry {
         Self {
             client,
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
-            base_url: base_url.trim_end_matches('/').to_owned(),
+            base_url: Arc::from(base_url.trim_end_matches('/')),
         }
     }
 
@@ -134,16 +135,25 @@ impl NpmRegistry {
         let info = self.fetch_package_info(&dep.name).await?;
 
         let latest = info.dist_tags.as_ref().and_then(|dt| dt.latest.clone());
-        let all_versions = extract_sorted_versions(&info);
 
-        trace!(
-            package = %dep.name,
-            version_count = all_versions.len(),
-            latest = ?latest,
-            "fetched version list"
-        );
-
-        let selected = select_version(&dep.current_req, latest.as_ref(), &all_versions, target);
+        // Fast path: when target is Latest, skip expensive version parsing/sorting
+        let selected = if target == TargetLevel::Latest {
+            trace!(
+                package = %dep.name,
+                latest = ?latest,
+                "fast path: using dist-tags.latest directly"
+            );
+            latest.clone()
+        } else {
+            let all_versions = extract_sorted_versions(&info);
+            trace!(
+                package = %dep.name,
+                version_count = all_versions.len(),
+                latest = ?latest,
+                "fetched version list"
+            );
+            select_version(&dep.current_req, latest.as_ref(), &all_versions, target)
+        };
 
         // Filter out false positives: if the selected version already satisfies
         // the current range, there's no manifest change needed.
@@ -172,16 +182,9 @@ impl NpmRegistry {
 
         for (idx, dep) in deps.iter().enumerate() {
             let dep = dep.clone();
-            let client = self.client.clone();
-            let semaphore = self.semaphore.clone();
-            let base_url = self.base_url.clone();
+            let registry = self.clone();
 
             let handle = tokio::spawn(async move {
-                let registry = NpmRegistry {
-                    client,
-                    semaphore,
-                    base_url,
-                };
                 let result = registry.resolve_version(&dep, target).await;
                 (idx, result)
             });
@@ -199,7 +202,7 @@ impl NpmRegistry {
             }
         }
 
-        results.sort_by_key(|(idx, _)| *idx);
+        results.sort_unstable_by_key(|(idx, _)| *idx);
         results
     }
 }
@@ -221,7 +224,7 @@ fn extract_sorted_versions(info: &NpmPackageInfo) -> Vec<node_semver::Version> {
         .filter_map(|v| node_semver::Version::parse(v).ok())
         .collect();
 
-    parsed.sort();
+    parsed.sort_unstable();
     parsed
 }
 

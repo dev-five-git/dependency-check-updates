@@ -15,3 +15,4 @@ build_rs_cov.profraw
 tarpaulin-report.html
 .sisyphus/**
 .ruff_cache
+.omc

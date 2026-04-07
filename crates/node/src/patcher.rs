@@ -4,7 +4,7 @@
 //! finds the exact byte positions of dependency version strings in the original
 //! text and replaces only those bytes.
 
-use dependency_check_updates_core::DependencySection;
+use dependency_check_updates_core::{DependencySection, PlannedUpdate};
 
 use crate::parser::DEPENDENCY_SECTIONS;
 
@@ -89,6 +89,70 @@ impl JsonPatcher {
                             locations.push(loc);
                         }
                     }
+                }
+            }
+        }
+
+        Ok(locations)
+    }
+
+    /// Find byte positions of specific dependencies without a full JSON parse.
+    ///
+    /// This is an optimized path for `apply_updates` where we already know which
+    /// deps to look for. Scans only the relevant sections and deps, avoiding
+    /// the cost of deserializing the entire JSON document.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if section positions cannot be found.
+    pub fn scan_for_updates(
+        text: &str,
+        updates: &[PlannedUpdate],
+    ) -> Result<Vec<VersionLocation>, PatchError> {
+        use std::collections::HashMap;
+
+        if updates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Group updates by section for targeted scanning
+        let mut by_section: HashMap<DependencySection, Vec<&PlannedUpdate>> = HashMap::new();
+        for update in updates {
+            by_section.entry(update.section).or_default().push(update);
+        }
+
+        let mut locations = Vec::with_capacity(updates.len());
+
+        for &(section, section_key) in DEPENDENCY_SECTIONS {
+            let Some(section_updates) = by_section.get(&section) else {
+                continue;
+            };
+
+            // Find the byte position of this section key in the text
+            let Some(section_key_pos) = find_json_key_position(text, section_key, 0) else {
+                continue;
+            };
+
+            let search_from = section_key_pos + section_key.len() + 2;
+            let Some(obj_start) = find_char_skipping_strings(text, '{', search_from) else {
+                continue;
+            };
+
+            let Some(obj_end) = find_matching_brace(text, obj_start) else {
+                continue;
+            };
+
+            // Only scan for deps we need to update
+            for update in section_updates {
+                if let Some(loc) = find_dep_value_position(
+                    text,
+                    obj_start,
+                    obj_end,
+                    &update.name,
+                    &update.from,
+                    section,
+                ) {
+                    locations.push(loc);
                 }
             }
         }

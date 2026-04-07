@@ -13,17 +13,16 @@ const MAX_CONCURRENT_REQUESTS: usize = 10;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// `PyPI` registry client.
+#[derive(Clone)]
 pub struct PyPiRegistry {
     client: Client,
     semaphore: Arc<Semaphore>,
-    base_url: String,
+    base_url: Arc<str>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PyPiResponse {
     info: PyPiInfo,
-    #[allow(dead_code)]
-    releases: std::collections::HashMap<String, Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,7 +56,7 @@ impl PyPiRegistry {
         Self {
             client,
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
-            base_url: base_url.trim_end_matches('/').to_owned(),
+            base_url: Arc::from(base_url.trim_end_matches('/')),
         }
     }
 
@@ -140,16 +139,9 @@ impl PyPiRegistry {
 
         for (idx, dep) in deps.iter().enumerate() {
             let dep = dep.clone();
-            let client = self.client.clone();
-            let semaphore = self.semaphore.clone();
-            let base_url = self.base_url.clone();
+            let registry = self.clone();
 
             let handle = tokio::spawn(async move {
-                let registry = PyPiRegistry {
-                    client,
-                    semaphore,
-                    base_url,
-                };
                 let result = registry.resolve_version(&dep, target).await;
                 (idx, result)
             });
@@ -165,7 +157,7 @@ impl PyPiRegistry {
             }
         }
 
-        results.sort_by_key(|(idx, _)| *idx);
+        results.sort_unstable_by_key(|(idx, _)| *idx);
         results
     }
 }

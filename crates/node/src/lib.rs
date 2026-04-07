@@ -41,8 +41,9 @@ impl ManifestHandler for NodeHandler {
     }
 
     fn apply_updates(&self, text: &str, updates: &[PlannedUpdate]) -> Result<String, DcuError> {
+        // Use scan_for_updates: skips full JSON parse, only locates deps we need.
         let locations =
-            JsonPatcher::scan_version_locations(text).map_err(|e| DcuError::PatchFailed {
+            JsonPatcher::scan_for_updates(text, updates).map_err(|e| DcuError::PatchFailed {
                 path: std::path::PathBuf::from("package.json"),
                 detail: e.to_string(),
             })?;

@@ -174,17 +174,35 @@ pub async fn run(cli: &Cli) -> Result<bool, Box<dyn std::error::Error + Send + S
     }
 
     // 3. Resolve ALL versions concurrently across all manifests (Promise.all pattern)
+    //    Create registries once and share across all manifests of the same kind.
     let total_deps: usize = manifest_jobs.iter().map(|j| j.deps.len()).sum();
     info!(
         manifests = manifest_jobs.len(),
         total_deps, "resolving all versions concurrently"
     );
 
+    let npm_registry = NpmRegistry::new();
+    let crates_registry = CratesIoRegistry::new();
+    let pypi_registry = PyPiRegistry::new();
+
     let mut resolve_futures = Vec::new();
     for (job_idx, job) in manifest_jobs.iter().enumerate() {
         if !job.deps.is_empty() {
+            let npm = &npm_registry;
+            let crates_io = &crates_registry;
+            let pypi = &pypi_registry;
             resolve_futures.push(async move {
-                let resolved = resolve_versions(&job.deps, job.manifest_ref.kind, cli.target).await;
+                let resolved = match job.manifest_ref.kind {
+                    ManifestKind::PackageJson => {
+                        npm.resolve_batch(&job.deps, cli.target).await
+                    }
+                    ManifestKind::CargoToml => {
+                        crates_io.resolve_batch(&job.deps, cli.target).await
+                    }
+                    ManifestKind::PyProjectToml => {
+                        pypi.resolve_batch(&job.deps, cli.target).await
+                    }
+                };
                 (job_idx, resolved)
             });
         }
@@ -192,11 +210,11 @@ pub async fn run(cli: &Cli) -> Result<bool, Box<dyn std::error::Error + Send + S
 
     let resolved_results: Vec<_> = futures::future::join_all(resolve_futures).await;
 
-    // Build a map: job_idx -> resolved versions
-    let mut resolved_map: std::collections::HashMap<usize, ResolvedBatch> =
-        std::collections::HashMap::new();
+    // Build a vec: job_idx -> resolved versions (dense indices, no HashMap needed)
+    let mut resolved_map: Vec<Option<ResolvedBatch>> =
+        (0..manifest_jobs.len()).map(|_| None).collect();
     for (job_idx, resolved) in resolved_results {
-        resolved_map.insert(job_idx, resolved);
+        resolved_map[job_idx] = Some(resolved);
     }
 
     // 4. Print results and apply updates (sequential — needs ordered output)
@@ -213,7 +231,7 @@ pub async fn run(cli: &Cli) -> Result<bool, Box<dyn std::error::Error + Send + S
             continue;
         }
 
-        let resolved = resolved_map.get(&job_idx).map_or(&[][..], Vec::as_slice);
+        let resolved = resolved_map[job_idx].as_deref().unwrap_or(&[]);
 
         let success_count = resolved.iter().filter(|(_, r)| r.is_ok()).count();
         let fail_count = resolved.len() - success_count;
@@ -280,28 +298,6 @@ fn filter_deps(
         })
         .cloned()
         .collect()
-}
-
-/// Resolve versions for dependencies using the appropriate registry.
-async fn resolve_versions(
-    deps: &[DependencySpec],
-    kind: ManifestKind,
-    target: TargetLevel,
-) -> Vec<(usize, Result<ResolvedVersion, DcuError>)> {
-    match kind {
-        ManifestKind::PackageJson => {
-            let registry = NpmRegistry::new();
-            registry.resolve_batch(deps, target).await
-        }
-        ManifestKind::CargoToml => {
-            let registry = CratesIoRegistry::new();
-            registry.resolve_batch(deps, target).await
-        }
-        ManifestKind::PyProjectToml => {
-            let registry = PyPiRegistry::new();
-            registry.resolve_batch(deps, target).await
-        }
-    }
 }
 
 /// Resolved version batch from a registry.
