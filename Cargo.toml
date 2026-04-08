@@ -7,7 +7,7 @@ members = ["crates/*", "bridge/*"]
 # parallel linker processes to race on the same output file (LNK1104).
 # `members` still contains bridge/* so workspace-wide commands
 # (`cargo test --workspace`, `cargo clippy --workspace`) keep covering it.
-default-members = ["crates/cli", "crates/core", "crates/node", "crates/rust", "crates/python", "crates/testkit", "bridge/node"]
+default-members = ["crates/cli", "crates/core", "crates/node", "crates/rust", "crates/python", "bridge/node"]
 
 [workspace.package]
 edition = "2024"
@@ -24,12 +24,11 @@ categories = ["development-tools"]
 # Internal — `version` is required so `cargo publish` can resolve path
 # dependencies against crates.io. When bumping any crate version, remember
 # to update these entries in lockstep.
-dependency-check-updates-core = { path = "crates/core", version = "0.1.4" }
-dependency-check-updates-node = { path = "crates/node", version = "0.1.4" }
-dependency-check-updates-rust = { path = "crates/rust", version = "0.1.4" }
-dependency-check-updates-python = { path = "crates/python", version = "0.1.4" }
-dependency-check-updates = { path = "crates/cli", version = "0.1.4" }
-dependency-check-updates-testkit = { path = "crates/testkit", version = "0.1.4" }
+dependency-check-updates-core = { path = "crates/core" }
+dependency-check-updates-node = { path = "crates/node" }
+dependency-check-updates-rust = { path = "crates/rust" }
+dependency-check-updates-python = { path = "crates/python" }
+dependency-check-updates = { path = "crates/cli" }
 
 # External
 clap = { version = "4.6", features = ["derive"] }
