@@ -374,7 +374,10 @@ fn compute_updates(
 /// "1.0.0-beta.1" → 3 (pre-release suffix ignored)
 fn count_version_segments(bare: &str) -> usize {
     // Stop at the first non-digit, non-dot character (e.g., '-' for pre-release)
-    let numeric_part = bare.split(|c: char| !c.is_ascii_digit() && c != '.').next().unwrap_or("");
+    let numeric_part = bare
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .next()
+        .unwrap_or("");
     if numeric_part.is_empty() {
         return 0;
     }
@@ -387,9 +390,9 @@ fn count_version_segments(bare: &str) -> usize {
 /// in version requirements and causes warnings in Cargo.toml. Pre-release
 /// suffix (`-beta.1`) is preserved when not truncating patch level.
 ///
-/// truncate_version("1.2.3", 2)             → "1.2"
-/// truncate_version("1.2.3", 3)             → "1.2.3"
-/// truncate_version("1.2.3+build.1", 3)     → "1.2.3"
+/// `truncate_version("1.2.3`", 2)             → "1.2"
+/// `truncate_version("1.2.3`", 3)             → "1.2.3"
+/// `truncate_version("1.2.3+build.1`", 3)     → "1.2.3"
 /// truncate_version("1.2.3-rc.1", 3)        → "1.2.3-rc.1"
 /// truncate_version("1.2.3-rc.1", 2)        → "1.2"
 fn truncate_version(version: &str, segments: usize) -> String {
@@ -780,10 +783,13 @@ mod tests {
             current_req: "0.6".to_owned(),
             section: DependencySection::Dependencies,
         }];
-        let resolved = vec![(0, Ok(ResolvedVersion {
-            latest: Some("0.6.5".to_owned()),
-            selected: Some("0.6.5".to_owned()),
-        }))];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("0.6.5".to_owned()),
+                selected: Some("0.6.5".to_owned()),
+            }),
+        )];
         let updates = compute_updates(&deps, &resolved);
         assert!(updates.is_empty(), "0.6 should not be rewritten to 0.6.5");
     }
@@ -796,10 +802,13 @@ mod tests {
             current_req: "0.6".to_owned(),
             section: DependencySection::Dependencies,
         }];
-        let resolved = vec![(0, Ok(ResolvedVersion {
-            latest: Some("0.7.2".to_owned()),
-            selected: Some("0.7.2".to_owned()),
-        }))];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("0.7.2".to_owned()),
+                selected: Some("0.7.2".to_owned()),
+            }),
+        )];
         let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].to, "0.7");
@@ -813,10 +822,13 @@ mod tests {
             current_req: "1".to_owned(),
             section: DependencySection::Dependencies,
         }];
-        let resolved = vec![(0, Ok(ResolvedVersion {
-            latest: Some("2.5.0".to_owned()),
-            selected: Some("2.5.0".to_owned()),
-        }))];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("2.5.0".to_owned()),
+                selected: Some("2.5.0".to_owned()),
+            }),
+        )];
         let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].to, "2");
@@ -830,10 +842,13 @@ mod tests {
             current_req: "1".to_owned(),
             section: DependencySection::Dependencies,
         }];
-        let resolved = vec![(0, Ok(ResolvedVersion {
-            latest: Some("1.5.0".to_owned()),
-            selected: Some("1.5.0".to_owned()),
-        }))];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("1.5.0".to_owned()),
+                selected: Some("1.5.0".to_owned()),
+            }),
+        )];
         let updates = compute_updates(&deps, &resolved);
         assert!(updates.is_empty());
     }
@@ -846,10 +861,13 @@ mod tests {
             current_req: "1.0.0".to_owned(),
             section: DependencySection::Dependencies,
         }];
-        let resolved = vec![(0, Ok(ResolvedVersion {
-            latest: Some("1.0.228".to_owned()),
-            selected: Some("1.0.228".to_owned()),
-        }))];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("1.0.228".to_owned()),
+                selected: Some("1.0.228".to_owned()),
+            }),
+        )];
         let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].to, "1.0.228");
@@ -863,10 +881,13 @@ mod tests {
             current_req: "0.25.10".to_owned(),
             section: DependencySection::Dependencies,
         }];
-        let resolved = vec![(0, Ok(ResolvedVersion {
-            latest: Some("0.25.11+spec-1.1.0".to_owned()),
-            selected: Some("0.25.11+spec-1.1.0".to_owned()),
-        }))];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("0.25.11+spec-1.1.0".to_owned()),
+                selected: Some("0.25.11+spec-1.1.0".to_owned()),
+            }),
+        )];
         let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].to, "0.25.11");
