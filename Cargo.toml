@@ -17,38 +17,38 @@ dependency-check-updates = { path = "crates/cli" }
 dependency-check-updates-testkit = { path = "crates/testkit" }
 
 # External
-clap = { version = "4.6", features = ["derive"] }
-thiserror = "2.0"
-miette = { version = "7.6", features = ["fancy"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["preserve_order"] }
-tokio = { version = "1.51", features = ["rt", "macros"] }
-reqwest = { version = "0.13", default-features = false, features = [
+clap = { version = "4.6.0", features = ["derive"] }
+thiserror = "2.0.18"
+miette = { version = "7.6.0", features = ["fancy"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
+tokio = { version = "1.51.0", features = ["rt", "macros"] }
+reqwest = { version = "0.13.2", default-features = false, features = [
   "json",
   "rustls-no-provider",
   "charset",
   "http2",
   "system-proxy",
 ] }
-rustls = { version = "0.23", default-features = false, features = [
+rustls = { version = "0.23.37", default-features = false, features = [
   "ring",
   "logging",
   "std",
   "tls12",
 ] }
-node-semver = "2.2"
-ignore = "0.4"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-toml_edit = "0.25"
+node-semver = "2.2.0"
+ignore = "0.4.25"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+toml_edit = "0.25.11"
 
-napi = { version = "3", features = ["tokio_rt"] }
-napi-derive = "3"
-futures = "0.3"
-owo-colors = "4.3"
-insta = "1.47"
-tempfile = "3.27"
-wiremock = "0.6"
+napi = { version = "3.8.4", features = ["tokio_rt"] }
+napi-derive = "3.5.3"
+futures = "0.3.32"
+owo-colors = "4.3.0"
+insta = "1.47.2"
+tempfile = "3.27.0"
+wiremock = "0.6.5"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

@@ -31,6 +31,6 @@
     "test": "echo 'test'"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3"
+    "@napi-rs/cli": "^3.6.0"
   }
 }
