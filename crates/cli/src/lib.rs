@@ -766,6 +766,7 @@ mod tests {
 
     #[test]
     fn test_truncate_version() {
+        assert_eq!(truncate_version("1.2.3+build.7", 0), "1.2.3"); // segments=0 keeps stripped version
         assert_eq!(truncate_version("1.2.3", 2), "1.2");
         assert_eq!(truncate_version("1.2.3", 3), "1.2.3");
         assert_eq!(truncate_version("1.2.3", 1), "1");
