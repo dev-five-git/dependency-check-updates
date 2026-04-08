@@ -108,6 +108,10 @@ pub async fn main(args: &[String]) -> Result<(), Box<dyn std::error::Error + Sen
 #[allow(clippy::too_many_lines)]
 #[cfg(not(tarpaulin_include))]
 pub async fn run(cli: &Cli) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    // Install rustls crypto provider (reqwest is built with rustls-no-provider).
+    // Idempotent: subsequent calls are no-ops.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     init_tracing(cli.verbose);
 
     let use_color = std::env::var("NO_COLOR").is_err();
