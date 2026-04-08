@@ -141,8 +141,9 @@ impl CratesIoRegistry {
 
         let selected = select_version(&dep.current_req, latest.as_ref(), &versions, target);
 
-        // Filter: if selected satisfies the current requirement, no change needed
-        let selected = selected.filter(|v| !satisfies_req(&dep.current_req, v));
+        // NOTE: we do NOT filter out versions that satisfy the current requirement.
+        // ncu-style behavior updates the manifest spec itself; `compute_updates` in
+        // the CLI uses bare-version comparison as the single source of truth.
 
         debug!(
             crate_name = %dep.name,
@@ -238,17 +239,6 @@ fn select_version(
                 .map(std::string::ToString::to_string)
         }
     }
-}
-
-/// Check if a version satisfies a Cargo version requirement.
-fn satisfies_req(req_str: &str, version_str: &str) -> bool {
-    let Ok(req) = semver::VersionReq::parse(req_str) else {
-        return false;
-    };
-    let Ok(version) = semver::Version::parse(version_str) else {
-        return false;
-    };
-    req.matches(&version)
 }
 
 fn parse_base_version(req_str: &str) -> Option<semver::Version> {
@@ -482,8 +472,8 @@ mod tests {
             .resolve_version(&dep, TargetLevel::Latest)
             .await
             .unwrap();
-        // 1.5.0 satisfies ^1.0.0, so selected should be None
-        assert_eq!(result.selected, None);
+        // ncu-style: always report latest; CLI's compute_updates decides if a spec bump is needed.
+        assert_eq!(result.selected.as_deref(), Some("1.5.0"));
         assert_eq!(result.latest, Some("1.5.0".to_owned()));
     }
 
@@ -595,8 +585,8 @@ mod tests {
             .unwrap();
         // Pre-release versions should be skipped; only stable 1.0.0 is available
         assert_eq!(result.latest, Some("1.0.0".to_owned()));
-        // 1.0.0 satisfies ^1.0.0, so selected is None
-        assert_eq!(result.selected, None);
+        // ncu-style: resolve returns latest; bare-version comparison happens in compute_updates
+        assert_eq!(result.selected.as_deref(), Some("1.0.0"));
     }
 
     #[test]
@@ -633,16 +623,6 @@ mod tests {
         let versions = make_versions(&["1.0.0", "2.0.0"]);
         let result = select_version("*", Some(&latest), &versions, TargetLevel::Patch);
         assert_eq!(result, Some("2.0.0".to_owned()));
-    }
-
-    #[test]
-    fn test_satisfies_req_invalid_req() {
-        assert!(!satisfies_req("not valid!!!", "1.0.0"));
-    }
-
-    #[test]
-    fn test_satisfies_req_invalid_version() {
-        assert!(!satisfies_req("^1.0.0", "not.valid"));
     }
 
     #[tokio::test]

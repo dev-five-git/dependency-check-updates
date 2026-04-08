@@ -17,7 +17,7 @@ dependency-check-updates.workspace = true
 tokio = { version = "1.51" }
 
 [build-dependencies]
-napi-build = "2"
+napi-build = "2.3"
 
 [lints]
 workspace = true

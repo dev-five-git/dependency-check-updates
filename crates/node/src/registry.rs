@@ -155,9 +155,10 @@ impl NpmRegistry {
             select_version(&dep.current_req, latest.as_ref(), &all_versions, target)
         };
 
-        // Filter out false positives: if the selected version already satisfies
-        // the current range, there's no manifest change needed.
-        let selected = selected.filter(|v| !satisfies_range(&dep.current_req, v));
+        // NOTE: we do NOT filter out versions that satisfy the current range.
+        // ncu-style behavior updates the manifest spec itself (e.g., ^18.0.0 → ^18.2.0)
+        // even though ^18.0.0 semver-covers 18.2.0. The bare-version comparison in
+        // `compute_updates` is the single source of truth for "already up to date".
 
         debug!(
             package = %dep.name,
@@ -278,19 +279,6 @@ fn select_version(
                 .map(std::string::ToString::to_string)
         }
     }
-}
-
-/// Check if a version satisfies an npm semver range.
-///
-/// Returns `true` if the version is within the range (no update needed).
-fn satisfies_range(range_str: &str, version_str: &str) -> bool {
-    let Ok(range) = node_semver::Range::parse(range_str) else {
-        return false;
-    };
-    let Ok(version) = node_semver::Version::parse(version_str) else {
-        return false;
-    };
-    range.satisfies(&version)
 }
 
 /// Parse a base version from a requirement string.
@@ -609,8 +597,9 @@ mod tests {
             .resolve_version(&dep, TargetLevel::Latest)
             .await
             .unwrap();
-        // 17.0.1 satisfies ^17.0.0, so selected should be None (no update needed)
-        assert_eq!(result.selected, None);
+        // ncu-style: always reports latest so CLI can bump the spec (^17.0.0 → ^17.0.1).
+        // Whether an actual manifest update is needed is decided later by compute_updates.
+        assert_eq!(result.selected.as_deref(), Some("17.0.1"));
     }
 
     #[tokio::test]
@@ -789,16 +778,6 @@ mod tests {
     fn test_default_creates_registry() {
         install_crypto_provider();
         let _registry = NpmRegistry::default();
-    }
-
-    #[test]
-    fn test_satisfies_range_invalid_range() {
-        assert!(!satisfies_range("not a range!!!", "1.0.0"));
-    }
-
-    #[test]
-    fn test_satisfies_range_invalid_version() {
-        assert!(!satisfies_range("^1.0.0", "not.a"));
     }
 
     #[test]

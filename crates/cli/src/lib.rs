@@ -339,7 +339,13 @@ fn compute_updates(
             .current_req
             .trim_start_matches(|c: char| !c.is_ascii_digit());
 
-        if current_bare == selected {
+        // Preserve precision: if the user wrote "0.6" (2 segments), truncate the
+        // resolved version to 2 segments before comparing. This respects the user's
+        // intent to pin only at that granularity.
+        let precision = count_version_segments(current_bare);
+        let selected_truncated = truncate_version(selected, precision);
+
+        if current_bare == selected_truncated {
             trace!(package = %dep.name, version = %dep.current_req, "already up to date");
             continue;
         }
@@ -347,7 +353,7 @@ fn compute_updates(
         // Preserve the range prefix from the original spec
         let prefix_len = dep.current_req.len() - current_bare.len();
         let prefix = &dep.current_req[..prefix_len];
-        let new_version = format!("{prefix}{selected}");
+        let new_version = format!("{prefix}{selected_truncated}");
 
         updates.push(PlannedUpdate {
             name: dep.name.clone(),
@@ -358,6 +364,58 @@ fn compute_updates(
     }
 
     updates
+}
+
+/// Count the number of version segments in a bare version string.
+///
+/// "1"      → 1 (major only)
+/// "1.0"    → 2 (major.minor)
+/// "1.0.0"  → 3 (major.minor.patch)
+/// "1.0.0-beta.1" → 3 (pre-release suffix ignored)
+fn count_version_segments(bare: &str) -> usize {
+    // Stop at the first non-digit, non-dot character (e.g., '-' for pre-release)
+    let numeric_part = bare
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .next()
+        .unwrap_or("");
+    if numeric_part.is_empty() {
+        return 0;
+    }
+    numeric_part.split('.').filter(|s| !s.is_empty()).count()
+}
+
+/// Truncate a version string to the given number of segments.
+///
+/// Always strips build metadata (the `+...` suffix) since it has no meaning
+/// in version requirements and causes warnings in Cargo.toml. Pre-release
+/// suffix (`-beta.1`) is preserved when not truncating patch level.
+///
+/// `truncate_version("1.2.3`", 2)             → "1.2"
+/// `truncate_version("1.2.3`", 3)             → "1.2.3"
+/// `truncate_version("1.2.3+build.1`", 3)     → "1.2.3"
+/// truncate_version("1.2.3-rc.1", 3)        → "1.2.3-rc.1"
+/// truncate_version("1.2.3-rc.1", 2)        → "1.2"
+fn truncate_version(version: &str, segments: usize) -> String {
+    // Strip build metadata unconditionally (`+...`)
+    let stripped = version.split('+').next().unwrap_or(version);
+
+    if segments == 0 {
+        return stripped.to_owned();
+    }
+
+    // Split numeric.dot prefix from any trailing pre-release (`-...`)
+    let (numeric, suffix) = stripped
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .map_or((stripped, ""), |i| stripped.split_at(i));
+
+    let parts: Vec<&str> = numeric.split('.').collect();
+    if parts.len() <= segments {
+        // Already at or below desired precision — keep as-is with any pre-release
+        return stripped.to_owned();
+    }
+    // Truncated: drop any pre-release suffix too
+    let _ = suffix;
+    parts[..segments].join(".")
 }
 
 /// Initialize tracing/logging based on verbosity level.
@@ -695,6 +753,145 @@ mod tests {
         assert_eq!(updates[0].to, "^1.5.0");
         assert_eq!(updates[1].name, "b");
         assert_eq!(updates[1].to, "~2.5.0");
+    }
+
+    #[test]
+    fn test_count_version_segments() {
+        assert_eq!(count_version_segments("1"), 1);
+        assert_eq!(count_version_segments("1.0"), 2);
+        assert_eq!(count_version_segments("1.0.0"), 3);
+        assert_eq!(count_version_segments("1.0.0-beta.1"), 3);
+        assert_eq!(count_version_segments(""), 0);
+    }
+
+    #[test]
+    fn test_truncate_version() {
+        assert_eq!(truncate_version("1.2.3+build.7", 0), "1.2.3"); // segments=0 keeps stripped version
+        assert_eq!(truncate_version("1.2.3", 2), "1.2");
+        assert_eq!(truncate_version("1.2.3", 3), "1.2.3");
+        assert_eq!(truncate_version("1.2.3", 1), "1");
+        assert_eq!(truncate_version("1.2", 3), "1.2"); // cannot extend
+        assert_eq!(truncate_version("0.25.11+spec-1.1.0", 3), "0.25.11"); // strip build metadata
+        assert_eq!(truncate_version("1.2.3-rc.1", 3), "1.2.3-rc.1"); // preserve pre-release
+        assert_eq!(truncate_version("1.2.3-rc.1", 2), "1.2"); // drop pre-release when truncating
+    }
+
+    #[test]
+    fn test_compute_updates_respects_major_minor_precision() {
+        // current = "0.6" (2 segments), latest = "0.6.5" → no update needed
+        let deps = vec![DependencySpec {
+            name: "wiremock".to_owned(),
+            current_req: "0.6".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("0.6.5".to_owned()),
+                selected: Some("0.6.5".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert!(updates.is_empty(), "0.6 should not be rewritten to 0.6.5");
+    }
+
+    #[test]
+    fn test_compute_updates_major_minor_bumps_minor() {
+        // current = "0.6" (2 segments), latest = "0.7.2" → update to "0.7"
+        let deps = vec![DependencySpec {
+            name: "wiremock".to_owned(),
+            current_req: "0.6".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("0.7.2".to_owned()),
+                selected: Some("0.7.2".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].to, "0.7");
+    }
+
+    #[test]
+    fn test_compute_updates_major_only_bumps_major() {
+        // current = "1" (1 segment), latest = "2.5.0" → update to "2"
+        let deps = vec![DependencySpec {
+            name: "pkg".to_owned(),
+            current_req: "1".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("2.5.0".to_owned()),
+                selected: Some("2.5.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].to, "2");
+    }
+
+    #[test]
+    fn test_compute_updates_major_only_stays_same() {
+        // current = "1" (1 segment), latest = "1.5.0" → no update
+        let deps = vec![DependencySpec {
+            name: "pkg".to_owned(),
+            current_req: "1".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("1.5.0".to_owned()),
+                selected: Some("1.5.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn test_compute_updates_full_precision_uses_full_version() {
+        // current = "1.0.0" (3 segments), latest = "1.0.228" → update to "1.0.228"
+        let deps = vec![DependencySpec {
+            name: "serde".to_owned(),
+            current_req: "1.0.0".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("1.0.228".to_owned()),
+                selected: Some("1.0.228".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].to, "1.0.228");
+    }
+
+    #[test]
+    fn test_compute_updates_strips_build_metadata() {
+        // current = "0.25.10" (3 segments), latest = "0.25.11+spec-1.1.0" → "0.25.11" (no +metadata)
+        let deps = vec![DependencySpec {
+            name: "toml_edit".to_owned(),
+            current_req: "0.25.10".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("0.25.11+spec-1.1.0".to_owned()),
+                selected: Some("0.25.11+spec-1.1.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].to, "0.25.11");
     }
 
     #[test]
