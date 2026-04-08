@@ -14,10 +14,10 @@ crate-type = ["cdylib"]
 napi.workspace = true
 napi-derive.workspace = true
 dependency-check-updates.workspace = true
-tokio = { version = "1.51.0" }
+tokio = { version = "1.51" }
 
 [build-dependencies]
-napi-build = "2.3.1"
+napi-build = "2.3"
 
 [lints]
 workspace = true
