@@ -87,11 +87,13 @@ impl PyProjectManifest {
                             continue; // Skip python version constraint
                         }
                         if let Some(version) = extract_poetry_version(item) {
-                            deps.push(DependencySpec {
-                                name: name.to_owned(),
-                                current_req: version,
-                                section: DependencySection::Dependencies,
-                            });
+                            if !is_wildcard_req(&version) {
+                                deps.push(DependencySpec {
+                                    name: name.to_owned(),
+                                    current_req: version,
+                                    section: DependencySection::Dependencies,
+                                });
+                            }
                         }
                     }
                 }
@@ -99,11 +101,13 @@ impl PyProjectManifest {
                 if let Some(dev_deps) = poetry.get("dev-dependencies").and_then(Item::as_table) {
                     for (name, item) in dev_deps {
                         if let Some(version) = extract_poetry_version(item) {
-                            deps.push(DependencySpec {
-                                name: name.to_owned(),
-                                current_req: version,
-                                section: DependencySection::DevDependencies,
-                            });
+                            if !is_wildcard_req(&version) {
+                                deps.push(DependencySpec {
+                                    name: name.to_owned(),
+                                    current_req: version,
+                                    section: DependencySection::DevDependencies,
+                                });
+                            }
                         }
                     }
                 }
@@ -210,6 +214,10 @@ fn parse_pep508_spec(spec: &str, section: DependencySection) -> Option<Dependenc
         return None; // No version constraint
     }
 
+    if is_wildcard_req(rest) {
+        return None; // `*`, `==*`, etc. already mean "any version"
+    }
+
     Some(DependencySpec {
         name: name.to_owned(),
         current_req: rest.to_owned(),
@@ -255,6 +263,18 @@ fn replace_version_in_pep508(spec: &str, new_version: &str) -> String {
     let marker = rest.find(';').map_or("", |i| &rest[i..]);
 
     format!("{name}{extras}{new_version}{marker}")
+}
+
+/// Check if a version requirement is an unresolvable wildcard like `*` or `==*`.
+///
+/// Such requirements already mean "any/latest version", so updating them
+/// would be a meaningless no-op and we filter them out at parse time.
+fn is_wildcard_req(req: &str) -> bool {
+    let stripped = req
+        .trim()
+        .trim_start_matches(['=', '~', '^', '>', '<'])
+        .trim();
+    matches!(stripped, "" | "*")
 }
 
 /// Extract a version string from a Poetry dependency value.
