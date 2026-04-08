@@ -1,9 +1,16 @@
 [package]
 name = "dependency-check-updates-python-bridge"
 version = "0.1.0"
+description = "Python bridge for dependency-check-updates (standalone binary)"
 edition.workspace = true
 license.workspace = true
-description = "Python bridge for dependency-check-updates (standalone binary)"
+repository.workspace = true
+homepage.workspace = true
+# NOTE: maturin (as of 1.10.x) mis-resolves `readme.workspace = true` by
+# re-applying the workspace-relative path against this crate's directory,
+# producing `bridge/python/../../../../README.md` which does not exist.
+# Keeping an explicit path avoids the bug. `cargo check --workspace`
+# itself is unaffected — only maturin's pyproject-metadata reader trips on it.
 readme = "../../README.md"
 publish = false
 

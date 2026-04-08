@@ -5,6 +5,12 @@ description = "Node.js ecosystem support for dependency-check-updates: package.j
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 dependency-check-updates-core.workspace = true

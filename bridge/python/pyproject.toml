@@ -4,14 +4,54 @@ build-backend = "maturin"
 
 [project]
 name = "dependency-check-updates"
-requires-python = ">=3.9"
 version = "0.1.3"
+description = "Fast multi-ecosystem dependency updater: package.json, Cargo.toml, pyproject.toml in a single CLI (like npm-check-updates for every language)"
+requires-python = ">=3.9"
+readme = "../../README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "dev-five-git" },
+]
+keywords = [
+    "dependency",
+    "dependencies",
+    "update",
+    "updater",
+    "ncu",
+    "npm-check-updates",
+    "npm",
+    "cargo",
+    "pypi",
+    "cli",
+    "rust",
+    "multi-ecosystem",
+]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Build Tools",
 ]
-readme = "../../README.md"
+
+[project.urls]
+Homepage = "https://github.com/dev-five-git/dependency-check-updates"
+Repository = "https://github.com/dev-five-git/dependency-check-updates"
+Issues = "https://github.com/dev-five-git/dependency-check-updates/issues"
+Changelog = "https://github.com/dev-five-git/dependency-check-updates/releases"
 
 [tool.maturin]
 bindings = "bin"

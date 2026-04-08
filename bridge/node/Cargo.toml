@@ -1,10 +1,12 @@
 [package]
 name = "dependency-check-updates-napi"
 version = "0.1.0"
+description = "Node.js bridge for dependency-check-updates (N-API bindings)"
 edition.workspace = true
 license.workspace = true
-description = "Node.js bridge for dependency-check-updates (N-API bindings)"
-readme = "../../README.md"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 publish = false
 
 [lib]
