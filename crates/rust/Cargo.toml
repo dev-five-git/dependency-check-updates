@@ -1,6 +1,6 @@
 [package]
 name = "dependency-check-updates-rust"
-version = "0.1.3"
+version = "0.1.4"
 description = "Rust ecosystem support for dependency-check-updates: Cargo.toml parsing (toml_edit) + crates.io registry"
 edition.workspace = true
 rust-version.workspace = true
