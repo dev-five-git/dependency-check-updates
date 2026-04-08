@@ -71,8 +71,10 @@ impl CargoTomlManifest {
     ) {
         for (name, item) in table {
             if let Some(version) = Self::extract_version(item) {
-                // Skip path/git dependencies without a version
-                if !version.is_empty() {
+                // Skip path/git dependencies without a version, and skip
+                // wildcard-only requirements like `*` which already mean
+                // "any version" — updating them would be a meaningless no-op.
+                if !version.is_empty() && version.trim() != "*" {
                     deps.push(DependencySpec {
                         name: name.to_owned(),
                         current_req: version,

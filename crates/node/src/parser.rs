@@ -71,8 +71,14 @@ impl PackageJsonManifest {
 /// Check if a dependency value is a resolvable version spec.
 ///
 /// Filters out non-semver specifiers like workspace protocols, npm aliases,
-/// git URLs, file paths, and link protocols.
+/// git URLs, file paths, and link protocols. Also filters out unresolvable
+/// "always-newest" specifiers like `latest`, `*`, `x`, and `X`, since
+/// updating those would be a no-op (they already mean "the latest version").
 fn is_version_spec(value: &str) -> bool {
+    let trimmed = value.trim();
+    if matches!(trimmed, "latest" | "*" | "x" | "X" | "") {
+        return false;
+    }
     !value.starts_with("workspace:")
         && !value.starts_with("npm:")
         && !value.starts_with("git+")
@@ -298,7 +304,31 @@ mod tests {
   }
 }"#;
         let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.dependencies.len(), 8);
+        // `*` and `latest` are filtered out as unresolvable always-newest specs.
+        assert_eq!(manifest.dependencies.len(), 6);
+        let names: Vec<_> = manifest
+            .dependencies
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        assert!(!names.contains(&"d"));
+        assert!(!names.contains(&"e"));
+    }
+
+    #[test]
+    fn test_latest_and_wildcard_skipped() {
+        let json = r#"{
+  "dependencies": {
+    "always-new": "latest",
+    "any": "*",
+    "x-any": "x",
+    "X-any": "X",
+    "react": "^18.0.0"
+  }
+}"#;
+        let manifest = PackageJsonManifest::parse(json).unwrap();
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].name, "react");
     }
 
     #[test]
