@@ -11,7 +11,7 @@
 [![npm](https://img.shields.io/npm/v/@dependency-check-updates/cli?logo=npm&label=npm&style=flat-square)](https://www.npmjs.com/package/@dependency-check-updates/cli)
 [![PyPI](https://img.shields.io/pypi/v/dependency-check-updates?logo=pypi&logoColor=white&label=PyPI&style=flat-square)](https://pypi.org/project/dependency-check-updates/)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-dea584?logo=rust&style=flat-square)](https://www.rust-lang.org/)
-[![Python 3.9+](https://img.shields.io/pypi/pyversions/dependency-check-updates?logo=python&logoColor=white&style=flat-square)](https://pypi.org/project/dependency-check-updates/)
+[![Python 3.11+](https://img.shields.io/pypi/pyversions/dependency-check-updates?logo=python&logoColor=white&style=flat-square)](https://pypi.org/project/dependency-check-updates/)
 [![Node](https://img.shields.io/node/v/@dependency-check-updates/cli?logo=node.js&logoColor=white&label=node&style=flat-square)](https://www.npmjs.com/package/@dependency-check-updates/cli)
 
 <!-- Downloads -->
@@ -271,7 +271,7 @@ Build prerequisites:
 
 - Rust 1.85+ (stable toolchain)
 - Bun 1.0+ *(or Node.js 18+ with npm)*
-- Python 3.9+ with [`maturin`](https://www.maturin.rs/) *(only for the Python wheel step)*
+- Python 3.11+ with [`maturin`](https://www.maturin.rs/) *(only for the Python wheel step)*
 - Windows: Visual Studio 2022 Build Tools (MSVC linker)
 
 ```bash

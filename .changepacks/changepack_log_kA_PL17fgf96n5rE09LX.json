@@ -1,0 +1,1 @@
+{"changes":{"bridge/python/pyproject.toml":"Minor"},"note":"Drop Python 3.9 and 3.10 support (EOL per devguide.python.org). Minimum supported Python is now 3.11, matching the CI test matrix (closes #10).","date":"2026-04-17T08:30:00.000Z"}

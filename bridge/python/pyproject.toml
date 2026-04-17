@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "dependency-check-updates"
 version = "0.1.6"
 description = "Fast multi-ecosystem dependency updater: package.json, Cargo.toml, pyproject.toml in a single CLI (like npm-check-updates for every language)"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 readme = "../../README.md"
 license = { text = "MIT" }
 authors = [
@@ -35,8 +35,6 @@ classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
