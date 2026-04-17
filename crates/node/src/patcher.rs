@@ -153,7 +153,7 @@ impl JsonPatcher {
 
         // Sort descending by start position
         let mut sorted: Vec<&Patch> = patches.iter().collect();
-        sorted.sort_by(|a, b| b.start.cmp(&a.start));
+        sorted.sort_by_key(|p| std::cmp::Reverse(p.start));
 
         // Check for overlapping patches
         for window in sorted.windows(2) {

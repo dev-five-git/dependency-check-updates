@@ -339,6 +339,28 @@ fn compute_updates(
             .current_req
             .trim_start_matches(|c: char| !c.is_ascii_digit());
 
+        // Safety net: never suggest a downgrade. When both current and selected
+        // can be parsed as semver, skip this dependency if selected <= current.
+        // This guards against the registry-filtering path returning an older
+        // stable when the user is already on a higher prerelease (e.g.
+        // `sea-orm 2.0.0-rc.37` -> `1.1.20` should NOT be reported).
+        //
+        // For ranges like `^1` / `0.6` where we cannot fully parse as semver,
+        // we fall through to the string-based precision comparison below.
+        if let (Ok(cur_ver), Ok(sel_ver)) = (
+            semver::Version::parse(current_bare),
+            semver::Version::parse(selected),
+        ) && sel_ver <= cur_ver
+        {
+            trace!(
+                package = %dep.name,
+                current = %dep.current_req,
+                selected = %selected,
+                "skipping: selected version is not newer than current"
+            );
+            continue;
+        }
+
         // Preserve precision: if the user wrote "0.6" (2 segments), truncate the
         // resolved version to 2 segments before comparing. This respects the user's
         // intent to pin only at that granularity.
@@ -892,6 +914,109 @@ mod tests {
         let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].to, "0.25.11");
+    }
+
+    #[test]
+    fn test_compute_updates_blocks_downgrade_from_prerelease_to_stable() {
+        // Regression test for the sea-orm 2.0.0-rc.37 -> 1.1.20 bug.
+        // When the current version is a higher prerelease (2.0.0-rc.37) and
+        // the registry filtering returns an older stable (1.1.20), the
+        // safety net MUST skip this update instead of suggesting a downgrade.
+        let deps = vec![DependencySpec {
+            name: "sea-orm".to_owned(),
+            current_req: "2.0.0-rc.37".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("1.1.20".to_owned()),
+                selected: Some("1.1.20".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert!(
+            updates.is_empty(),
+            "must not suggest downgrade from 2.0.0-rc.37 to 1.1.20, got: {updates:?}"
+        );
+    }
+
+    #[test]
+    fn test_compute_updates_blocks_downgrade_same_major() {
+        // Current is newer stable; registry returned something older. Skip.
+        let deps = vec![DependencySpec {
+            name: "pkg".to_owned(),
+            current_req: "2.5.0".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("2.4.0".to_owned()),
+                selected: Some("2.4.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert!(updates.is_empty(), "must not downgrade 2.5.0 -> 2.4.0");
+    }
+
+    #[test]
+    fn test_compute_updates_allows_prerelease_to_prerelease_upgrade() {
+        // Current: 2.0.0-rc.37, Selected: 2.0.0-rc.40 → valid upgrade.
+        let deps = vec![DependencySpec {
+            name: "sea-orm".to_owned(),
+            current_req: "2.0.0-rc.37".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("2.0.0-rc.40".to_owned()),
+                selected: Some("2.0.0-rc.40".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].to, "2.0.0-rc.40");
+    }
+
+    #[test]
+    fn test_compute_updates_allows_prerelease_to_stable_upgrade() {
+        // Current: 2.0.0-rc.37 (prerelease), Selected: 2.0.0 (stable) → semver: stable > prerelease of same version.
+        let deps = vec![DependencySpec {
+            name: "sea-orm".to_owned(),
+            current_req: "2.0.0-rc.37".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("2.0.0".to_owned()),
+                selected: Some("2.0.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].to, "2.0.0");
+    }
+
+    #[test]
+    fn test_compute_updates_equal_semver_skipped() {
+        // Exact same version: must skip (not a "downgrade", but not an upgrade either).
+        let deps = vec![DependencySpec {
+            name: "pkg".to_owned(),
+            current_req: "1.2.3".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("1.2.3".to_owned()),
+                selected: Some("1.2.3".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert!(updates.is_empty());
     }
 
     #[test]

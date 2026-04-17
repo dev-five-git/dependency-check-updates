@@ -30,6 +30,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 futures.workspace = true
 owo-colors.workspace = true
+semver = "1.0"
 
 [dev-dependencies]
 wiremock.workspace = true

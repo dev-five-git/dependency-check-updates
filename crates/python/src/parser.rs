@@ -588,6 +588,21 @@ dependencies = [
     }
 
     #[test]
+    fn test_parse_pep508_wildcard_version_rejected() {
+        // A PEP 508 spec that carries a wildcard version like `pkg==*` must be
+        // filtered out at parse time — there's nothing meaningful to update.
+        let dep = parse_pep508_spec("requests==*", DependencySection::ProjectDependencies);
+        assert!(dep.is_none());
+    }
+
+    #[test]
+    fn test_parse_pep508_bare_star_rejected() {
+        // `pkg *` should also be rejected via is_wildcard_req.
+        let dep = parse_pep508_spec("requests *", DependencySection::ProjectDependencies);
+        assert!(dep.is_none());
+    }
+
+    #[test]
     fn test_invalid_toml_returns_error() {
         let result = PyProjectManifest::parse("not valid [[[toml");
         assert!(result.is_err());

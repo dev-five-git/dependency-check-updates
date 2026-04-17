@@ -347,6 +347,7 @@ dependencies = [
  "miette",
  "owo-colors",
  "rustls",
+ "semver",
  "serde_json",
  "tempfile",
  "tokio",
