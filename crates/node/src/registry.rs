@@ -930,6 +930,28 @@ mod tests {
         assert_eq!(result, Some("2.0.0".to_owned()));
     }
 
+    #[test]
+    fn test_select_version_minor_skips_prerelease_when_current_stable() {
+        // Exercises accept_pre_aware: stable current + prerelease candidate in same
+        // major → prerelease must be rejected (covers the `!current_is_prerelease`
+        // early-return branch inside accept_pre_aware).
+        let latest = "18.2.0".to_owned();
+        let versions = make_versions(&["18.0.0", "18.1.0", "18.2.0", "18.3.0-beta.1"]);
+        let result = select_version("^18.0.0", Some(&latest), &versions, TargetLevel::Minor);
+        // Stable 18.2.0 wins over 18.3.0-beta.1 because current is stable.
+        assert_eq!(result, Some("18.2.0".to_owned()));
+    }
+
+    #[test]
+    fn test_select_version_patch_skips_prerelease_when_current_stable() {
+        // Same as above, but on the Patch branch, so the iterator walks a
+        // prerelease candidate on the same major.minor and must reject it.
+        let latest = "18.0.5".to_owned();
+        let versions = make_versions(&["18.0.0", "18.0.1", "18.0.5", "18.0.6-rc.1"]);
+        let result = select_version("=18.0.0", Some(&latest), &versions, TargetLevel::Patch);
+        assert_eq!(result, Some("18.0.5".to_owned()));
+    }
+
     #[tokio::test]
     async fn test_resolve_version_non_latest_with_tracing() {
         use wiremock::matchers::{method, path};
