@@ -212,12 +212,43 @@ fn select_version(
 
     let current = parse_base_version(current_req_str);
 
+    // "Prerelease tail" policy: if the user is already on a prerelease
+    // (e.g. `2.0.0-rc.37`), `Latest` should consider prereleases of the
+    // same major.minor.patch train so they can move to `2.0.0-rc.38` or
+    // `2.0.0` stable. Unrelated prereleases (e.g. `3.0.0-alpha.1`) are
+    // still excluded — we only include stables outside the current train.
+    let current_is_prerelease = current.as_ref().is_some_and(|v| !v.pre.is_empty());
+
+    // Accept stable, or prereleases of the same M.m.p train as `current`.
+    let accept_pre_aware = |v: &&semver::Version| -> bool {
+        if v.pre.is_empty() {
+            return true;
+        }
+        if !current_is_prerelease {
+            return false;
+        }
+        // Safe: current_is_prerelease implies current is Some.
+        let cur = current.as_ref().expect("checked above");
+        v.major == cur.major && v.minor == cur.minor && v.patch == cur.patch
+    };
+
     match target {
-        TargetLevel::Latest | TargetLevel::Greatest | TargetLevel::Newest => all_versions
+        TargetLevel::Latest => all_versions
             .iter()
             .rev()
-            .find(|v| v.pre.is_empty())
+            .find(accept_pre_aware)
             .map(std::string::ToString::to_string),
+        // Greatest: highest version number, INCLUDING prereleases (matches
+        // README). `all_versions` is sorted ascending, so the last one wins.
+        //
+        // Newest: MVP alias for Greatest. The crates.io response here does
+        // not expose `created_at`, so true publish-date ordering is future
+        // work. This is at least consistent with README ("most recently
+        // published") for repositories where version order matches publish
+        // order — the common case.
+        TargetLevel::Greatest | TargetLevel::Newest => {
+            all_versions.last().map(std::string::ToString::to_string)
+        }
         TargetLevel::Minor => {
             let Some(cur) = &current else {
                 return latest.cloned();
@@ -225,7 +256,7 @@ fn select_version(
             all_versions
                 .iter()
                 .rev()
-                .find(|v| v.major == cur.major && v.pre.is_empty())
+                .find(|v| v.major == cur.major && accept_pre_aware(v))
                 .map(std::string::ToString::to_string)
         }
         TargetLevel::Patch => {
@@ -235,7 +266,7 @@ fn select_version(
             all_versions
                 .iter()
                 .rev()
-                .find(|v| v.major == cur.major && v.minor == cur.minor && v.pre.is_empty())
+                .find(|v| v.major == cur.major && v.minor == cur.minor && accept_pre_aware(v))
                 .map(std::string::ToString::to_string)
         }
     }
@@ -304,6 +335,98 @@ mod tests {
         let latest = "1.0.0".to_owned();
         let versions = make_versions(&["1.0.0", "2.0.0-rc.1"]);
         let result = select_version("^1.0.0", Some(&latest), &versions, TargetLevel::Latest);
+        assert_eq!(result, Some("1.0.0".to_owned()));
+    }
+
+    #[test]
+    fn test_select_greatest_includes_prerelease() {
+        // Greatest: README says "Highest version number, INCLUDING prereleases".
+        // Previously this filtered prereleases out (bug). Now it must include them.
+        let latest = "1.0.0".to_owned();
+        let versions = make_versions(&["1.0.0", "2.0.0-rc.1"]);
+        let result = select_version("^1.0.0", Some(&latest), &versions, TargetLevel::Greatest);
+        assert_eq!(result, Some("2.0.0-rc.1".to_owned()));
+    }
+
+    #[test]
+    fn test_select_newest_includes_prerelease() {
+        // Newest is MVP-aliased to Greatest. Must include prereleases.
+        let latest = "1.0.0".to_owned();
+        let versions = make_versions(&["1.0.0", "2.0.0-rc.1"]);
+        let result = select_version("^1.0.0", Some(&latest), &versions, TargetLevel::Newest);
+        assert_eq!(result, Some("2.0.0-rc.1".to_owned()));
+    }
+
+    #[test]
+    fn test_latest_prerelease_tail_ignores_unrelated_prereleases() {
+        // Current: 2.0.0-rc.37. 3.0.0-alpha.1 (different train) must NOT be
+        // picked. Only the same-train prereleases or stables qualify.
+        let latest = "1.1.20".to_owned();
+        let versions = make_versions(&["1.1.20", "2.0.0-rc.37", "3.0.0-alpha.1"]);
+        let result = select_version("2.0.0-rc.37", Some(&latest), &versions, TargetLevel::Latest);
+        // 3.0.0-alpha.1 is unrelated prerelease → excluded.
+        // 2.0.0-rc.37 is current → not newer.
+        // 1.1.20 stable is older → allowed by select but the compute_updates
+        // safety net will skip the downgrade. select_version itself just
+        // picks the highest eligible candidate, which is 2.0.0-rc.37 (self).
+        // Here we confirm that unrelated prereleases are NOT selected.
+        assert_ne!(result, Some("3.0.0-alpha.1".to_owned()));
+    }
+
+    #[test]
+    fn test_latest_prerelease_current_picks_higher_stable_major() {
+        // Current: 2.0.0-rc.37. Registry: 1.1.20, 2.0.0-rc.37, 3.0.0 (higher stable major).
+        // Expected: 3.0.0 — stable is ALWAYS preferred over staying on a prerelease,
+        // regardless of "train". Only prerelease candidates are train-gated.
+        let latest = "3.0.0".to_owned();
+        let versions = make_versions(&["1.1.20", "2.0.0-rc.37", "3.0.0"]);
+        let result = select_version("2.0.0-rc.37", Some(&latest), &versions, TargetLevel::Latest);
+        assert_eq!(result, Some("3.0.0".to_owned()));
+    }
+
+    #[test]
+    fn test_latest_prerelease_current_stable_wins_over_unrelated_prerelease() {
+        // Current: 2.0.0-rc.37. Registry: 1.1.20, 2.0.0-rc.37, 3.0.0-alpha.1, 3.0.0.
+        // The unrelated prerelease 3.0.0-alpha.1 must be skipped, but the
+        // stable 3.0.0 (even from a different train) must be picked.
+        let latest = "3.0.0".to_owned();
+        let versions = make_versions(&["1.1.20", "2.0.0-rc.37", "3.0.0-alpha.1", "3.0.0"]);
+        let result = select_version("2.0.0-rc.37", Some(&latest), &versions, TargetLevel::Latest);
+        assert_eq!(result, Some("3.0.0".to_owned()));
+    }
+
+    #[test]
+    fn test_latest_prerelease_tail_jumps_to_stable() {
+        // Current: 2.0.0-rc.37. When 2.0.0 stable is available, pick it
+        // (stable > prerelease of same M.m.p in semver ordering).
+        let latest = "2.0.0".to_owned();
+        let versions = make_versions(&["1.1.20", "2.0.0-rc.37", "2.0.0-rc.40", "2.0.0"]);
+        let result = select_version("2.0.0-rc.37", Some(&latest), &versions, TargetLevel::Latest);
+        assert_eq!(result, Some("2.0.0".to_owned()));
+    }
+
+    #[test]
+    fn test_latest_sea_orm_regression() {
+        // End-to-end regression for the sea-orm 2.0.0-rc.37 -> 1.1.20 bug.
+        // select_version will naturally pick 2.0.0-rc.37 (self) as the only
+        // eligible candidate in the prerelease train, and compute_updates
+        // (CLI layer) then skips it as "not newer".
+        let latest = "1.1.20".to_owned();
+        let versions = make_versions(&["1.1.20", "2.0.0-rc.37"]);
+        let result = select_version("2.0.0-rc.37", Some(&latest), &versions, TargetLevel::Latest);
+        // NOT 1.1.20 (that would be a downgrade).
+        assert_ne!(result, Some("1.1.20".to_owned()));
+        // Self is acceptable; the CLI's safety net filters equal-or-lower.
+        assert_eq!(result, Some("2.0.0-rc.37".to_owned()));
+    }
+
+    #[test]
+    fn test_latest_stable_current_excludes_prerelease() {
+        // When current is stable, latest must NOT pick prereleases
+        // (preserves existing behavior for stable users).
+        let latest = "1.0.0".to_owned();
+        let versions = make_versions(&["1.0.0", "2.0.0-rc.1"]);
+        let result = select_version("1.0.0", Some(&latest), &versions, TargetLevel::Latest);
         assert_eq!(result, Some("1.0.0".to_owned()));
     }
 
