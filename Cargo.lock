@@ -336,7 +336,7 @@ checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
 
 [[package]]
 name = "dependency-check-updates"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "clap",
  "dependency-check-updates-core",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "ignore",
  "miette",
@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-node"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "dependency-check-updates-core",
  "node-semver",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-python"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "dependency-check-updates-core",
  "reqwest",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-rust"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "dependency-check-updates-core",
  "reqwest",
