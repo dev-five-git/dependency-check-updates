@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "dependency-check-updates"
-version = "0.1.6"
+version = "0.1.5"
 description = "Fast multi-ecosystem dependency updater: package.json, Cargo.toml, pyproject.toml in a single CLI (like npm-check-updates for every language)"
 requires-python = ">=3.11"
 readme = "../../README.md"
