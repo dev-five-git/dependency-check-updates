@@ -1,6 +1,6 @@
 [package]
 name = "dependency-check-updates-node"
-version = "0.1.8"
+version = "0.1.9"
 description = "Node.js ecosystem support for dependency-check-updates: package.json parsing, npm registry, version resolution"
 edition.workspace = true
 rust-version.workspace = true
