@@ -1,6 +1,6 @@
 {
   "name": "@dependency-check-updates/cli",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Fast multi-ecosystem dependency updater: package.json, Cargo.toml, pyproject.toml in a single CLI (like npm-check-updates for every language)",
   "main": "main.js",
   "license": "MIT",
