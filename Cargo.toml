@@ -24,11 +24,11 @@ categories = ["development-tools"]
 # Internal — `version` is required so `cargo publish` can resolve path
 # dependencies against crates.io. When bumping any crate version, remember
 # to update these entries in lockstep.
-dependency-check-updates-core = { path = "crates/core", version = "0.1.9" }
-dependency-check-updates-node = { path = "crates/node", version = "0.1.9" }
-dependency-check-updates-rust = { path = "crates/rust", version = "0.1.9" }
-dependency-check-updates-python = { path = "crates/python", version = "0.1.9" }
-dependency-check-updates = { path = "crates/cli", version = "0.1.9" }
+dependency-check-updates-core = { path = "crates/core", version = "0.1.10" }
+dependency-check-updates-node = { path = "crates/node", version = "0.1.10" }
+dependency-check-updates-rust = { path = "crates/rust", version = "0.1.10" }
+dependency-check-updates-python = { path = "crates/python", version = "0.1.10" }
+dependency-check-updates = { path = "crates/cli", version = "0.1.10" }
 
 # External
 clap = { version = "4.6", features = ["derive"] }
