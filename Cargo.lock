@@ -336,7 +336,7 @@ checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
 
 [[package]]
 name = "dependency-check-updates"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "clap",
  "dependency-check-updates-core",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "ignore",
  "miette",
@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-node"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "dependency-check-updates-core",
  "node-semver",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-python"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "dependency-check-updates-core",
  "reqwest",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-rust"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "dependency-check-updates-core",
  "reqwest",
@@ -1507,9 +1507,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.9"
+version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7df23109aa6c1567d1c575b9952556388da57401e4ace1d15f79eedad0d8f53"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "ring",
  "rustls-pki-types",
