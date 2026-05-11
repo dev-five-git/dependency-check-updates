@@ -365,6 +365,17 @@ fn compute_updates(
         // resolved version to 2 segments before comparing. This respects the user's
         // intent to pin only at that granularity.
         let precision = count_version_segments(current_bare);
+
+        if precision < 3 && !is_plain_three_segment_version(selected) {
+            trace!(
+                package = %dep.name,
+                current = %dep.current_req,
+                selected = %selected,
+                "skipping: selected version cannot be safely truncated"
+            );
+            continue;
+        }
+
         let selected_truncated = truncate_version(selected, precision);
 
         if current_bare == selected_truncated {
@@ -404,6 +415,20 @@ fn count_version_segments(bare: &str) -> usize {
         return 0;
     }
     numeric_part.split('.').filter(|s| !s.is_empty()).count()
+}
+
+fn is_plain_three_segment_version(version: &str) -> bool {
+    let mut parts = version.split('.');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(major), Some(minor), Some(patch), None)
+            if !major.is_empty()
+                && !minor.is_empty()
+                && !patch.is_empty()
+                && major.chars().all(|c| c.is_ascii_digit())
+                && minor.chars().all(|c| c.is_ascii_digit())
+                && patch.chars().all(|c| c.is_ascii_digit())
+    )
 }
 
 /// Truncate a version string to the given number of segments.
@@ -560,6 +585,42 @@ mod tests {
         )];
         let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates[0].to, "2.0.0");
+    }
+
+    #[test]
+    fn test_compute_updates_does_not_truncate_prerelease_to_stable() {
+        let deps = vec![DependencySpec {
+            name: "pkg".to_owned(),
+            current_req: "3.1".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("3.1.0".to_owned()),
+                selected: Some("4.0.0-beta.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn test_compute_updates_truncates_plain_three_segment_version() {
+        let deps = vec![DependencySpec {
+            name: "pkg".to_owned(),
+            current_req: "3.1".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("4.0.0".to_owned()),
+                selected: Some("4.0.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates[0].to, "4.0");
     }
 
     #[test]
@@ -978,6 +1039,25 @@ mod tests {
         let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].to, "2.0.0-rc.40");
+    }
+
+    #[test]
+    fn test_compute_updates_allows_beta_to_newer_beta_upgrade() {
+        let deps = vec![DependencySpec {
+            name: "pkg".to_owned(),
+            current_req: "4.0.0-beta.0".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("4.0.0-beta.2".to_owned()),
+                selected: Some("4.0.0-beta.2".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].to, "4.0.0-beta.2");
     }
 
     #[test]
