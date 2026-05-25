@@ -11,6 +11,7 @@ use dependency_check_updates_core::manifest::ManifestHandler;
 use dependency_check_updates_core::{
     DcuError, DependencySpec, ManifestKind, PlannedUpdate, ResolvedVersion, Scanner, TargetLevel,
 };
+use dependency_check_updates_github::{GitHubActionsRegistry, GitHubHandler};
 use dependency_check_updates_node::{NodeHandler, NpmRegistry};
 use dependency_check_updates_python::{PyPiRegistry, PythonHandler};
 use dependency_check_updates_rust::{CratesIoRegistry, RustHandler};
@@ -152,6 +153,7 @@ pub async fn run(cli: &Cli) -> Result<bool, Box<dyn std::error::Error + Send + S
             ManifestKind::PackageJson => Box::new(NodeHandler),
             ManifestKind::CargoToml => Box::new(RustHandler),
             ManifestKind::PyProjectToml => Box::new(PythonHandler),
+            ManifestKind::GitHubWorkflow => Box::new(GitHubHandler),
         };
 
         let parsed = handler.parse(&text, &manifest_ref.path)?;
@@ -192,6 +194,7 @@ pub async fn run(cli: &Cli) -> Result<bool, Box<dyn std::error::Error + Send + S
     let npm_registry = NpmRegistry::new();
     let crates_registry = CratesIoRegistry::new();
     let pypi_registry = PyPiRegistry::new();
+    let github_registry = GitHubActionsRegistry::new();
 
     let mut resolve_futures = Vec::new();
     for (job_idx, job) in manifest_jobs.iter().enumerate() {
@@ -199,11 +202,15 @@ pub async fn run(cli: &Cli) -> Result<bool, Box<dyn std::error::Error + Send + S
             let npm = &npm_registry;
             let crates_io = &crates_registry;
             let pypi = &pypi_registry;
+            let github = &github_registry;
             resolve_futures.push(async move {
                 let resolved = match job.manifest_ref.kind {
                     ManifestKind::PackageJson => npm.resolve_batch(&job.deps, cli.target).await,
                     ManifestKind::CargoToml => crates_io.resolve_batch(&job.deps, cli.target).await,
                     ManifestKind::PyProjectToml => pypi.resolve_batch(&job.deps, cli.target).await,
+                    ManifestKind::GitHubWorkflow => {
+                        github.resolve_batch(&job.deps, cli.target).await
+                    }
                 };
                 (job_idx, resolved)
             });
@@ -324,9 +331,14 @@ fn compute_updates(
     for (idx, result) in resolved {
         let dep = &deps[*idx];
 
-        let Ok(resolved) = result else {
-            warn!(package = %dep.name, "failed to resolve version");
-            continue;
+        let resolved = match result {
+            Ok(r) => r,
+            Err(e) => {
+                // Surface the error's full Display — without it, users hit
+                // GitHub rate limits and never see the GITHUB_TOKEN hint.
+                warn!("{e}");
+                continue;
+            }
         };
 
         let Some(selected) = &resolved.selected else {
@@ -340,16 +352,15 @@ fn compute_updates(
             .trim_start_matches(|c: char| !c.is_ascii_digit());
 
         // Safety net: never suggest a downgrade. When both current and selected
-        // can be parsed as semver, skip this dependency if selected <= current.
-        // This guards against the registry-filtering path returning an older
-        // stable when the user is already on a higher prerelease (e.g.
-        // `sea-orm 2.0.0-rc.37` -> `1.1.20` should NOT be reported).
+        // can be parsed as semver (after padding short forms like `5` or `5.1`
+        // to `5.0.0` / `5.1.0`), skip this dependency if selected <= current.
         //
-        // For ranges like `^1` / `0.6` where we cannot fully parse as semver,
-        // we fall through to the string-based precision comparison below.
+        // Padding is needed for GitHub Actions refs (`v5`) and short Rust /
+        // Python pins (`wiremock = "0.6"`) — without it, the safety net was
+        // bypassed exactly where downgrades are most likely.
         if let (Ok(cur_ver), Ok(sel_ver)) = (
-            semver::Version::parse(current_bare),
-            semver::Version::parse(selected),
+            semver::Version::parse(&pad_to_three_segments(current_bare)),
+            semver::Version::parse(&pad_to_three_segments(selected)),
         ) && sel_ver <= cur_ver
         {
             trace!(
@@ -397,6 +408,33 @@ fn compute_updates(
     }
 
     updates
+}
+
+/// Pad a version string to exactly three numeric segments so it can be
+/// fed to `semver::Version::parse` for ordering comparisons.
+///
+/// Preserves any pre-release / build-metadata suffix (`-rc.1`, `+build.7`).
+///
+/// `pad_to_three_segments("5")`           → `"5.0.0"`
+/// `pad_to_three_segments("5.1")`         → `"5.1.0"`
+/// `pad_to_three_segments("5.1.0")`       → `"5.1.0"`
+/// `pad_to_three_segments("5.1.0-rc.1")`  → `"5.1.0-rc.1"`
+/// `pad_to_three_segments("1.2-beta")`    → `"1.2.0-beta"`
+fn pad_to_three_segments(v: &str) -> String {
+    if v.is_empty() {
+        return v.to_owned();
+    }
+    let (numeric, suffix) = v
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .map_or((v, ""), |i| v.split_at(i));
+    let parts: Vec<&str> = numeric.split('.').filter(|s| !s.is_empty()).collect();
+    match parts.len() {
+        1 => format!("{}.0.0{}", parts[0], suffix),
+        2 => format!("{}.{}.0{}", parts[0], parts[1], suffix),
+        // 0 (no numeric prefix) or ≥3 (already padded / over-padded): leave
+        // as-is. `semver::Version::parse` will reject the 0-parts case below.
+        _ => v.to_owned(),
+    }
 }
 
 /// Count the number of version segments in a bare version string.
@@ -836,6 +874,61 @@ mod tests {
         assert_eq!(updates[0].to, "^1.5.0");
         assert_eq!(updates[1].name, "b");
         assert_eq!(updates[1].to, "~2.5.0");
+    }
+
+    #[test]
+    fn test_pad_to_three_segments() {
+        assert_eq!(pad_to_three_segments("5"), "5.0.0");
+        assert_eq!(pad_to_three_segments("5.1"), "5.1.0");
+        assert_eq!(pad_to_three_segments("5.1.0"), "5.1.0");
+        assert_eq!(pad_to_three_segments("5.1.2.3"), "5.1.2.3"); // 4+ left as-is
+        assert_eq!(pad_to_three_segments("5.1.0-rc.1"), "5.1.0-rc.1");
+        assert_eq!(pad_to_three_segments("1.2-beta"), "1.2.0-beta");
+        assert_eq!(pad_to_three_segments("5-beta"), "5.0.0-beta");
+        assert_eq!(pad_to_three_segments(""), "");
+    }
+
+    #[test]
+    fn test_compute_updates_blocks_downgrade_short_version() {
+        // Regression: `v5` should not be downgraded to `v4` even though semver
+        // parse of bare "5" fails — the padded path now catches this.
+        let deps = vec![DependencySpec {
+            name: "actions/checkout".to_owned(),
+            current_req: "v5".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("4.0.0".to_owned()),
+                selected: Some("4.0.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert!(
+            updates.is_empty(),
+            "must not downgrade v5 → v4, got: {updates:?}"
+        );
+    }
+
+    #[test]
+    fn test_compute_updates_short_version_upgrade() {
+        // v5 → registry returns 6.0.0 → output v6 (precision-truncated).
+        let deps = vec![DependencySpec {
+            name: "actions/checkout".to_owned(),
+            current_req: "v5".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("6.0.0".to_owned()),
+                selected: Some("6.0.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].to, "v6");
     }
 
     #[test]

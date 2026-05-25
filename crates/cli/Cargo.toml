@@ -16,11 +16,20 @@ categories = ["command-line-utilities", "development-tools"]
 name = "dependency-check-updates"
 path = "src/main.rs"
 
+# Short alias — every `cargo install dependency-check-updates` user gets
+# `dcu` for free. The stub lives in `src/bin/dcu.rs` (a separate file rather
+# than sharing `src/main.rs`) to avoid Cargo's "file present in multiple
+# build targets" warning.
+[[bin]]
+name = "dcu"
+path = "src/bin/dcu.rs"
+
 [dependencies]
 dependency-check-updates-core.workspace = true
 dependency-check-updates-node.workspace = true
 dependency-check-updates-rust.workspace = true
 dependency-check-updates-python.workspace = true
+dependency-check-updates-github.workspace = true
 rustls.workspace = true
 clap.workspace = true
 serde_json.workspace = true
@@ -39,6 +48,7 @@ tempfile.workspace = true
 dependency-check-updates-node.workspace = true
 dependency-check-updates-rust.workspace = true
 dependency-check-updates-python.workspace = true
+dependency-check-updates-github.workspace = true
 
 [lints]
 workspace = true

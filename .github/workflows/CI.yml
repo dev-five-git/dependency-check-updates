@@ -377,18 +377,22 @@ jobs:
             os: linux
             target: x86_64-unknown-linux-gnu
             binary_name: dependency-check-updates-linux-x86_64
+            dcu_binary_name: dcu-linux-x86_64
           - platform: windows-2022
             os: windows
             target: x86_64-pc-windows-msvc
             binary_name: dependency-check-updates-windows-x86_64.exe
+            dcu_binary_name: dcu-windows-x86_64.exe
           - platform: macos-14
             os: macos
             target: x86_64-apple-darwin
             binary_name: dependency-check-updates-darwin-x86_64
+            dcu_binary_name: dcu-darwin-x86_64
           - platform: macos-14
             os: macos
             target: aarch64-apple-darwin
             binary_name: dependency-check-updates-darwin-arm64
+            dcu_binary_name: dcu-darwin-arm64
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -396,12 +400,27 @@ jobs:
           toolchain: stable
           target: ${{ matrix.target }}
           components: clippy, rustfmt
-      - name: Build Rust binary
+      - name: Build Rust binaries
+        # The cli crate produces both `dependency-check-updates` and `dcu` from
+        # one `cargo build -p dependency-check-updates` invocation — see the
+        # two `[[bin]]` entries in crates/cli/Cargo.toml.
         run: cargo build --release --target ${{ matrix.target }} -p dependency-check-updates
-      - name: Rename binary
-        run: mv target/${{ matrix.target }}/release/dependency-check-updates${{ matrix.os == 'windows' && '.exe' || '' }} ${{ matrix.binary_name }}
-      - name: Upload Asset
+      - name: Rename binaries
+        shell: bash
+        # Use bash on all platforms so the same conditional EXT works on
+        # Windows runners (Git Bash is available there).
+        run: |
+          EXT=""
+          if [ "${{ matrix.os }}" = "windows" ]; then EXT=".exe"; fi
+          mv "target/${{ matrix.target }}/release/dependency-check-updates$EXT" "${{ matrix.binary_name }}"
+          mv "target/${{ matrix.target }}/release/dcu$EXT" "${{ matrix.dcu_binary_name }}"
+      - name: Upload Assets
         uses: owjs3901/upload-github-release-asset@main
         with:
           upload_url: ${{ fromJson(needs.changepacks.outputs.release_assets_urls)['crates/cli/Cargo.toml'] }}
-          asset_path: ${{ matrix.binary_name }}
+          # Multi-line asset_path uploads every line as a separate asset; verified
+          # against the same action's usage in the `node-publish` and
+          # `python-publish` jobs above.
+          asset_path: |
+            ${{ matrix.binary_name }}
+            ${{ matrix.dcu_binary_name }}

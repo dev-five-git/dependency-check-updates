@@ -1,0 +1,40 @@
+name: Check Outdated Dependencies (dogfood)
+
+# Dogfood the tool: weekly run `dcu` against this repo. The `-e 2` flag makes
+# the job fail when ANY dependency (Cargo, npm, PyPI, or GitHub Actions tag) is
+# behind, so the workflow status itself is the alert mechanism — no separate
+# issue-bot needed.
+#
+# Also useful as a live demo: anyone reading the README can click through to
+# this workflow's runs and see what the tool actually reports.
+
+on:
+  schedule:
+    # Mondays 09:00 UTC — start of the maintainer week, before the project's
+    # other scheduled jobs.
+    - cron: '0 9 * * 1'
+  # Manual trigger for ad-hoc audits.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-deps-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check (dcu -d -e 2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Run dcu against this repo
+        # GITHUB_TOKEN raises the GitHub Tags API limit from 60 → 5000 req/hr,
+        # which matters when scanning all of .github/workflows in one pass.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo run --release -p dependency-check-updates -- -d -e 2

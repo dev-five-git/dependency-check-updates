@@ -32,12 +32,18 @@
 Like [npm-check-updates](https://www.npmjs.com/package/npm-check-updates), but for every language.
 
 ```
-$ dependency-check-updates
+$ dcu
 Checking Cargo.toml
  toml_edit  0.22  ->  0.25.4
 
-Run dependency-check-updates -u to upgrade Cargo.toml
+Checking .github/workflows/CI.yml
+ actions/checkout    v4  ->  v5
+ actions/setup-node  v4  ->  v5
+
+Run dcu -u to upgrade
 ```
+
+> `dcu` is a short alias installed alongside `dependency-check-updates`. Both commands are identical — use whichever you prefer.
 
 ## Quick Start (Zero Install)
 
@@ -57,12 +63,13 @@ All four accept the same flags described in [Usage](#usage).
 
 ## Features
 
-- **Multi-ecosystem** — `package.json`, `Cargo.toml`, `pyproject.toml` handled by a single binary
-- **Format-preserving** — surgical byte-range patching for JSON; `toml_edit` for TOML. Your indentation, comments, trailing newlines, and key ordering stay intact
+- **Multi-ecosystem** — `package.json`, `Cargo.toml`, `pyproject.toml`, and `.github/workflows/*.yml` all handled by a single binary
+- **Format-preserving** — surgical byte-range patching for JSON / YAML; `toml_edit` for TOML. Your indentation, comments, trailing newlines, and key ordering stay intact
 - **Fast** — concurrent registry lookups across all manifests via `futures::join_all`
 - **Smart range checking** — skips false positives where the resolved version already satisfies the current range (`^3` already covers `3.5.1`)
 - **Deep scan** — `-d` recursively finds manifests in monorepos, respecting `.gitignore`
 - **ncu-compatible UX** — the same flags you already know from `npm-check-updates`
+- **Short alias** — type `dcu` instead of `dependency-check-updates`; both are installed by every distribution
 - **CI-friendly** — `-e 2` exits non-zero when updates exist; `--format json` emits machine-readable output
 
 ## Supported Ecosystems
@@ -72,6 +79,16 @@ All four accept the same flags described in [Usage](#usage).
 | Node.js | `package.json` | [npm](https://www.npmjs.com/) | [`@dependency-check-updates/cli`](https://www.npmjs.com/package/@dependency-check-updates/cli) |
 | Rust | `Cargo.toml` | [crates.io](https://crates.io/) | [`dependency-check-updates`](https://crates.io/crates/dependency-check-updates) |
 | Python | `pyproject.toml` | [PyPI](https://pypi.org/) | [`dependency-check-updates`](https://pypi.org/project/dependency-check-updates/) |
+| GitHub Actions | `.github/workflows/*.yml`, `action.yml` | [GitHub Tags API](https://docs.github.com/rest/repos/repos#list-repository-tags) | *(built-in)* |
+
+### GitHub Actions specifics
+
+- Discovers every `*.yml` / `*.yaml` under `.github/workflows/` and any `action.yml` / `action.yaml` at the repo root automatically. Composite actions nested under `.github/actions/**/` are picked up with `-d`.
+- Scans `uses: owner/repo@ref` directives. Refs without version digits — `@main`, `@master`, branch names, and full commit SHAs — are **left untouched** on purpose; they pin a moving target intentionally.
+- Tag prefix is preserved: `@v5` updates to `@v6` (major float), `@v5.1.0` updates to `@v6.0.0` (full precision). Bare semver without the `v` (`@1.2.3`, `@5`) is recognised and tracked the same way.
+- Duplicate rows are collapsed in the output — if `actions/checkout@v5` appears in 12 jobs, you see one row, not twelve. The patch engine still updates every occurrence in the file.
+- **Rate limit**: unauthenticated runs use GitHub's 60 req/hr ceiling. Hitting it produces an explicit error pointing to the fix — set `GITHUB_TOKEN` (or `GH_TOKEN`) in your environment to raise the limit to 5 000 req/hr.
+- Tag fetch is bounded to the **first 100 tags** per action (newest-first). This comfortably covers every mainstream action; deliberately not paginating keeps API consumption predictable so deep scans don't spike into the rate-limit ceiling.
 
 ## Installation
 
@@ -83,7 +100,7 @@ Every distribution below ships the exact same binary. Pick whichever matches you
 cargo install dependency-check-updates
 ```
 
-Installs command: `dependency-check-updates`
+Installs commands: `dependency-check-updates` **and** `dcu` (short alias).
 
 ### Node.js (npm / bun / pnpm / yarn)
 
@@ -121,7 +138,7 @@ pip    install dependency-check-updates
 uv pip install dependency-check-updates
 ```
 
-Installs command: `dependency-check-updates`
+Installs commands: `dependency-check-updates` **and** `dcu` (short alias).
 
 One-off execution (no install):
 
@@ -132,28 +149,28 @@ pipx run dependency-check-updates [flags]
 
 ## Usage
 
-Run from a directory containing at least one of `package.json`, `Cargo.toml`, or `pyproject.toml`. Every supported manifest in the current directory is auto-detected.
+Run from a directory containing at least one of `package.json`, `Cargo.toml`, `pyproject.toml`, or `.github/workflows/*.yml`. Every supported manifest in the current directory is auto-detected.
+
+All examples below use the short `dcu` alias. The long form `dependency-check-updates` works identically.
 
 ### Basic
 
 ```bash
 # Check for outdated dependencies (read-only, nothing is written)
-dependency-check-updates
+dcu
 
 # Apply updates in place (format-preserving)
-dependency-check-updates -u
+dcu -u
 
 # Recursively scan subdirectories (monorepo-friendly, respects .gitignore)
-dependency-check-updates -d
-dependency-check-updates -d -u
+dcu -d
+dcu -d -u
 ```
-
-> On Node.js installations the short alias `dcu` works identically — e.g. `dcu -d -u`.
 
 ### All Options
 
 ```
-Usage: dependency-check-updates [OPTIONS] [FILTER]...
+Usage: dcu [OPTIONS] [FILTER]...
 ```
 
 | Flag | Description | Default |
@@ -184,33 +201,40 @@ Usage: dependency-check-updates [OPTIONS] [FILTER]...
 
 ```bash
 # Target specific update level
-dependency-check-updates -t patch           # patch only
-dependency-check-updates -t minor           # minor + patch
-dependency-check-updates -t latest          # default: latest stable
-dependency-check-updates -t greatest        # include prereleases
+dcu -t patch           # patch only
+dcu -t minor           # minor + patch
+dcu -t latest          # default: latest stable
+dcu -t greatest        # include prereleases
 
 # Filter packages — positional args act as an include-list
-dependency-check-updates react eslint       # only check react and eslint
-dependency-check-updates -x typescript      # exclude typescript
-dependency-check-updates -x typescript -x lodash
+dcu react eslint       # only check react and eslint
+dcu -x typescript      # exclude typescript
+dcu -x typescript -x lodash
+
+# Filter GitHub Actions by owner — same filter syntax works across ecosystems
+dcu actions            # only actions/checkout, actions/setup-node, …
 
 # Operate on a specific manifest
-dependency-check-updates --manifest path/to/Cargo.toml
-dependency-check-updates --manifest apps/web/package.json
+dcu --manifest path/to/Cargo.toml
+dcu --manifest apps/web/package.json
+dcu --manifest .github/workflows/CI.yml
 
 # Machine-readable output for scripting/CI
-dependency-check-updates --format json
+dcu --format json
 
 # CI gate: exit 1 if any updates are available
-dependency-check-updates -e 2
+dcu -e 2
 
 # Verbose logging (accumulating)
-dependency-check-updates -v    # info
-dependency-check-updates -vv   # debug
-dependency-check-updates -vvv  # trace
+dcu -v    # info
+dcu -vv   # debug
+dcu -vvv  # trace
 
 # Combining flags — recursive, patch-only upgrade in a monorepo
-dependency-check-updates -d -u -t patch
+dcu -d -u -t patch
+
+# GitHub Actions: pin a higher rate limit by exporting a token
+GITHUB_TOKEN=ghp_xxx dcu -d -u
 ```
 
 ### Zero-Install Examples
@@ -236,12 +260,12 @@ Follows the [changepacks](https://github.com/changepacks/changepacks) pattern �
 ```
 .
 ├── crates/
-│   ├── cli/           # Binary + async CLI orchestration
+│   ├── cli/           # Binary + async CLI orchestration (installs `dcu` + `dependency-check-updates`)
 │   ├── core/          # Shared traits (ManifestHandler, RegistryClient, Scanner)
 │   ├── node/          # Node.js: package.json parser + npm registry
 │   ├── rust/          # Rust: Cargo.toml parser (toml_edit) + crates.io
 │   ├── python/        # Python: pyproject.toml parser (toml_edit) + PyPI
-│   └── testkit/       # Test fixtures and helpers
+│   └── github/        # GitHub Actions: workflow YAML parser + GitHub Tags API
 ├── bridge/
 │   ├── node/          # napi-rs N-API binding → npm: @dependency-check-updates/cli
 │   └── python/        # maturin bin binding → PyPI: dependency-check-updates
@@ -253,6 +277,7 @@ Follows the [changepacks](https://github.com/changepacks/changepacks) pattern �
 
 - **JSON** (`package.json`): Surgical byte-range replacement — finds exact byte offsets of version values and replaces only those bytes. Indent, line endings, trailing newline, and key ordering are preserved byte-for-byte.
 - **TOML** (`Cargo.toml`, `pyproject.toml`): `toml_edit` document model preserves comments, table ordering, inline-table formatting, and whitespace.
+- **YAML** (`.github/workflows/*.yml`, `action.yml`): Line-based `uses:` scanning with byte-range replacement of only the `@ref` portion. Anchors, comments, blank lines, and unrelated `@main` / `@<sha>` pins are never touched.
 
 ### Shared Traits
 

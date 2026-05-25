@@ -7,17 +7,48 @@ pub enum ManifestKind {
     PackageJson,
     CargoToml,
     PyProjectToml,
+    /// GitHub Actions workflow (`.github/workflows/*.yml` /`*.yaml`) or
+    /// composite action definition (`action.yml` / `action.yaml`).
+    GitHubWorkflow,
 }
 
 impl ManifestKind {
     /// Detect manifest kind from a file path.
+    ///
+    /// GitHub workflow detection requires the parent directory context because
+    /// arbitrary `*.yml` files exist throughout repos and only files under
+    /// `.github/workflows/` or named `action.yml`/`action.yaml` are treated as
+    /// workflow manifests.
     #[must_use]
     pub fn from_path(path: &std::path::Path) -> Option<Self> {
-        match path.file_name()?.to_str()? {
+        let file_name = path.file_name()?.to_str()?;
+        match file_name {
             "package.json" => Some(Self::PackageJson),
             "Cargo.toml" => Some(Self::CargoToml),
             "pyproject.toml" => Some(Self::PyProjectToml),
-            _ => None,
+            "action.yml" | "action.yaml" => Some(Self::GitHubWorkflow),
+            _ => {
+                // Workflow YAMLs live in `.github/workflows/`.
+                if matches!(
+                    path.extension().and_then(|s| s.to_str()),
+                    Some("yml" | "yaml")
+                ) && path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    == Some("workflows")
+                    && path
+                        .parent()
+                        .and_then(std::path::Path::parent)
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        == Some(".github")
+                {
+                    Some(Self::GitHubWorkflow)
+                } else {
+                    None
+                }
+            }
         }
     }
 }
@@ -28,6 +59,7 @@ impl std::fmt::Display for ManifestKind {
             Self::PackageJson => write!(f, "package.json"),
             Self::CargoToml => write!(f, "Cargo.toml"),
             Self::PyProjectToml => write!(f, "pyproject.toml"),
+            Self::GitHubWorkflow => write!(f, "GitHub workflow"),
         }
     }
 }
@@ -53,6 +85,8 @@ pub enum DependencySection {
     WorkspaceDependencies,
     // Python (pyproject.toml)
     ProjectDependencies,
+    // GitHub Actions (`uses:` directives in workflows / composite actions)
+    GitHubActions,
 }
 
 impl DependencySection {
@@ -67,6 +101,7 @@ impl DependencySection {
             Self::BuildDependencies => "build-dependencies",
             Self::WorkspaceDependencies => "workspace.dependencies",
             Self::ProjectDependencies => "project.dependencies",
+            Self::GitHubActions => "uses",
         }
     }
 }
@@ -258,6 +293,68 @@ mod tests {
             ManifestKind::from_path(path),
             Some(ManifestKind::PyProjectToml)
         );
+    }
+
+    #[test]
+    fn test_manifest_kind_from_path_workflow_yml() {
+        let path = std::path::Path::new(".github/workflows/CI.yml");
+        assert_eq!(
+            ManifestKind::from_path(path),
+            Some(ManifestKind::GitHubWorkflow)
+        );
+    }
+
+    #[test]
+    fn test_manifest_kind_from_path_workflow_yaml() {
+        let path = std::path::Path::new(".github/workflows/release.yaml");
+        assert_eq!(
+            ManifestKind::from_path(path),
+            Some(ManifestKind::GitHubWorkflow)
+        );
+    }
+
+    #[test]
+    fn test_manifest_kind_from_path_action_yml() {
+        let path = std::path::Path::new(".github/actions/setup/action.yml");
+        assert_eq!(
+            ManifestKind::from_path(path),
+            Some(ManifestKind::GitHubWorkflow)
+        );
+    }
+
+    #[test]
+    fn test_manifest_kind_from_path_action_yaml() {
+        let path = std::path::Path::new("path/to/action.yaml");
+        assert_eq!(
+            ManifestKind::from_path(path),
+            Some(ManifestKind::GitHubWorkflow)
+        );
+    }
+
+    #[test]
+    fn test_manifest_kind_from_path_unrelated_yml_ignored() {
+        // Random .yml files OUTSIDE .github/workflows must not be picked up.
+        let path = std::path::Path::new("docker-compose.yml");
+        assert_eq!(ManifestKind::from_path(path), None);
+    }
+
+    #[test]
+    fn test_manifest_kind_from_path_nested_workflow() {
+        let path = std::path::Path::new("repo/.github/workflows/test.yml");
+        assert_eq!(
+            ManifestKind::from_path(path),
+            Some(ManifestKind::GitHubWorkflow)
+        );
+    }
+
+    #[test]
+    fn test_manifest_kind_display_github_workflow() {
+        assert_eq!(ManifestKind::GitHubWorkflow.to_string(), "GitHub workflow");
+    }
+
+    #[test]
+    fn test_dependency_section_label_github_actions() {
+        assert_eq!(DependencySection::GitHubActions.label(), "uses");
     }
 
     #[test]
