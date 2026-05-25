@@ -85,12 +85,22 @@ pub struct Scanner;
 impl Scanner {
     /// Find manifest files in the given directory (non-recursive).
     ///
-    /// Returns all recognized manifests: `package.json`, `Cargo.toml`, `pyproject.toml`.
+    /// Returns all recognized manifests at the root level (`package.json`,
+    /// `Cargo.toml`, `pyproject.toml`, `action.yml` / `action.yaml`) and every
+    /// `*.yml`/`*.yaml` directly under `.github/workflows/`. The root-level
+    /// `action.yml` is included so that authors of single-action repos see
+    /// their own manifest without needing `-d`.
     #[must_use]
     pub fn scan_dir(root: &Path) -> Vec<ManifestRef> {
         let mut manifests = Vec::new();
 
-        let candidates = ["package.json", "Cargo.toml", "pyproject.toml"];
+        let candidates = [
+            "package.json",
+            "Cargo.toml",
+            "pyproject.toml",
+            "action.yml",
+            "action.yaml",
+        ];
 
         for filename in &candidates {
             let path = root.join(filename);
@@ -99,6 +109,23 @@ impl Scanner {
                     manifests.push(ManifestRef { path, kind });
                 }
             }
+        }
+
+        // GitHub Actions: enumerate `.github/workflows/*.yml`/`*.yaml`.
+        let workflows_dir = root.join(".github").join("workflows");
+        if let Ok(entries) = std::fs::read_dir(&workflows_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                if let Some(kind) = ManifestKind::from_path(&path) {
+                    manifests.push(ManifestRef { path, kind });
+                }
+            }
+            // Stable order so output is reproducible across platforms — `read_dir`
+            // is OS-dependent (NTFS vs ext4 give different orderings).
+            manifests.sort_by(|a, b| a.path.cmp(&b.path));
         }
 
         manifests
@@ -130,29 +157,40 @@ impl Scanner {
     ///
     /// Respects `.gitignore`, `.ignore`, and skips common directories
     /// (`node_modules`, `target`, `.venv`, `dist`, `build`, `vendor`).
+    /// Walks INTO `.github` even though it is a hidden directory because
+    /// workflow YAMLs live there; without this exception deep scan would miss
+    /// every GitHub Actions manifest.
     #[must_use]
     pub fn scan_deep(root: &Path) -> Vec<ManifestRef> {
         use ignore::WalkBuilder;
 
-        let manifest_names: &[&str] = &["package.json", "Cargo.toml", "pyproject.toml"];
+        let manifest_names: &[&str] = &[
+            "package.json",
+            "Cargo.toml",
+            "pyproject.toml",
+            "action.yml",
+            "action.yaml",
+        ];
 
         let walker = WalkBuilder::new(root)
-            .hidden(true)
+            // `hidden(false)` so `.github/` is traversed. The filter_entry
+            // below still skips other hidden dirs that are not interesting.
+            .hidden(false)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
             .filter_entry(|entry| {
                 let name = entry.file_name().to_string_lossy();
-                // Skip common dependency/build directories
+                // Skip common dependency/build directories and hidden dirs that
+                // are NOT `.github`. The leading-dot check lets `.github` and
+                // any descendants through while still pruning `.git`, `.venv`,
+                // `.idea`, etc.
+                if name.starts_with('.') && name.as_ref() != "." && name.as_ref() != ".github" {
+                    return false;
+                }
                 !matches!(
                     name.as_ref(),
-                    "node_modules"
-                        | "target"
-                        | ".venv"
-                        | "dist"
-                        | "build"
-                        | "vendor"
-                        | "__pycache__"
+                    "node_modules" | "target" | "dist" | "build" | "vendor" | "__pycache__"
                 )
             })
             .build();
@@ -164,8 +202,24 @@ impl Scanner {
                 continue;
             }
 
+            let path = entry.path();
             let file_name = entry.file_name().to_string_lossy();
-            if manifest_names.contains(&file_name.as_ref()) {
+            let is_workflow_yaml = matches!(
+                path.extension().and_then(|s| s.to_str()),
+                Some("yml" | "yaml")
+            ) && path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                == Some("workflows")
+                && path
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    == Some(".github");
+
+            if manifest_names.contains(&file_name.as_ref()) || is_workflow_yaml {
                 let path = entry.into_path();
                 if let Some(kind) = ManifestKind::from_path(&path) {
                     debug!(path = %path.display(), kind = %kind, "deep scan: found manifest");
@@ -174,6 +228,7 @@ impl Scanner {
             }
         }
 
+        manifests.sort_by(|a, b| a.path.cmp(&b.path));
         manifests
     }
 
@@ -363,5 +418,128 @@ mod tests {
         let result = Scanner::discover(dir.path(), None, true);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_scan_dir_finds_workflow_yml() {
+        let dir = TempDir::new().unwrap();
+        let workflows = dir.path().join(".github").join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        create_temp_manifest(
+            &workflows,
+            "CI.yml",
+            "jobs:\n  test:\n    runs-on: ubuntu-latest\n",
+        );
+
+        let manifests = Scanner::scan_dir(dir.path());
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].kind, ManifestKind::GitHubWorkflow);
+        assert!(manifests[0].path.ends_with("CI.yml"));
+    }
+
+    #[test]
+    fn test_scan_dir_finds_workflow_yaml() {
+        let dir = TempDir::new().unwrap();
+        let workflows = dir.path().join(".github").join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        create_temp_manifest(&workflows, "release.yaml", "jobs: {}\n");
+
+        let manifests = Scanner::scan_dir(dir.path());
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].kind, ManifestKind::GitHubWorkflow);
+    }
+
+    #[test]
+    fn test_scan_dir_finds_root_action_yml() {
+        // Composite action authors put `action.yml` at the repo root. scan_dir
+        // (no -d) must surface it so they don't have to remember `-d`.
+        let dir = TempDir::new().unwrap();
+        create_temp_manifest(
+            dir.path(),
+            "action.yml",
+            "name: test\nruns:\n  using: composite\n",
+        );
+
+        let manifests = Scanner::scan_dir(dir.path());
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].kind, ManifestKind::GitHubWorkflow);
+    }
+
+    #[test]
+    fn test_scan_dir_workflow_files_sorted_alphabetically() {
+        // read_dir order is OS-dependent (NTFS != ext4). Sort guarantees
+        // reproducible CLI output.
+        let dir = TempDir::new().unwrap();
+        let workflows = dir.path().join(".github").join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        create_temp_manifest(&workflows, "z.yml", "jobs:");
+        create_temp_manifest(&workflows, "a.yml", "jobs:");
+        create_temp_manifest(&workflows, "m.yml", "jobs:");
+
+        let manifests = Scanner::scan_dir(dir.path());
+        assert_eq!(manifests.len(), 3);
+        assert!(manifests[0].path.ends_with("a.yml"));
+        assert!(manifests[1].path.ends_with("m.yml"));
+        assert!(manifests[2].path.ends_with("z.yml"));
+    }
+
+    #[test]
+    fn test_scan_dir_ignores_non_yml_files_in_workflows_dir() {
+        // README.md / json artefacts inside .github/workflows/ must not pollute
+        // the result.
+        let dir = TempDir::new().unwrap();
+        let workflows = dir.path().join(".github").join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        create_temp_manifest(&workflows, "README.md", "# ignored");
+        create_temp_manifest(&workflows, "config.json", "{}");
+        create_temp_manifest(&workflows, "CI.yml", "jobs:");
+
+        let manifests = Scanner::scan_dir(dir.path());
+        assert_eq!(manifests.len(), 1);
+        assert!(manifests[0].path.ends_with("CI.yml"));
+    }
+
+    #[test]
+    fn test_scan_dir_combines_workflows_and_traditional_manifests() {
+        let dir = TempDir::new().unwrap();
+        create_temp_manifest(dir.path(), "Cargo.toml", "[package]");
+        create_temp_manifest(dir.path(), "package.json", "{}");
+        let workflows = dir.path().join(".github").join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        create_temp_manifest(&workflows, "CI.yml", "jobs:");
+
+        let manifests = Scanner::scan_dir(dir.path());
+        assert_eq!(manifests.len(), 3);
+        let kinds: std::collections::HashSet<_> = manifests.iter().map(|m| m.kind).collect();
+        assert!(kinds.contains(&ManifestKind::CargoToml));
+        assert!(kinds.contains(&ManifestKind::PackageJson));
+        assert!(kinds.contains(&ManifestKind::GitHubWorkflow));
+    }
+
+    #[test]
+    fn test_scan_deep_walks_into_dot_github() {
+        // Deep scan must traverse into `.github` (hidden by convention) so it
+        // finds workflow manifests. Other hidden dirs (`.git`, `.venv`) must
+        // still be skipped.
+        let dir = TempDir::new().unwrap();
+        let workflows = dir.path().join(".github").join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        create_temp_manifest(&workflows, "CI.yml", "jobs:");
+
+        // A hidden non-.github dir that must be ignored.
+        std::fs::create_dir_all(dir.path().join(".secret")).unwrap();
+        create_temp_manifest(&dir.path().join(".secret"), "package.json", "{}");
+
+        let manifests = Scanner::scan_deep(dir.path());
+        let workflow_count = manifests
+            .iter()
+            .filter(|m| m.kind == ManifestKind::GitHubWorkflow)
+            .count();
+        assert_eq!(workflow_count, 1, "must find workflow inside .github/");
+        let secret_count = manifests
+            .iter()
+            .filter(|m| m.path.to_string_lossy().contains(".secret"))
+            .count();
+        assert_eq!(secret_count, 0, "other hidden dirs must stay hidden");
     }
 }

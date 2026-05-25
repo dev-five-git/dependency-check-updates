@@ -1,0 +1,36 @@
+[package]
+name = "dependency-check-updates-github"
+version = "0.1.12"
+description = "GitHub Actions workflow support for dependency-check-updates"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords = ["dependency", "update", "github-actions", "workflow", "ncu"]
+categories = ["development-tools"]
+
+[lib]
+name = "dependency_check_updates_github"
+path = "src/lib.rs"
+
+[dependencies]
+dependency-check-updates-core.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+node-semver.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+wiremock.workspace = true
+rustls.workspace = true
+
+[lints]
+workspace = true

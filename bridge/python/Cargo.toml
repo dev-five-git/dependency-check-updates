@@ -22,5 +22,13 @@ tokio.workspace = true
 name = "dependency-check-updates"
 path = "src/main.rs"
 
+# Short alias — maturin (bindings = "bin") emits a wheel script entry point
+# for every `[[bin]]` here, so this gives Python users both `dcu` and
+# `dependency-check-updates` after `pip install dependency-check-updates`.
+# Lives in its own source file to silence Cargo's shared-path warning.
+[[bin]]
+name = "dcu"
+path = "src/dcu.rs"
+
 [lints]
 workspace = true

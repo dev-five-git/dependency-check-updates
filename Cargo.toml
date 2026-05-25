@@ -7,7 +7,7 @@ members = ["crates/*", "bridge/*"]
 # parallel linker processes to race on the same output file (LNK1104).
 # `members` still contains bridge/* so workspace-wide commands
 # (`cargo test --workspace`, `cargo clippy --workspace`) keep covering it.
-default-members = ["crates/cli", "crates/core", "crates/node", "crates/rust", "crates/python", "bridge/node"]
+default-members = ["crates/cli", "crates/core", "crates/node", "crates/rust", "crates/python", "crates/github", "bridge/node"]
 
 [workspace.package]
 edition = "2024"
@@ -28,6 +28,7 @@ dependency-check-updates-core = { path = "crates/core", version = "0.1.12" }
 dependency-check-updates-node = { path = "crates/node", version = "0.1.12" }
 dependency-check-updates-rust = { path = "crates/rust", version = "0.1.12" }
 dependency-check-updates-python = { path = "crates/python", version = "0.1.12" }
+dependency-check-updates-github = { path = "crates/github", version = "0.1.12" }
 dependency-check-updates = { path = "crates/cli", version = "0.1.12" }
 
 # External
@@ -36,7 +37,7 @@ thiserror = "2.0"
 miette = { version = "7.6", features = ["fancy"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-tokio = { version = "1.51", features = ["rt", "macros"] }
+tokio = { version = "1.52", features = ["rt", "macros"] }
 reqwest = { version = "0.13", default-features = false, features = [
   "json",
   "rustls-no-provider",
@@ -56,7 +57,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml_edit = "0.25"
 
-napi = { version = "3.8", features = ["tokio_rt"] }
+napi = { version = "3.9", features = ["tokio_rt"] }
 napi-derive = "3.5"
 futures = "0.3"
 owo-colors = "4.3"

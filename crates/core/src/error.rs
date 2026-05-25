@@ -20,10 +20,10 @@ pub enum DcuError {
     #[diagnostic(code(dependency_check_updates::parse_error))]
     ManifestParse { path: PathBuf, detail: String },
 
-    #[error("registry lookup failed for package `{package}`")]
+    #[error("registry lookup failed for package `{package}`: {detail}")]
     #[diagnostic(
         code(dependency_check_updates::registry_error),
-        help("check your internet connection")
+        help("check your internet connection, or set GITHUB_TOKEN if scanning workflows")
     )]
     RegistryLookup { package: String, detail: String },
 
@@ -92,9 +92,11 @@ mod tests {
             package: "lodash".to_string(),
             detail: "connection timeout".to_string(),
         };
+        // Display now surfaces `detail` — without it, users hit a dead-end
+        // when GitHub Tags API rate-limits them (no hint to set GITHUB_TOKEN).
         assert_eq!(
             err.to_string(),
-            "registry lookup failed for package `lodash`"
+            "registry lookup failed for package `lodash`: connection timeout"
         );
     }
 

@@ -51,6 +51,11 @@ fn colorize_version(version: &str, bump: BumpType, use_color: bool) -> String {
 
 /// Render a table of planned updates in ncu-style format.
 ///
+/// Duplicate `(name, from, to)` triples are collapsed to a single row — a
+/// GitHub Actions workflow that calls `actions/checkout@v5` from twelve jobs
+/// would otherwise emit twelve identical rows, drowning the diff in noise.
+/// The patch engine still applies every occurrence; only the display dedupes.
+///
 /// Format:
 /// ```text
 ///  react          ^17.0.0  ->  ^18.2.0
@@ -62,14 +67,16 @@ pub fn render_table(updates: &[PlannedUpdate], use_color: bool) -> String {
         return String::new();
     }
 
-    // Calculate column widths
-    let max_name = updates.iter().map(|u| u.name.len()).max().unwrap_or(0);
-    let max_from = updates.iter().map(|u| u.from.len()).max().unwrap_or(0);
-    let max_to = updates.iter().map(|u| u.to.len()).max().unwrap_or(0);
+    let unique = dedupe_updates(updates);
+
+    // Calculate column widths against the deduped set so columns stay tight.
+    let max_name = unique.iter().map(|u| u.name.len()).max().unwrap_or(0);
+    let max_from = unique.iter().map(|u| u.from.len()).max().unwrap_or(0);
+    let max_to = unique.iter().map(|u| u.to.len()).max().unwrap_or(0);
 
     let mut output = String::new();
 
-    for update in updates {
+    for update in &unique {
         let bump = detect_bump_type(&update.from, &update.to);
         let colored_to = colorize_version(&update.to, bump, use_color);
 
@@ -86,6 +93,18 @@ pub fn render_table(updates: &[PlannedUpdate], use_color: bool) -> String {
     }
 
     output
+}
+
+/// Collapse `updates` by `(name, from, to)` while preserving original order.
+///
+/// Lifted out of [`render_table`] so [`render_json`] can apply the same dedup
+/// without duplicating logic. Returns references so we avoid cloning.
+fn dedupe_updates(updates: &[PlannedUpdate]) -> Vec<&PlannedUpdate> {
+    let mut seen = std::collections::HashSet::new();
+    updates
+        .iter()
+        .filter(|u| seen.insert((u.name.as_str(), u.from.as_str(), u.to.as_str())))
+        .collect()
 }
 
 /// Render the header line.
@@ -114,19 +133,24 @@ pub fn render_footer(path: &str, upgrading: bool, has_updates: bool, use_color: 
         "Run your package manager to install new versions.\n".to_owned()
     } else {
         let cmd = if use_color {
-            format!("{}", "dependency-check-updates -u".cyan())
+            format!("{}", "dcu -u".cyan())
         } else {
-            "dependency-check-updates -u".to_owned()
+            "dcu -u".to_owned()
         };
         format!("\nRun {cmd} to upgrade {path}\n")
     }
 }
 
 /// Render updates as JSON.
+///
+/// Output shape is `{ "name": "to" }`. Duplicate package names (the same
+/// action used in many workflow jobs) collapse naturally because JSON object
+/// keys are unique — last-write-wins on `to`. For consumers that need full
+/// `(name, from, to)` triples, use the table format and parse line-by-line.
 #[must_use]
 pub fn render_json(updates: &[PlannedUpdate]) -> String {
     let mut map = serde_json::Map::new();
-    for update in updates {
+    for update in dedupe_updates(updates) {
         map.insert(
             update.name.clone(),
             serde_json::Value::String(update.to.clone()),
@@ -195,7 +219,7 @@ mod tests {
     #[test]
     fn test_render_footer_with_updates_dry_run() {
         let output = render_footer("package.json", false, true, false);
-        assert!(output.contains("dependency-check-updates -u"));
+        assert!(output.contains("dcu -u"));
     }
 
     #[test]
@@ -270,7 +294,7 @@ mod tests {
     #[test]
     fn test_render_footer_dry_run_with_color() {
         let output = render_footer("package.json", false, true, true);
-        assert!(output.contains("dependency-check-updates -u"));
+        assert!(output.contains("dcu -u"));
     }
 
     #[test]
@@ -298,6 +322,84 @@ mod tests {
     fn test_render_json_empty() {
         let output = render_json(&[]);
         assert_eq!(output, "{}");
+    }
+
+    #[test]
+    fn test_render_table_dedupes_duplicate_updates() {
+        // Real GitHub Actions case: `actions/checkout@v5` used in 3 jobs of
+        // one workflow. compute_updates emits 3 identical PlannedUpdates.
+        // render_table should show only 1 row.
+        let updates = vec![
+            PlannedUpdate {
+                name: "actions/checkout".to_owned(),
+                section: DependencySection::GitHubActions,
+                from: "v5".to_owned(),
+                to: "v6".to_owned(),
+            },
+            PlannedUpdate {
+                name: "actions/checkout".to_owned(),
+                section: DependencySection::GitHubActions,
+                from: "v5".to_owned(),
+                to: "v6".to_owned(),
+            },
+            PlannedUpdate {
+                name: "actions/checkout".to_owned(),
+                section: DependencySection::GitHubActions,
+                from: "v5".to_owned(),
+                to: "v6".to_owned(),
+            },
+        ];
+        let output = render_table(&updates, false);
+        let occurrences = output.matches("actions/checkout").count();
+        assert_eq!(occurrences, 1, "got: {output}");
+    }
+
+    #[test]
+    fn test_render_table_keeps_different_from_versions_separate() {
+        // Same name, different `from` — the workflow uses two different pinned
+        // versions of the same action. Both rows must survive.
+        let updates = vec![
+            PlannedUpdate {
+                name: "actions/checkout".to_owned(),
+                section: DependencySection::GitHubActions,
+                from: "v4".to_owned(),
+                to: "v6".to_owned(),
+            },
+            PlannedUpdate {
+                name: "actions/checkout".to_owned(),
+                section: DependencySection::GitHubActions,
+                from: "v5".to_owned(),
+                to: "v6".to_owned(),
+            },
+        ];
+        let output = render_table(&updates, false);
+        let occurrences = output.matches("actions/checkout").count();
+        assert_eq!(occurrences, 2, "got: {output}");
+        assert!(output.contains("v4"));
+        assert!(output.contains("v5"));
+    }
+
+    #[test]
+    fn test_render_json_dedupes() {
+        let updates = vec![
+            PlannedUpdate {
+                name: "actions/checkout".to_owned(),
+                section: DependencySection::GitHubActions,
+                from: "v5".to_owned(),
+                to: "v6".to_owned(),
+            },
+            PlannedUpdate {
+                name: "actions/checkout".to_owned(),
+                section: DependencySection::GitHubActions,
+                from: "v5".to_owned(),
+                to: "v6".to_owned(),
+            },
+        ];
+        let output = render_json(&updates);
+        // Even before dedup, JSON map collapses same key; after dedup the
+        // output should still be a single-entry object.
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed.as_object().unwrap().len(), 1);
     }
 
     #[test]

@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 napi.workspace = true
 napi-derive.workspace = true
 dependency-check-updates.workspace = true
-tokio = { version = "1.51" }
+tokio = { version = "1.52" }
 
 [build-dependencies]
 napi-build = "2.3"
