@@ -582,9 +582,10 @@ mod tests {
 
     #[test]
     fn test_select_minor_rejects_prerelease_when_current_is_stable() {
-        // Covers the `accept` closure's `!current_is_pre` branch: a stable
-        // current must not be pulled into a prerelease, even when the candidate
-        // is on the same major.
+        // Stable v4.1.0 is encountered first in the reverse iteration, so
+        // `accept` returns true immediately without inspecting the prerelease.
+        // This case validates the happy path; the next test exercises the
+        // `!current_is_pre` branch directly.
         let tags = vec![
             make_tag("v4.0.0"),
             make_tag("v4.1.0-beta.1"),
@@ -592,6 +593,17 @@ mod tests {
         ];
         let r = select_from_tags(&tags, "v4.0.0", TargetLevel::Minor);
         assert_eq!(r.selected.as_deref(), Some("4.1.0"));
+    }
+
+    #[test]
+    fn test_select_minor_rejects_prerelease_when_no_higher_stable_exists() {
+        // Force the reverse iterator to inspect the prerelease *before* any
+        // stable: `v4.0.0` is the only stable on major 4, and `v4.1.0-beta.1`
+        // sits semver-above it. With a stable current, accept must reject the
+        // prerelease (the `!current_is_pre` branch) and fall back to v4.0.0.
+        let tags = vec![make_tag("v4.0.0"), make_tag("v4.1.0-beta.1")];
+        let r = select_from_tags(&tags, "v4.0.0", TargetLevel::Minor);
+        assert_eq!(r.selected.as_deref(), Some("4.0.0"));
     }
 
     #[test]
