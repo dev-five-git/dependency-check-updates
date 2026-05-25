@@ -122,13 +122,10 @@ fn scan_line(line: &str, line_offset: usize) -> Option<UsesLocation> {
     let git_ref = &inner[at_pos + 1..];
 
     // Must be `owner/repo` or `owner/repo/...` — single-segment names are
-    // not valid GitHub action references.
+    // not valid GitHub action references. (Empty `name` fails this check
+    // because `"".contains('/')` is false; empty `git_ref` is rejected by
+    // `is_version_ref("")` below — no separate is_empty check needed.)
     if !name.contains('/') {
-        return None;
-    }
-    // Reject empty halves; otherwise `@` at the boundary would emit a
-    // degenerate dep.
-    if name.is_empty() || git_ref.is_empty() {
         return None;
     }
     if !is_version_ref(git_ref) {

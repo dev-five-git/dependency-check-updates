@@ -517,6 +517,22 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_dir_skips_subdirectories_in_workflows_dir() {
+        // Some repos nest templates / shared workflow steps in subdirs of
+        // `.github/workflows/`. read_dir yields these subdirs, and scan_dir
+        // must skip them (only files are manifest candidates).
+        let dir = TempDir::new().unwrap();
+        let workflows = dir.path().join(".github").join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::create_dir_all(workflows.join("templates")).unwrap();
+        create_temp_manifest(&workflows, "CI.yml", "jobs:");
+
+        let manifests = Scanner::scan_dir(dir.path());
+        assert_eq!(manifests.len(), 1);
+        assert!(manifests[0].path.ends_with("CI.yml"));
+    }
+
+    #[test]
     fn test_scan_deep_walks_into_dot_github() {
         // Deep scan must traverse into `.github` (hidden by convention) so it
         // finds workflow manifests. Other hidden dirs (`.git`, `.venv`) must

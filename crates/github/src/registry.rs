@@ -185,6 +185,11 @@ impl GitHubActionsRegistry {
 
     /// Resolve every dep in `deps` by fetching each unique `owner/repo`
     /// exactly once and re-using the cached tag list across deps.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal tag cache is missing a key that
+    /// `repo_key` produced — an invariant violation, not a user-input issue.
     pub async fn resolve_batch(
         &self,
         deps: &[DependencySpec],
@@ -231,8 +236,15 @@ impl GitHubActionsRegistry {
                 continue;
             };
 
-            match tags_by_repo.get(&key) {
-                Some(Ok(tags)) => {
+            // Safe because `key` came from `repo_key(&dep.name)`, and every
+            // such value was inserted into `unique_repos` (and therefore into
+            // `tags_by_repo`) above. Using `.expect()` documents the invariant
+            // and keeps the code path linear for coverage.
+            match tags_by_repo
+                .get(&key)
+                .expect("tags cache must contain every unique repo key")
+            {
+                Ok(tags) => {
                     let resolved = select_from_tags(tags, &dep.current_req, target);
                     trace!(
                         action = %dep.name,
@@ -242,23 +254,12 @@ impl GitHubActionsRegistry {
                     );
                     results.push((idx, Ok(resolved)));
                 }
-                Some(Err(detail)) => {
+                Err(detail) => {
                     results.push((
                         idx,
                         Err(DcuError::RegistryLookup {
                             package: dep.name.clone(),
                             detail: detail.clone(),
-                        }),
-                    ));
-                }
-                None => {
-                    // Defensive — should be unreachable since we populated the
-                    // map from the same `unique_repos` set used here.
-                    results.push((
-                        idx,
-                        Err(DcuError::RegistryLookup {
-                            package: dep.name.clone(),
-                            detail: "internal: tag cache miss".to_owned(),
                         }),
                     ));
                 }
@@ -291,10 +292,14 @@ fn token_from_env() -> Option<Arc<str>> {
 /// the past, in the future by < 1 second, or the host clock cannot be read —
 /// keeping the surrounding error message readable even when the hint is missing.
 fn format_reset_hint(reset_unix: u64) -> String {
-    let Ok(now_dur) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-        return String::new();
-    };
-    let now = now_dur.as_secs();
+    // `unwrap_or(ZERO)` collapses the (practically impossible) clock-before-1970
+    // case into "treat as if now=0", which then falls through to the past-or-
+    // present check below. Avoiding a separate early-return keeps coverage
+    // honest without testing an unreachable branch.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
     if reset_unix <= now {
         return String::new();
     }
@@ -329,11 +334,13 @@ fn normalize_tag(tag: &str) -> Option<node_semver::Version> {
         .map_or((stripped, ""), |i| stripped.split_at(i));
 
     let parts: Vec<&str> = numeric.split('.').filter(|s| !s.is_empty()).collect();
+    // `is_version_ref` above guarantees `numeric` starts with at least one
+    // digit, so `parts.len() >= 1` always — the previous explicit `0 =>`
+    // arm was unreachable and is folded into the wildcard `_` arm.
     let padded = match parts.len() {
         1 => format!("{}.0.0{}", parts[0], suffix),
         2 => format!("{}.{}.0{}", parts[0], parts[1], suffix),
-        3.. => format!("{numeric}{suffix}"),
-        0 => return None,
+        _ => format!("{numeric}{suffix}"),
     };
 
     node_semver::Version::parse(&padded).ok()
@@ -363,16 +370,23 @@ fn select_from_tags(tags: &[Tag], current_req: &str, target: TargetLevel) -> Res
     // Pre-release tail policy (matches the npm registry): if user is on a
     // pre-release of X.Y.Z, accept further pre-releases on the same X.Y.Z
     // train AND any stable; never jump to an unrelated pre-release.
+    //
+    // The closure relies on the invariant `current_is_pre ⇒ current.is_some()`
+    // (`is_some_and` above). When `current_is_pre` is false we never inspect
+    // `current`, so the closure has no unreachable None-branch.
     let accept = |v: &&node_semver::Version| -> bool {
         if v.pre_release.is_empty() {
             return true;
         }
-        let Some(cur) = current.as_ref() else {
-            return false;
-        };
         if !current_is_pre {
             return false;
         }
+        // `current_is_pre == true` ⇒ `current.as_ref()` is Some, so the
+        // expect cannot fire. Keeping it explicit (over `unwrap`) documents
+        // the invariant for readers.
+        let cur = current
+            .as_ref()
+            .expect("current_is_pre implies current.is_some");
         v.major == cur.major && v.minor == cur.minor && v.patch == cur.patch
     };
 
@@ -554,6 +568,49 @@ mod tests {
     fn test_repo_key_invalid() {
         assert_eq!(GitHubActionsRegistry::repo_key("checkout"), None);
         assert_eq!(GitHubActionsRegistry::repo_key(""), None);
+    }
+
+    #[test]
+    fn test_repo_key_empty_owner_or_repo_half() {
+        // `splitn(3, '/')` happily yields empty strings for `foo/` and `/foo`.
+        // The empty-half guard must catch them; otherwise we'd build URLs like
+        // `/repos/foo//tags`.
+        assert_eq!(GitHubActionsRegistry::repo_key("foo/"), None);
+        assert_eq!(GitHubActionsRegistry::repo_key("/foo"), None);
+        assert_eq!(GitHubActionsRegistry::repo_key("/"), None);
+    }
+
+    #[test]
+    fn test_select_minor_rejects_prerelease_when_current_is_stable() {
+        // Covers the `accept` closure's `!current_is_pre` branch: a stable
+        // current must not be pulled into a prerelease, even when the candidate
+        // is on the same major.
+        let tags = vec![
+            make_tag("v4.0.0"),
+            make_tag("v4.1.0-beta.1"),
+            make_tag("v4.1.0"),
+        ];
+        let r = select_from_tags(&tags, "v4.0.0", TargetLevel::Minor);
+        assert_eq!(r.selected.as_deref(), Some("4.1.0"));
+    }
+
+    #[test]
+    fn test_select_minor_with_unparseable_current_returns_none() {
+        // `select_from_tags("main", …, Minor)` — Minor needs a parseable
+        // current to know which major to stay on; without it, `selected` is
+        // None (latest still returned for context).
+        let tags = vec![make_tag("v4.0.0"), make_tag("v4.1.0")];
+        let r = select_from_tags(&tags, "main", TargetLevel::Minor);
+        assert_eq!(r.selected, None);
+        assert_eq!(r.latest.as_deref(), Some("4.1.0"));
+    }
+
+    #[test]
+    fn test_select_patch_with_unparseable_current_returns_none() {
+        let tags = vec![make_tag("v4.0.0"), make_tag("v4.0.1")];
+        let r = select_from_tags(&tags, "main", TargetLevel::Patch);
+        assert_eq!(r.selected, None);
+        assert_eq!(r.latest.as_deref(), Some("4.0.1"));
     }
 
     #[test]
@@ -763,6 +820,84 @@ mod tests {
         assert!(
             detail.contains("rate limit") && detail.contains("GITHUB_TOKEN"),
             "expected helpful rate-limit message, got: {msg} / debug: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_sends_authorization_header() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_crypto_provider();
+        let mock = MockServer::start().await;
+
+        // Mount only matches requests that include the exact bearer header,
+        // so a missing Authorization header → 404 from wiremock → test failure.
+        Mock::given(method("GET"))
+            .and(path("/repos/actions/checkout/tags"))
+            .and(header("authorization", "Bearer secret-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(tags_response(&["v5.0.0"])))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let reg = GitHubActionsRegistry::with_base_url_and_token(&mock.uri(), Some("secret-token"));
+        let deps = vec![DependencySpec {
+            name: "actions/checkout".to_owned(),
+            current_req: "v4".to_owned(),
+            section: dependency_check_updates_core::DependencySection::GitHubActions,
+        }];
+        let results = reg.resolve_batch(&deps, TargetLevel::Latest).await;
+        let (_, ref result) = results[0];
+        assert!(result.is_ok(), "auth header should have matched");
+        assert_eq!(result.as_ref().unwrap().selected.as_deref(), Some("5.0.0"));
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_with_token_omits_set_token_hint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_crypto_provider();
+        let mock = MockServer::start().await;
+
+        let reset = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/actions/checkout/tags"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("X-RateLimit-Remaining", "0")
+                    .insert_header("X-RateLimit-Reset", reset.to_string().as_str()),
+            )
+            .mount(&mock)
+            .await;
+
+        // User HAS already set a token but still got rate-limited → suggesting
+        // they set GITHUB_TOKEN would be unhelpful, so that hint must be
+        // omitted (they need to wait for reset instead).
+        let reg =
+            GitHubActionsRegistry::with_base_url_and_token(&mock.uri(), Some("present-token"));
+        let deps = vec![DependencySpec {
+            name: "actions/checkout".to_owned(),
+            current_req: "v5".to_owned(),
+            section: dependency_check_updates_core::DependencySection::GitHubActions,
+        }];
+        let results = reg.resolve_batch(&deps, TargetLevel::Latest).await;
+        let (_, ref result) = results[0];
+        let err = result.as_ref().expect_err("expected rate-limit error");
+        let detail = format!("{err:?}");
+        assert!(
+            detail.contains("rate limit") && detail.contains("Resets in"),
+            "rate-limit message and reset-time hint expected: {detail}"
+        );
+        assert!(
+            !detail.contains("GITHUB_TOKEN"),
+            "must not suggest setting a token the user already provided: {detail}"
         );
     }
 
