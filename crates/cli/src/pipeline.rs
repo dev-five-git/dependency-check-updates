@@ -1,6 +1,8 @@
 use tracing::{debug, trace, warn};
 
-use dependency_check_updates_core::{DcuError, DependencySpec, PlannedUpdate, ResolvedVersion};
+use dependency_check_updates_core::{
+    DcuError, DependencySpec, ManifestKind, PlannedUpdate, ResolvedVersion,
+};
 
 /// Filter dependencies by include/exclude patterns.
 pub(crate) fn filter_deps(
@@ -26,6 +28,7 @@ pub(crate) fn filter_deps(
 pub(crate) fn compute_updates(
     deps: &[DependencySpec],
     resolved: &[(usize, Result<ResolvedVersion, DcuError>)],
+    kind: ManifestKind,
 ) -> Vec<PlannedUpdate> {
     let mut updates = Vec::new();
 
@@ -76,19 +79,28 @@ pub(crate) fn compute_updates(
         // Preserve precision: if the user wrote "0.6" (2 segments), truncate the
         // resolved version to 2 segments before comparing. This respects the user's
         // intent to pin only at that granularity.
-        let precision = count_version_segments(current_bare);
+        //
+        // GitHub workflow refs are exempt: the GitHub registry already resolved
+        // the exact, tag-validated ref form (`pick_existing_ref`), so re-running
+        // the generic truncation here could re-shorten an escalated ref
+        // (`v8.1.0` → `v8`) back into a dangling tag.
+        let selected_truncated = if kind == ManifestKind::GitHubWorkflow {
+            selected.clone()
+        } else {
+            let precision = count_version_segments(current_bare);
 
-        if precision < 3 && !is_plain_numeric_version(selected) {
-            trace!(
-                package = %dep.name,
-                current = %dep.current_req,
-                selected = %selected,
-                "skipping: selected version cannot be safely truncated"
-            );
-            continue;
-        }
+            if precision < 3 && !is_plain_numeric_version(selected) {
+                trace!(
+                    package = %dep.name,
+                    current = %dep.current_req,
+                    selected = %selected,
+                    "skipping: selected version cannot be safely truncated"
+                );
+                continue;
+            }
 
-        let selected_truncated = truncate_version(selected, precision);
+            truncate_version(selected, precision)
+        };
 
         if current_bare == selected_truncated {
             trace!(package = %dep.name, version = %dep.current_req, "already up to date");
@@ -280,7 +292,7 @@ mod tests {
         #[case] expected_to: Option<&str>,
     ) {
         let (deps, resolved) = single(current, latest, selected);
-        let updates = compute_updates(&deps, &resolved);
+        let updates = compute_updates(&deps, &resolved, ManifestKind::PackageJson);
         match expected_to {
             Some(to) => {
                 assert_eq!(
@@ -300,7 +312,7 @@ mod tests {
     #[test]
     fn compute_updates_sets_package_name() {
         let (deps, resolved) = single("^17.0.0", "18.2.0", "18.2.0");
-        let updates = compute_updates(&deps, &resolved);
+        let updates = compute_updates(&deps, &resolved, ManifestKind::PackageJson);
         assert_eq!(updates[0].name, "pkg");
     }
 
@@ -314,7 +326,7 @@ mod tests {
                 detail: "not found".to_owned(),
             }),
         )];
-        assert!(compute_updates(&deps, &resolved).is_empty());
+        assert!(compute_updates(&deps, &resolved, ManifestKind::PackageJson).is_empty());
     }
 
     #[test]
@@ -327,7 +339,7 @@ mod tests {
                 selected: None,
             }),
         )];
-        assert!(compute_updates(&deps, &resolved).is_empty());
+        assert!(compute_updates(&deps, &resolved, ManifestKind::PackageJson).is_empty());
     }
 
     #[test]
@@ -364,7 +376,7 @@ mod tests {
                 }),
             ),
         ];
-        let updates = compute_updates(&deps, &resolved);
+        let updates = compute_updates(&deps, &resolved, ManifestKind::PackageJson);
         // a: ^1.0.0 -> ^1.5.0 (update), b: ~2.0.0 -> ~2.5.0 (update), c: same (no update)
         assert_eq!(updates.len(), 2);
         assert_eq!(updates[0].name, "a");
@@ -387,9 +399,32 @@ mod tests {
                 selected: Some("2.0.0".to_owned()),
             }),
         )];
-        let updates = compute_updates(&deps, &resolved);
+        let updates = compute_updates(&deps, &resolved, ManifestKind::PackageJson);
         assert_eq!(updates[0].section, DependencySection::DevDependencies);
         assert_eq!(updates[0].from, "^1.0.0");
+    }
+
+    #[test]
+    fn compute_updates_github_skips_precision_truncation() {
+        // The GitHub registry already resolved the exact tag form (here an
+        // escalated `8.1.0` for a `v7` pin whose `v8` moving tag is missing).
+        // compute_updates must emit it verbatim, NOT truncate to the pin's
+        // 1-segment precision (which would yield the dangling `v8`).
+        let deps = vec![DependencySpec {
+            name: "astral-sh/setup-uv".to_owned(),
+            current_req: "v7".to_owned(),
+            section: DependencySection::GitHubActions,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("8.1.0".to_owned()),
+                selected: Some("8.1.0".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved, ManifestKind::GitHubWorkflow);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].to, "v8.1.0");
     }
 
     #[rstest]

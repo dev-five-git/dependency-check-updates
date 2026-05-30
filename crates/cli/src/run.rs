@@ -194,7 +194,7 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
             "registry resolution complete"
         );
 
-        let updates = compute_updates(&job.deps, resolved);
+        let updates = compute_updates(&job.deps, resolved, job.manifest_ref.kind);
         debug!(updates = updates.len(), "computed planned updates");
 
         for update in &updates {

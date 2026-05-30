@@ -234,7 +234,15 @@ impl GitHubActionsRegistry {
                 .expect("tags cache must contain every unique repo key")
             {
                 Ok(tags) => {
-                    let resolved = select_from_tags(tags, &dep.current_req, target);
+                    let mut resolved = select_from_tags(tags, &dep.current_req, target);
+                    // Collapse the resolved full version to the shortest ref
+                    // form that an actual tag backs (e.g. `v8` → `v8.1.0` when
+                    // only the full tag was published), so the emitted ref
+                    // never dangles. `compute_updates` skips its generic
+                    // precision truncation for GitHub on the strength of this.
+                    resolved.selected = resolved
+                        .selected
+                        .map(|sel| pick_existing_ref(&sel, &dep.current_req, tags));
                     trace!(
                         action = %dep.name,
                         current = %dep.current_req,
@@ -379,6 +387,76 @@ fn select_from_tags(tags: &[Tag], current_req: &str, target: TargetLevel) -> Res
         latest: highest_stable,
         selected,
     }
+}
+
+/// The bare numeric head of a tag (`v8.1.0` → `8.1.0`, `v8` → `8`,
+/// `v7.6` → `7.6`). Returns `None` for non-version refs (`main`, SHAs).
+fn tag_numeric_str(tag: &str) -> Option<&str> {
+    // `is_version_ref` guarantees the post-`v` head starts with a digit, so the
+    // numeric run below is always non-empty.
+    if !is_version_ref(tag) {
+        return None;
+    }
+    let stripped = tag.strip_prefix('v').unwrap_or(tag);
+    Some(
+        stripped
+            .split(|c: char| !c.is_ascii_digit() && c != '.')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('.'),
+    )
+}
+
+/// Count the segment precision of the user's current ref (`v7` → 1,
+/// `v7.6` → 2, `v7.6.0` → 3). Always at least 1.
+fn ref_precision(req: &str) -> usize {
+    let stripped = req.strip_prefix('v').unwrap_or(req);
+    stripped
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .filter(|s| !s.is_empty())
+        .count()
+        .max(1)
+}
+
+/// Collapse a resolved full version to the shortest tag form that an actual
+/// tag backs, preferring the user's current pin precision or longer.
+///
+/// Actions usually publish a moving major tag (`v8`) next to `v8.1.0`, but not
+/// always — when only `v8.1.0` exists, the naive major float `@v8` would 404.
+/// This walks the user's precision upward (`v8` → `v8.1` → `v8.1.0`) and, only
+/// if nothing at or above that precision is published, downward, returning the
+/// first form an actual tag matches. Pre-release / build refs are published
+/// only as exact full tags and are returned verbatim.
+fn pick_existing_ref(selected: &str, current_req: &str, tags: &[Tag]) -> String {
+    let (numeric, suffix) = selected
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .map_or((selected, ""), |i| selected.split_at(i));
+    if !suffix.is_empty() {
+        return selected.to_owned();
+    }
+
+    let segments: Vec<&str> = numeric.split('.').filter(|s| !s.is_empty()).collect();
+    let len = segments.len();
+    let start = ref_precision(current_req).clamp(1, len.max(1));
+
+    let exists = |p: usize| {
+        let candidate = segments[..p].join(".");
+        tags.iter()
+            .any(|t| tag_numeric_str(&t.name) == Some(candidate.as_str()))
+    };
+
+    // Prefer the shortest form at or above the pin precision; otherwise the
+    // longest shorter form. The resolved version always came from a real tag,
+    // so some precision in this order always matches — the `expect` documents
+    // that invariant and keeps the success line on the covered path.
+    let chosen = (start..=len)
+        .chain((1..start).rev())
+        .find(|&p| exists(p))
+        .expect("resolved version is always backed by at least one tag");
+    segments[..chosen].join(".")
 }
 
 #[cfg(test)]
@@ -566,6 +644,54 @@ mod tests {
     }
 
     #[rstest]
+    #[case::v_major("v8", Some("8"))]
+    #[case::v_major_minor("v7.6", Some("7.6"))]
+    #[case::v_full("v8.1.0", Some("8.1.0"))]
+    #[case::no_v_prefix("5", Some("5"))]
+    #[case::prerelease_head("v2.0.0-rc.1", Some("2.0.0"))]
+    #[case::branch("main", None)]
+    #[case::sha("8e5e7e5a3b4c1234abcdef0123456789abcdef01", None)]
+    fn tag_numeric_str_cases(#[case] input: &str, #[case] expected: Option<&str>) {
+        assert_eq!(tag_numeric_str(input), expected);
+    }
+
+    #[rstest]
+    #[case::major("v7", 1)]
+    #[case::major_minor("v7.6", 2)]
+    #[case::major_minor_patch("v7.6.0", 3)]
+    #[case::no_v("5", 1)]
+    #[case::unparseable_falls_back_to_one("main", 1)]
+    fn ref_precision_cases(#[case] input: &str, #[case] expected: usize) {
+        assert_eq!(ref_precision(input), expected);
+    }
+
+    #[rstest]
+    // selected full version, current pin, available tag names, expected ref form.
+    // Major moving tag exists → preserve the major-pin precision.
+    #[case::major_tag_exists("6.0.0", "v5", &["v5", "v6", "v6.0.0"], "6")]
+    // `v8` moving tag missing → escalate v8 → v8.1 → v8.1.0 (the real tag).
+    #[case::escalate_to_full("8.1.0", "v7", &["v7", "v8.0.0", "v8.1.0"], "8.1.0")]
+    // `v8.1` short tag exists → stop escalating there.
+    #[case::escalate_to_two_segment("8.1.0", "v7", &["v7", "v8.1", "v8.1.0"], "8.1")]
+    // Full pin stays full when the full tag exists.
+    #[case::full_pin_keeps_full("6.0.0", "v5.1.0", &["v6", "v6.0.0"], "6.0.0")]
+    // Full pin but only a major moving tag exists → de-escalate to it.
+    #[case::de_escalate_to_major("9.0.0", "v8.1.0", &["v8.1.0", "v9"], "9")]
+    // Non-version tags in the list are ignored by the existence check.
+    #[case::ignores_non_version_tags("8.1.0", "v7", &["main", "v8.1.0"], "8.1.0")]
+    // Pre-release refs are returned verbatim (only ever exact full tags).
+    #[case::prerelease_verbatim("2.0.0-rc.1", "v1", &["v2.0.0-rc.1"], "2.0.0-rc.1")]
+    fn pick_existing_ref_cases(
+        #[case] selected: &str,
+        #[case] current: &str,
+        #[case] tag_names: &[&str],
+        #[case] expected: &str,
+    ) {
+        let tags = make_tags(tag_names);
+        assert_eq!(pick_existing_ref(selected, current, &tags), expected);
+    }
+
+    #[rstest]
     #[case::normal("actions/checkout", Some("actions/checkout"))]
     #[case::with_subdir("actions/checkout/sub/dir", Some("actions/checkout"))]
     #[case::single_segment("checkout", None)]
@@ -651,7 +777,10 @@ mod tests {
         assert_eq!(results.len(), 2);
         for (_, result) in &results {
             assert!(result.is_ok());
-            assert_eq!(result.as_ref().unwrap().selected.as_deref(), Some("5.0.0"));
+            // `v4` is a major pin and a `v5` moving tag exists, so the resolved
+            // ref collapses to the major form `5` (→ `v5`), not the full
+            // `5.0.0`. This is `pick_existing_ref` preserving the pin precision.
+            assert_eq!(result.as_ref().unwrap().selected.as_deref(), Some("5"));
         }
     }
 
