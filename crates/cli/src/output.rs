@@ -163,37 +163,43 @@ pub fn render_json(updates: &[PlannedUpdate]) -> String {
 mod tests {
     use super::*;
     use dependency_check_updates_core::DependencySection;
+    use rstest::rstest;
 
-    #[test]
-    fn test_detect_bump_major() {
-        assert_eq!(detect_bump_type("^1.0.0", "^2.0.0"), BumpType::Major);
+    /// Build a `PlannedUpdate` with a default `Dependencies` section so cases
+    /// stay readable as `(name, from, to)` tuples.
+    fn upd(name: &str, from: &str, to: &str) -> PlannedUpdate {
+        PlannedUpdate {
+            name: name.to_owned(),
+            section: DependencySection::Dependencies,
+            from: from.to_owned(),
+            to: to.to_owned(),
+        }
     }
 
-    #[test]
-    fn test_detect_bump_minor() {
-        assert_eq!(detect_bump_type("^1.0.0", "^1.1.0"), BumpType::Minor);
+    /// Build a `PlannedUpdate` in the `GitHubActions` section — the source of
+    /// real-world duplicate rows the dedup logic guards against.
+    fn gha(name: &str, from: &str, to: &str) -> PlannedUpdate {
+        PlannedUpdate {
+            name: name.to_owned(),
+            section: DependencySection::GitHubActions,
+            from: from.to_owned(),
+            to: to.to_owned(),
+        }
     }
 
-    #[test]
-    fn test_detect_bump_patch() {
-        assert_eq!(detect_bump_type("^1.0.0", "^1.0.1"), BumpType::Patch);
+    #[rstest]
+    #[case::major("^1.0.0", "^2.0.0", BumpType::Major)]
+    #[case::minor("^1.0.0", "^1.1.0", BumpType::Minor)]
+    #[case::patch("^1.0.0", "^1.0.1", BumpType::Patch)]
+    fn detect_bump_type_cases(#[case] from: &str, #[case] to: &str, #[case] expected: BumpType) {
+        assert_eq!(detect_bump_type(from, to), expected);
     }
 
     #[test]
     fn test_render_table_basic() {
         let updates = vec![
-            PlannedUpdate {
-                name: "react".to_owned(),
-                section: DependencySection::Dependencies,
-                from: "^17.0.0".to_owned(),
-                to: "^18.2.0".to_owned(),
-            },
-            PlannedUpdate {
-                name: "lodash".to_owned(),
-                section: DependencySection::Dependencies,
-                from: "^4.17.0".to_owned(),
-                to: "^4.17.21".to_owned(),
-            },
+            upd("react", "^17.0.0", "^18.2.0"),
+            upd("lodash", "^4.17.0", "^4.17.21"),
         ];
 
         let output = render_table(&updates, false);
@@ -210,74 +216,65 @@ mod tests {
         assert!(output.is_empty());
     }
 
-    #[test]
-    fn test_render_footer_no_updates() {
-        let output = render_footer("package.json", false, false, false);
-        assert!(output.contains("All dependencies match"));
-    }
-
-    #[test]
-    fn test_render_footer_with_updates_dry_run() {
-        let output = render_footer("package.json", false, true, false);
-        assert!(output.contains("dcu -u"));
-    }
-
-    #[test]
-    fn test_render_footer_after_upgrade() {
-        let output = render_footer("package.json", true, true, false);
-        assert!(output.contains("install new versions"));
+    #[rstest]
+    // (upgrading, has_updates, use_color, expected substring)
+    #[case::no_updates(false, false, false, "All dependencies match")]
+    #[case::with_updates_dry_run(false, true, false, "dcu -u")]
+    #[case::after_upgrade(true, true, false, "install new versions")]
+    #[case::no_updates_with_color(false, false, true, "All dependencies match")]
+    #[case::dry_run_with_color(false, true, true, "dcu -u")]
+    fn render_footer_cases(
+        #[case] upgrading: bool,
+        #[case] has_updates: bool,
+        #[case] use_color: bool,
+        #[case] needle: &str,
+    ) {
+        let output = render_footer("package.json", upgrading, has_updates, use_color);
+        assert!(
+            output.contains(needle),
+            "expected {needle:?} in footer, got: {output:?}"
+        );
     }
 
     #[test]
     fn test_render_json() {
-        let updates = vec![PlannedUpdate {
-            name: "react".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "^17.0.0".to_owned(),
-            to: "^18.2.0".to_owned(),
-        }];
+        let updates = vec![upd("react", "^17.0.0", "^18.2.0")];
 
         let output = render_json(&updates);
         assert!(output.contains("\"react\""));
         assert!(output.contains("\"^18.2.0\""));
     }
 
-    #[test]
-    fn test_colorize_version_major_with_color() {
-        let result = colorize_version("^2.0.0", BumpType::Major, true);
-        // Should contain ANSI escape codes for red
-        assert!(result.contains("2.0.0"));
-        assert_ne!(result, "^2.0.0"); // Should have color codes
-    }
-
-    #[test]
-    fn test_colorize_version_minor_with_color() {
-        let result = colorize_version("^1.1.0", BumpType::Minor, true);
-        assert!(result.contains("1.1.0"));
-        assert_ne!(result, "^1.1.0");
-    }
-
-    #[test]
-    fn test_colorize_version_patch_with_color() {
-        let result = colorize_version("^1.0.1", BumpType::Patch, true);
-        assert!(result.contains("1.0.1"));
-        assert_ne!(result, "^1.0.1");
-    }
-
-    #[test]
-    fn test_colorize_version_no_color() {
-        let result = colorize_version("^2.0.0", BumpType::Major, false);
-        assert_eq!(result, "^2.0.0");
+    #[rstest]
+    // Colored cases assert the bare version digits survive and that the
+    // returned string is NOT equal to the input (ANSI escapes were applied).
+    #[case::major_with_color("^2.0.0", BumpType::Major, true, "2.0.0", false)]
+    #[case::minor_with_color("^1.1.0", BumpType::Minor, true, "1.1.0", false)]
+    #[case::patch_with_color("^1.0.1", BumpType::Patch, true, "1.0.1", false)]
+    // No color: the result must equal the input verbatim.
+    #[case::no_color("^2.0.0", BumpType::Major, false, "^2.0.0", true)]
+    fn colorize_version_cases(
+        #[case] version: &str,
+        #[case] bump: BumpType,
+        #[case] use_color: bool,
+        #[case] expected_substr: &str,
+        #[case] expect_equal_input: bool,
+    ) {
+        let result = colorize_version(version, bump, use_color);
+        assert!(
+            result.contains(expected_substr),
+            "{result:?} should contain {expected_substr:?}"
+        );
+        if expect_equal_input {
+            assert_eq!(result, version);
+        } else {
+            assert_ne!(result, version, "expected ANSI color codes to be applied");
+        }
     }
 
     #[test]
     fn test_render_table_with_color() {
-        let updates = vec![PlannedUpdate {
-            name: "react".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "^17.0.0".to_owned(),
-            to: "^18.2.0".to_owned(),
-        }];
+        let updates = vec![upd("react", "^17.0.0", "^18.2.0")];
         let output = render_table(&updates, true);
         assert!(output.contains("react"));
         assert!(output.contains("^17.0.0"));
@@ -285,28 +282,11 @@ mod tests {
         assert!(output.len() > "react  ^17.0.0  ->  ^18.2.0\n".len());
     }
 
-    #[test]
-    fn test_render_footer_no_updates_with_color() {
-        let output = render_footer("package.json", false, false, true);
-        assert!(output.contains("All dependencies match"));
-    }
-
-    #[test]
-    fn test_render_footer_dry_run_with_color() {
-        let output = render_footer("package.json", false, true, true);
-        assert!(output.contains("dcu -u"));
-    }
-
-    #[test]
-    fn test_render_header_checking() {
-        let output = render_header("package.json", false);
-        assert_eq!(output, "Checking package.json\n");
-    }
-
-    #[test]
-    fn test_render_header_upgrading() {
-        let output = render_header("Cargo.toml", true);
-        assert_eq!(output, "Upgrading Cargo.toml\n");
+    #[rstest]
+    #[case::checking("package.json", false, "Checking package.json\n")]
+    #[case::upgrading("Cargo.toml", true, "Upgrading Cargo.toml\n")]
+    fn render_header_cases(#[case] path: &str, #[case] upgrading: bool, #[case] expected: &str) {
+        assert_eq!(render_header(path, upgrading), expected);
     }
 
     #[test]
@@ -330,24 +310,9 @@ mod tests {
         // one workflow. compute_updates emits 3 identical PlannedUpdates.
         // render_table should show only 1 row.
         let updates = vec![
-            PlannedUpdate {
-                name: "actions/checkout".to_owned(),
-                section: DependencySection::GitHubActions,
-                from: "v5".to_owned(),
-                to: "v6".to_owned(),
-            },
-            PlannedUpdate {
-                name: "actions/checkout".to_owned(),
-                section: DependencySection::GitHubActions,
-                from: "v5".to_owned(),
-                to: "v6".to_owned(),
-            },
-            PlannedUpdate {
-                name: "actions/checkout".to_owned(),
-                section: DependencySection::GitHubActions,
-                from: "v5".to_owned(),
-                to: "v6".to_owned(),
-            },
+            gha("actions/checkout", "v5", "v6"),
+            gha("actions/checkout", "v5", "v6"),
+            gha("actions/checkout", "v5", "v6"),
         ];
         let output = render_table(&updates, false);
         let occurrences = output.matches("actions/checkout").count();
@@ -359,18 +324,8 @@ mod tests {
         // Same name, different `from` — the workflow uses two different pinned
         // versions of the same action. Both rows must survive.
         let updates = vec![
-            PlannedUpdate {
-                name: "actions/checkout".to_owned(),
-                section: DependencySection::GitHubActions,
-                from: "v4".to_owned(),
-                to: "v6".to_owned(),
-            },
-            PlannedUpdate {
-                name: "actions/checkout".to_owned(),
-                section: DependencySection::GitHubActions,
-                from: "v5".to_owned(),
-                to: "v6".to_owned(),
-            },
+            gha("actions/checkout", "v4", "v6"),
+            gha("actions/checkout", "v5", "v6"),
         ];
         let output = render_table(&updates, false);
         let occurrences = output.matches("actions/checkout").count();
@@ -382,18 +337,8 @@ mod tests {
     #[test]
     fn test_render_json_dedupes() {
         let updates = vec![
-            PlannedUpdate {
-                name: "actions/checkout".to_owned(),
-                section: DependencySection::GitHubActions,
-                from: "v5".to_owned(),
-                to: "v6".to_owned(),
-            },
-            PlannedUpdate {
-                name: "actions/checkout".to_owned(),
-                section: DependencySection::GitHubActions,
-                from: "v5".to_owned(),
-                to: "v6".to_owned(),
-            },
+            gha("actions/checkout", "v5", "v6"),
+            gha("actions/checkout", "v5", "v6"),
         ];
         let output = render_json(&updates);
         // Even before dedup, JSON map collapses same key; after dedup the
@@ -405,12 +350,7 @@ mod tests {
     #[test]
     fn test_render_json_multiple() {
         let updates = vec![
-            PlannedUpdate {
-                name: "a".to_owned(),
-                section: DependencySection::Dependencies,
-                from: "1.0".to_owned(),
-                to: "2.0".to_owned(),
-            },
+            upd("a", "1.0", "2.0"),
             PlannedUpdate {
                 name: "b".to_owned(),
                 section: DependencySection::DevDependencies,

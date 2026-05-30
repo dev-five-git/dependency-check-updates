@@ -5,6 +5,6 @@
 
 #[tokio::main(flavor = "current_thread")]
 #[cfg(not(tarpaulin_include))]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() -> Result<(), dependency_check_updates::DcuError> {
     dependency_check_updates::main(&std::env::args().collect::<Vec<String>>()).await
 }

@@ -1,11 +1,18 @@
+//! Core domain types shared across every ecosystem crate: manifest kinds,
+//! dependency sections, version targets, and the parsed/resolved/planned
+//! value objects that flow through the scan → resolve → patch pipeline.
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// The kind of package manifest file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManifestKind {
+    /// Node.js `package.json`.
     PackageJson,
+    /// Rust `Cargo.toml`.
     CargoToml,
+    /// Python `pyproject.toml`.
     PyProjectToml,
     /// GitHub Actions workflow (`.github/workflows/*.yml` /`*.yaml`) or
     /// composite action definition (`action.yml` / `action.yaml`).
@@ -67,7 +74,9 @@ impl std::fmt::Display for ManifestKind {
 /// A reference to a manifest file on disk.
 #[derive(Debug, Clone)]
 pub struct ManifestRef {
+    /// Filesystem path to the manifest.
     pub path: PathBuf,
+    /// Which manifest format this file is.
     pub kind: ManifestKind,
 }
 
@@ -75,17 +84,21 @@ pub struct ManifestRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DependencySection {
-    // Node.js (package.json)
+    /// Node.js `dependencies`.
     Dependencies,
+    /// Node.js `devDependencies`.
     DevDependencies,
+    /// Node.js `peerDependencies`.
     PeerDependencies,
+    /// Node.js `optionalDependencies`.
     OptionalDependencies,
-    // Rust (Cargo.toml)
+    /// Rust `[build-dependencies]`.
     BuildDependencies,
+    /// Rust `[workspace.dependencies]`.
     WorkspaceDependencies,
-    // Python (pyproject.toml)
+    /// Python `[project] dependencies`.
     ProjectDependencies,
-    // GitHub Actions (`uses:` directives in workflows / composite actions)
+    /// GitHub Actions `uses:` directives in workflows / composite actions.
     GitHubActions,
 }
 
@@ -115,8 +128,11 @@ impl std::fmt::Display for DependencySection {
 /// A dependency found in a manifest file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencySpec {
+    /// Package name as written in the manifest.
     pub name: String,
+    /// Current version requirement string (range prefix preserved).
     pub current_req: String,
+    /// Section the dependency was found in.
     pub section: DependencySection,
 }
 
@@ -175,226 +191,134 @@ pub struct ResolvedVersion {
 /// A planned update for a single dependency.
 #[derive(Debug, Clone)]
 pub struct PlannedUpdate {
+    /// Package name being updated.
     pub name: String,
+    /// Section the dependency lives in.
     pub section: DependencySection,
+    /// Current version requirement string.
     pub from: String,
+    /// New version requirement string to write.
     pub to: String,
 }
 
 /// The type of version bump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BumpType {
+    /// Major version change (e.g. `1.x → 2.x`).
     Major,
+    /// Minor version change (e.g. `1.0 → 1.1`).
     Minor,
+    /// Patch version change (e.g. `1.0.0 → 1.0.1`).
     Patch,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::str::FromStr;
 
-    #[test]
-    fn test_manifest_kind_from_path_package_json() {
-        let path = std::path::Path::new("package.json");
+    /// Detection of [`ManifestKind`] from a file path. `None` cases prove that
+    /// random `.yml` files outside `.github/workflows/` and unknown extensions
+    /// are ignored — the central guarantee of the dispatcher.
+    #[rstest]
+    #[case::package_json("package.json", Some(ManifestKind::PackageJson))]
+    #[case::cargo_toml("Cargo.toml", Some(ManifestKind::CargoToml))]
+    #[case::pyproject_toml("pyproject.toml", Some(ManifestKind::PyProjectToml))]
+    #[case::workflow_yml(".github/workflows/CI.yml", Some(ManifestKind::GitHubWorkflow))]
+    #[case::workflow_yaml(".github/workflows/release.yaml", Some(ManifestKind::GitHubWorkflow))]
+    #[case::action_yml(".github/actions/setup/action.yml", Some(ManifestKind::GitHubWorkflow))]
+    #[case::action_yaml("path/to/action.yaml", Some(ManifestKind::GitHubWorkflow))]
+    #[case::nested_workflow("repo/.github/workflows/test.yml", Some(ManifestKind::GitHubWorkflow))]
+    #[case::unknown_extension("unknown.txt", None)]
+    #[case::unrelated_yml_ignored("docker-compose.yml", None)]
+    fn manifest_kind_from_path_cases(#[case] path: &str, #[case] expected: Option<ManifestKind>) {
         assert_eq!(
-            ManifestKind::from_path(path),
-            Some(ManifestKind::PackageJson)
+            ManifestKind::from_path(std::path::Path::new(path)),
+            expected
         );
     }
 
-    #[test]
-    fn test_manifest_kind_from_path_unknown() {
-        let path = std::path::Path::new("unknown.txt");
-        assert_eq!(ManifestKind::from_path(path), None);
+    /// [`Display`] strings used by user-facing CLI output for every manifest
+    /// kind.
+    #[rstest]
+    #[case::package_json(ManifestKind::PackageJson, "package.json")]
+    #[case::cargo_toml(ManifestKind::CargoToml, "Cargo.toml")]
+    #[case::pyproject_toml(ManifestKind::PyProjectToml, "pyproject.toml")]
+    #[case::github_workflow(ManifestKind::GitHubWorkflow, "GitHub workflow")]
+    fn manifest_kind_display_cases(#[case] kind: ManifestKind, #[case] expected: &str) {
+        assert_eq!(kind.to_string(), expected);
     }
 
-    #[test]
-    fn test_target_level_from_str_patch() {
-        assert_eq!(TargetLevel::from_str("patch"), Ok(TargetLevel::Patch));
-    }
-
-    #[test]
-    fn test_target_level_from_str_case_insensitive() {
-        assert_eq!(TargetLevel::from_str("LATEST"), Ok(TargetLevel::Latest));
-        assert_eq!(TargetLevel::from_str("MiNoR"), Ok(TargetLevel::Minor));
-    }
-
-    #[test]
-    fn test_target_level_from_str_invalid() {
-        let result = TargetLevel::from_str("invalid");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("unknown target level"));
-    }
-
-    #[test]
-    fn test_dependency_section_label() {
-        assert_eq!(DependencySection::Dependencies.label(), "dependencies");
-        assert_eq!(
-            DependencySection::DevDependencies.label(),
-            "devDependencies"
-        );
-        assert_eq!(
-            DependencySection::BuildDependencies.label(),
-            "build-dependencies"
-        );
-        assert_eq!(
-            DependencySection::WorkspaceDependencies.label(),
-            "workspace.dependencies"
-        );
-        assert_eq!(
-            DependencySection::ProjectDependencies.label(),
-            "project.dependencies"
-        );
-    }
-
-    #[test]
-    fn test_target_level_display_roundtrip() {
-        let levels = vec![
-            TargetLevel::Patch,
-            TargetLevel::Minor,
-            TargetLevel::Latest,
-            TargetLevel::Newest,
-            TargetLevel::Greatest,
-        ];
-
-        for level in levels {
-            let displayed = level.to_string();
-            let parsed = TargetLevel::from_str(&displayed).unwrap();
-            assert_eq!(level, parsed);
+    /// [`TargetLevel::from_str`] is case-insensitive and rejects unknown
+    /// values with a message that explains itself (`expected = None` cases).
+    #[rstest]
+    #[case::lower_patch("patch", Some(TargetLevel::Patch))]
+    #[case::upper_latest("LATEST", Some(TargetLevel::Latest))]
+    #[case::mixed_minor("MiNoR", Some(TargetLevel::Minor))]
+    #[case::invalid_value("invalid", None)]
+    fn target_level_from_str_cases(#[case] input: &str, #[case] expected: Option<TargetLevel>) {
+        let result = TargetLevel::from_str(input);
+        if let Some(level) = expected {
+            assert_eq!(result, Ok(level));
+        } else {
+            let err = result.expect_err("expected an error for unknown target");
+            assert!(
+                err.contains("unknown target level"),
+                "error must mention `unknown target level`, got: {err}",
+            );
         }
     }
 
-    #[test]
-    fn test_manifest_kind_display() {
-        assert_eq!(ManifestKind::PackageJson.to_string(), "package.json");
+    /// `Display(level).parse()` must round-trip back to the same variant for
+    /// every supported target.
+    #[rstest]
+    #[case(TargetLevel::Patch)]
+    #[case(TargetLevel::Minor)]
+    #[case(TargetLevel::Latest)]
+    #[case(TargetLevel::Newest)]
+    #[case(TargetLevel::Greatest)]
+    fn target_level_display_roundtrip(#[case] level: TargetLevel) {
+        let displayed = level.to_string();
+        let parsed = TargetLevel::from_str(&displayed).expect("display string must round-trip");
+        assert_eq!(level, parsed);
     }
 
-    #[test]
-    fn test_manifest_kind_display_cargo_toml() {
-        assert_eq!(ManifestKind::CargoToml.to_string(), "Cargo.toml");
+    /// `label()` is the wire-format identifier surfaced in JSON output and
+    /// must match every section's canonical name.
+    #[rstest]
+    #[case::dependencies(DependencySection::Dependencies, "dependencies")]
+    #[case::dev_dependencies(DependencySection::DevDependencies, "devDependencies")]
+    #[case::peer_dependencies(DependencySection::PeerDependencies, "peerDependencies")]
+    #[case::optional_dependencies(DependencySection::OptionalDependencies, "optionalDependencies")]
+    #[case::build_dependencies(DependencySection::BuildDependencies, "build-dependencies")]
+    #[case::workspace_dependencies(
+        DependencySection::WorkspaceDependencies,
+        "workspace.dependencies"
+    )]
+    #[case::project_dependencies(DependencySection::ProjectDependencies, "project.dependencies")]
+    #[case::github_actions(DependencySection::GitHubActions, "uses")]
+    fn dependency_section_label_cases(#[case] section: DependencySection, #[case] expected: &str) {
+        assert_eq!(section.label(), expected);
     }
 
-    #[test]
-    fn test_manifest_kind_display_pyproject_toml() {
-        assert_eq!(ManifestKind::PyProjectToml.to_string(), "pyproject.toml");
-    }
-
-    #[test]
-    fn test_manifest_kind_from_path_cargo_toml() {
-        let path = std::path::Path::new("Cargo.toml");
-        assert_eq!(ManifestKind::from_path(path), Some(ManifestKind::CargoToml));
-    }
-
-    #[test]
-    fn test_manifest_kind_from_path_pyproject_toml() {
-        let path = std::path::Path::new("pyproject.toml");
-        assert_eq!(
-            ManifestKind::from_path(path),
-            Some(ManifestKind::PyProjectToml)
-        );
-    }
-
-    #[test]
-    fn test_manifest_kind_from_path_workflow_yml() {
-        let path = std::path::Path::new(".github/workflows/CI.yml");
-        assert_eq!(
-            ManifestKind::from_path(path),
-            Some(ManifestKind::GitHubWorkflow)
-        );
-    }
-
-    #[test]
-    fn test_manifest_kind_from_path_workflow_yaml() {
-        let path = std::path::Path::new(".github/workflows/release.yaml");
-        assert_eq!(
-            ManifestKind::from_path(path),
-            Some(ManifestKind::GitHubWorkflow)
-        );
-    }
-
-    #[test]
-    fn test_manifest_kind_from_path_action_yml() {
-        let path = std::path::Path::new(".github/actions/setup/action.yml");
-        assert_eq!(
-            ManifestKind::from_path(path),
-            Some(ManifestKind::GitHubWorkflow)
-        );
-    }
-
-    #[test]
-    fn test_manifest_kind_from_path_action_yaml() {
-        let path = std::path::Path::new("path/to/action.yaml");
-        assert_eq!(
-            ManifestKind::from_path(path),
-            Some(ManifestKind::GitHubWorkflow)
-        );
-    }
-
-    #[test]
-    fn test_manifest_kind_from_path_unrelated_yml_ignored() {
-        // Random .yml files OUTSIDE .github/workflows must not be picked up.
-        let path = std::path::Path::new("docker-compose.yml");
-        assert_eq!(ManifestKind::from_path(path), None);
-    }
-
-    #[test]
-    fn test_manifest_kind_from_path_nested_workflow() {
-        let path = std::path::Path::new("repo/.github/workflows/test.yml");
-        assert_eq!(
-            ManifestKind::from_path(path),
-            Some(ManifestKind::GitHubWorkflow)
-        );
-    }
-
-    #[test]
-    fn test_manifest_kind_display_github_workflow() {
-        assert_eq!(ManifestKind::GitHubWorkflow.to_string(), "GitHub workflow");
-    }
-
-    #[test]
-    fn test_dependency_section_label_github_actions() {
-        assert_eq!(DependencySection::GitHubActions.label(), "uses");
-    }
-
-    #[test]
-    fn test_dependency_section_display() {
-        assert_eq!(DependencySection::Dependencies.to_string(), "dependencies");
-        assert_eq!(
-            DependencySection::DevDependencies.to_string(),
-            "devDependencies"
-        );
-        assert_eq!(
-            DependencySection::PeerDependencies.to_string(),
-            "peerDependencies"
-        );
-        assert_eq!(
-            DependencySection::OptionalDependencies.to_string(),
-            "optionalDependencies"
-        );
-        assert_eq!(
-            DependencySection::BuildDependencies.to_string(),
-            "build-dependencies"
-        );
-        assert_eq!(
-            DependencySection::WorkspaceDependencies.to_string(),
-            "workspace.dependencies"
-        );
-        assert_eq!(
-            DependencySection::ProjectDependencies.to_string(),
-            "project.dependencies"
-        );
-    }
-
-    #[test]
-    fn test_dependency_section_label_peer_optional() {
-        assert_eq!(
-            DependencySection::PeerDependencies.label(),
-            "peerDependencies"
-        );
-        assert_eq!(
-            DependencySection::OptionalDependencies.label(),
-            "optionalDependencies"
-        );
+    /// [`Display`] mirrors `label()` — this case set guards both forms from
+    /// drifting apart.
+    #[rstest]
+    #[case::dependencies(DependencySection::Dependencies, "dependencies")]
+    #[case::dev_dependencies(DependencySection::DevDependencies, "devDependencies")]
+    #[case::peer_dependencies(DependencySection::PeerDependencies, "peerDependencies")]
+    #[case::optional_dependencies(DependencySection::OptionalDependencies, "optionalDependencies")]
+    #[case::build_dependencies(DependencySection::BuildDependencies, "build-dependencies")]
+    #[case::workspace_dependencies(
+        DependencySection::WorkspaceDependencies,
+        "workspace.dependencies"
+    )]
+    #[case::project_dependencies(DependencySection::ProjectDependencies, "project.dependencies")]
+    fn dependency_section_display_cases(
+        #[case] section: DependencySection,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(section.to_string(), expected);
     }
 }

@@ -136,14 +136,14 @@ impl PyProjectManifest {
 
     /// Apply planned updates to the document, returning the modified text.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if a dependency cannot be updated.
-    pub fn apply_updates(&mut self, updates: &[PlannedUpdate]) -> Result<String, PyProjectError> {
+    /// Infallible: updates that match no dependency in the document are
+    /// silently skipped (see [`Self::apply_single_update`]).
+    #[must_use]
+    pub fn apply_updates(&mut self, updates: &[PlannedUpdate]) -> String {
         for update in updates {
             self.apply_single_update(update);
         }
-        Ok(self.doc.to_string())
+        self.doc.to_string()
     }
 
     fn apply_single_update(&mut self, update: &PlannedUpdate) {
@@ -151,13 +151,25 @@ impl PyProjectManifest {
         if let Some(project) = self.doc.get_mut("project").and_then(Item::as_table_mut) {
             if let Some(dep_array) = project.get_mut("dependencies").and_then(Item::as_array_mut) {
                 for item in dep_array.iter_mut() {
-                    if let Some(spec_str) = item.as_str() {
-                        if spec_str_matches_name(spec_str, &update.name) {
-                            let new_spec = replace_version_in_pep508(spec_str, &update.to);
-                            *item = toml_edit::Value::String(toml_edit::Formatted::new(new_spec));
-                            return;
-                        }
+                    let Some(spec_str) = item.as_str() else {
+                        continue;
+                    };
+                    if !spec_str_matches_name(spec_str, &update.name) {
+                        continue;
                     }
+                    let new_spec = replace_version_in_pep508(spec_str, &update.to);
+                    // Preserve the element's surrounding decor (leading newline +
+                    // indentation, trailing whitespace/comment) instead of
+                    // replacing the value wholesale — a fresh `Formatted::new`
+                    // carries empty decor, which collapses a multi-line
+                    // `dependencies` array onto a single line. Mirrors the
+                    // decor-preserving Poetry path below.
+                    if let toml_edit::Value::String(s) = item {
+                        let mut new_s = toml_edit::Formatted::new(new_spec);
+                        *new_s.decor_mut() = s.decor().clone();
+                        *s = new_s;
+                    }
+                    return;
                 }
             }
         }
@@ -300,127 +312,173 @@ pub enum PyProjectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn test_parse_pep621_dependencies() {
-        let toml = r#"
-[project]
-name = "my-project"
-dependencies = [
-    "requests>=2.28.0",
-    "flask~=2.0",
-    "click>=8.0,<9.0",
-]
-"#;
-        let manifest = PyProjectManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 3);
-        assert_eq!(manifest.dependencies[0].name, "requests");
-        assert_eq!(manifest.dependencies[0].current_req, ">=2.28.0");
-        assert_eq!(
-            manifest.dependencies[0].section,
-            DependencySection::ProjectDependencies
-        );
+    // ---------- Pure-function table tests ----------
+
+    #[rstest]
+    #[case::basic("requests>=2.28.0", ">=2.31.0", "requests>=2.31.0")]
+    #[case::tilde("flask~=2.0", "~=3.0", "flask~=3.0")]
+    #[case::with_markers(
+        "pywin32>=300; sys_platform == 'win32'",
+        ">=306",
+        "pywin32>=306; sys_platform == 'win32'"
+    )]
+    #[case::extras_and_markers(
+        "requests[security]>=2.28.0; python_version >= '3.8'",
+        ">=2.31.0",
+        "requests[security]>=2.31.0; python_version >= '3.8'"
+    )]
+    fn replace_version_in_pep508_cases(
+        #[case] spec: &str,
+        #[case] new_version: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(replace_version_in_pep508(spec, new_version), expected);
+    }
+
+    #[rstest]
+    #[case::dash_to_underscore("My-Package", "my_package")]
+    #[case::dot_to_underscore("my.package", "my_package")]
+    #[case::lowercase("MY_PACKAGE", "my_package")]
+    fn normalize_pep503_cases(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(normalize_pep503(input), expected);
+    }
+
+    #[rstest]
+    #[case::dash_underscore_equivalence("My-Package>=1.0", "my_package", true)]
+    #[case::dot_dash_equivalence("my.package>=1.0", "my-package", true)]
+    #[case::different_name("other>=1.0", "my-package", false)]
+    fn spec_str_matches_name_cases(#[case] spec: &str, #[case] name: &str, #[case] expected: bool) {
+        assert_eq!(spec_str_matches_name(spec, name), expected);
+    }
+
+    #[rstest]
+    #[case::with_extras("requests[security]>=2.28.0", "requests", ">=2.28.0")]
+    #[case::with_markers("pywin32>=300; sys_platform == 'win32'", "pywin32", ">=300")]
+    fn parse_pep508_spec_with_constraint_cases(
+        #[case] spec: &str,
+        #[case] expected_name: &str,
+        #[case] expected_req: &str,
+    ) {
+        let dep =
+            parse_pep508_spec(spec, DependencySection::ProjectDependencies).expect("should parse");
+        assert_eq!(dep.name, expected_name);
+        assert_eq!(dep.current_req, expected_req);
+    }
+
+    #[rstest]
+    #[case::bare_name("requests")]
+    #[case::empty_string("")]
+    #[case::equals_wildcard("requests==*")]
+    #[case::bare_star("requests *")]
+    fn parse_pep508_spec_without_constraint_cases(#[case] spec: &str) {
+        assert!(parse_pep508_spec(spec, DependencySection::ProjectDependencies).is_none());
+    }
+
+    // ---------- Manifest parse / collect_dependencies scenarios ----------
+
+    /// Optional `(name, req, section)` triple to assert on a particular dep slot
+    /// after parsing. Each field is `Option` so a case asserts only the
+    /// originally-checked fields without strengthening the test.
+    type FieldsCheck = (
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<DependencySection>,
+    );
+
+    #[rstest]
+    #[case::pep621_dependencies(
+        "\n[project]\nname = \"my-project\"\ndependencies = [\n    \"requests>=2.28.0\",\n    \"flask~=2.0\",\n    \"click>=8.0,<9.0\",\n]\n",
+        3,
+        Some((
+            Some("requests"),
+            Some(">=2.28.0"),
+            Some(DependencySection::ProjectDependencies),
+        )),
+    )]
+    #[case::pep621_optional_deps(
+        "\n[project.optional-dependencies]\ndev = [\"pytest>=7.0\", \"black>=23.0\"]\ndocs = [\"sphinx>=5.0\"]\n",
+        3,
+        Some((None, None, Some(DependencySection::OptionalDependencies))),
+    )]
+    #[case::poetry_dependencies(
+        "\n[tool.poetry.dependencies]\npython = \"^3.8\"\nrequests = \"^2.28.0\"\nflask = {version = \"^2.0\", optional = true}\n",
+        2,
+        Some((Some("requests"), Some("^2.28.0"), None)),
+    )]
+    #[case::poetry_dev_dependencies(
+        "\n[tool.poetry.dev-dependencies]\npytest = \"^7.0\"\n",
+        1,
+        Some((None, None, Some(DependencySection::DevDependencies))),
+    )]
+    #[case::dependency_groups(
+        "\n[dependency-groups]\ntest = [\"pytest>=7.0\", \"coverage>=7.0\"]\n",
+        2,
+        None
+    )]
+    #[case::skip_bare_deps(
+        "\n[project]\ndependencies = [\"requests\", \"flask>=2.0\"]\n",
+        1,
+        Some((Some("flask"), None, None)),
+    )]
+    #[case::no_deps_empty("\n[project]\nname = \"empty\"\n", 0, None)]
+    #[case::poetry_bool_value_skipped(
+        "\n[tool.poetry.dependencies]\npython = \"^3.8\"\nmy-pkg = true\n",
+        0,
+        None
+    )]
+    fn collect_dependencies_cases(
+        #[case] toml: &str,
+        #[case] expected_len: usize,
+        #[case] expected_first: Option<FieldsCheck>,
+    ) {
+        let manifest = PyProjectManifest::parse(toml).expect("toml should parse");
+        assert_eq!(manifest.dependencies.len(), expected_len);
+        if let Some((name, req, section)) = expected_first {
+            let first = &manifest.dependencies[0];
+            if let Some(n) = name {
+                assert_eq!(first.name, n);
+            }
+            if let Some(r) = req {
+                assert_eq!(first.current_req, r);
+            }
+            if let Some(s) = section {
+                assert_eq!(first.section, s);
+            }
+        }
+    }
+
+    #[rstest]
+    #[case::poetry_table_form(
+        "\n[tool.poetry.dependencies]\npython = \"^3.8\"\n\n[tool.poetry.dependencies.sqlalchemy]\nversion = \"^2.0\"\nextras = [\"asyncio\"]\n",
+        "sqlalchemy",
+        "^2.0"
+    )]
+    #[case::poetry_inline_table(
+        "\n[tool.poetry.dependencies]\npython = \"^3.8\"\nflask = {version = \"^2.0\", optional = true}\n",
+        "flask",
+        "^2.0"
+    )]
+    fn collect_dependencies_finds_named_dep(
+        #[case] toml: &str,
+        #[case] name: &str,
+        #[case] expected_req: &str,
+    ) {
+        let manifest = PyProjectManifest::parse(toml).expect("toml should parse");
+        let found = manifest.dependencies.iter().find(|d| d.name == name);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().current_req, expected_req);
     }
 
     #[test]
-    fn test_parse_pep621_optional_deps() {
-        let toml = r#"
-[project.optional-dependencies]
-dev = ["pytest>=7.0", "black>=23.0"]
-docs = ["sphinx>=5.0"]
-"#;
-        let manifest = PyProjectManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 3);
-        assert_eq!(
-            manifest.dependencies[0].section,
-            DependencySection::OptionalDependencies
-        );
+    fn invalid_toml_returns_error() {
+        let result = PyProjectManifest::parse("not valid [[[toml");
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_parse_poetry_dependencies() {
-        let toml = r#"
-[tool.poetry.dependencies]
-python = "^3.8"
-requests = "^2.28.0"
-flask = {version = "^2.0", optional = true}
-"#;
-        let manifest = PyProjectManifest::parse(toml).unwrap();
-        // python is skipped
-        assert_eq!(manifest.dependencies.len(), 2);
-        assert_eq!(manifest.dependencies[0].name, "requests");
-        assert_eq!(manifest.dependencies[0].current_req, "^2.28.0");
-    }
-
-    #[test]
-    fn test_parse_poetry_dev_dependencies() {
-        let toml = r#"
-[tool.poetry.dev-dependencies]
-pytest = "^7.0"
-"#;
-        let manifest = PyProjectManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(
-            manifest.dependencies[0].section,
-            DependencySection::DevDependencies
-        );
-    }
-
-    #[test]
-    fn test_parse_dependency_groups() {
-        let toml = r#"
-[dependency-groups]
-test = ["pytest>=7.0", "coverage>=7.0"]
-"#;
-        let manifest = PyProjectManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 2);
-    }
-
-    #[test]
-    fn test_skip_bare_deps() {
-        let toml = r#"
-[project]
-dependencies = ["requests", "flask>=2.0"]
-"#;
-        let manifest = PyProjectManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "flask");
-    }
-
-    #[test]
-    fn test_pep508_with_extras() {
-        let dep = parse_pep508_spec(
-            "requests[security]>=2.28.0",
-            DependencySection::ProjectDependencies,
-        );
-        let dep = dep.unwrap();
-        assert_eq!(dep.name, "requests");
-        assert_eq!(dep.current_req, ">=2.28.0");
-    }
-
-    #[test]
-    fn test_pep508_with_markers() {
-        let dep = parse_pep508_spec(
-            "pywin32>=300; sys_platform == 'win32'",
-            DependencySection::ProjectDependencies,
-        );
-        let dep = dep.unwrap();
-        assert_eq!(dep.name, "pywin32");
-        assert_eq!(dep.current_req, ">=300");
-    }
-
-    #[test]
-    fn test_no_deps_empty() {
-        let toml = r#"
-[project]
-name = "empty"
-"#;
-        let manifest = PyProjectManifest::parse(toml).unwrap();
-        assert!(manifest.dependencies.is_empty());
-    }
-
-    #[test]
-    fn test_comments_preserved() {
+    fn comments_preserved_through_noop_apply() {
         let toml = r#"
 # Project config
 [project]
@@ -431,92 +489,78 @@ dependencies = [
 ]
 "#;
         let mut manifest = PyProjectManifest::parse(toml).unwrap();
-        let result = manifest.apply_updates(&[]).unwrap();
+        let result = manifest.apply_updates(&[]);
         assert!(result.contains("# Project config"));
         assert!(result.contains("# Main dependencies"));
     }
 
-    #[test]
-    fn test_replace_version_in_pep508() {
-        assert_eq!(
-            replace_version_in_pep508("requests>=2.28.0", ">=2.31.0"),
-            "requests>=2.31.0"
-        );
-        assert_eq!(
-            replace_version_in_pep508("flask~=2.0", "~=3.0"),
-            "flask~=3.0"
-        );
-        assert_eq!(
-            replace_version_in_pep508("pywin32>=300; sys_platform == 'win32'", ">=306"),
-            "pywin32>=306; sys_platform == 'win32'"
-        );
+    // ---------- apply_updates substring-based scenarios ----------
+
+    /// `(name, section, from, to)` for a single planned update row.
+    type UpdateRow = (&'static str, DependencySection, &'static str, &'static str);
+
+    fn rows_to_updates(rows: &[UpdateRow]) -> Vec<PlannedUpdate> {
+        rows.iter()
+            .map(|(name, section, from, to)| PlannedUpdate {
+                name: (*name).to_owned(),
+                section: *section,
+                from: (*from).to_owned(),
+                to: (*to).to_owned(),
+            })
+            .collect()
+    }
+
+    #[rstest]
+    #[case::pep621_basic(
+        "\n[project]\nname = \"my-project\"\ndependencies = [\n    \"requests>=2.28.0\",\n    \"flask~=2.0\",\n]\n",
+        &[("requests", DependencySection::ProjectDependencies, ">=2.28.0", ">=2.31.0")],
+        &["requests>=2.31.0", "flask~=2.0"],
+    )]
+    #[case::poetry_basic(
+        "\n[tool.poetry.dependencies]\npython = \"^3.8\"\nrequests = \"^2.28.0\"\nflask = \"^2.0\"\n",
+        &[("requests", DependencySection::Dependencies, "^2.28.0", "^2.31.0")],
+        &["\"^2.31.0\"", "flask = \"^2.0\""],
+    )]
+    #[case::empty_updates(
+        "\n[project]\nname = \"my-project\"\ndependencies = [\n    \"requests>=2.28.0\",\n]\n",
+        &[],
+        &["requests>=2.28.0"],
+    )]
+    #[case::pep508_with_markers(
+        "\n[project]\ndependencies = [\n    \"pywin32>=300; sys_platform == 'win32'\",\n]\n",
+        &[("pywin32", DependencySection::ProjectDependencies, ">=300", ">=306")],
+        &["pywin32>=306; sys_platform == 'win32'"],
+    )]
+    #[case::poetry_table_form(
+        "\n[tool.poetry.dependencies]\npython = \"^3.8\"\nrequests = \"^2.28.0\"\n",
+        &[("requests", DependencySection::Dependencies, "^2.28.0", "^2.31.0")],
+        &["\"^2.31.0\"", "python = \"^3.8\""],
+    )]
+    #[case::nonexistent_dep_skipped(
+        "\n[project]\ndependencies = [\"requests>=2.28.0\"]\n",
+        &[("nonexistent", DependencySection::ProjectDependencies, ">=1.0", ">=2.0")],
+        &["requests>=2.28.0"],
+    )]
+    fn apply_updates_substring_cases(
+        #[case] toml: &str,
+        #[case] update_rows: &[UpdateRow],
+        #[case] expected_contains: &[&str],
+    ) {
+        let mut manifest = PyProjectManifest::parse(toml).expect("toml should parse");
+        let updates = rows_to_updates(update_rows);
+        let result = manifest.apply_updates(&updates);
+        for needle in expected_contains {
+            assert!(
+                result.contains(needle),
+                "expected substring `{needle}` in result:\n{result}"
+            );
+        }
     }
 
     #[test]
-    fn test_normalize_pep503() {
-        assert_eq!(normalize_pep503("My-Package"), "my_package");
-        assert_eq!(normalize_pep503("my.package"), "my_package");
-        assert_eq!(normalize_pep503("MY_PACKAGE"), "my_package");
-    }
-
-    #[test]
-    fn test_apply_updates_pep621() {
-        let toml = r#"
-[project]
-name = "my-project"
-dependencies = [
-    "requests>=2.28.0",
-    "flask~=2.0",
-]
-"#;
-        let mut manifest = PyProjectManifest::parse(toml).unwrap();
-        let updates = vec![PlannedUpdate {
-            name: "requests".to_owned(),
-            section: DependencySection::ProjectDependencies,
-            from: ">=2.28.0".to_owned(),
-            to: ">=2.31.0".to_owned(),
-        }];
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("requests>=2.31.0"));
-        assert!(result.contains("flask~=2.0"));
-    }
-
-    #[test]
-    fn test_apply_updates_poetry() {
-        let toml = r#"
-[tool.poetry.dependencies]
-python = "^3.8"
-requests = "^2.28.0"
-flask = "^2.0"
-"#;
-        let mut manifest = PyProjectManifest::parse(toml).unwrap();
-        let updates = vec![PlannedUpdate {
-            name: "requests".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "^2.28.0".to_owned(),
-            to: "^2.31.0".to_owned(),
-        }];
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("\"^2.31.0\""));
-        assert!(result.contains("flask = \"^2.0\""));
-    }
-
-    #[test]
-    fn test_apply_updates_empty() {
-        let toml = r#"
-[project]
-name = "my-project"
-dependencies = [
-    "requests>=2.28.0",
-]
-"#;
-        let mut manifest = PyProjectManifest::parse(toml).unwrap();
-        let result = manifest.apply_updates(&[]).unwrap();
-        assert!(result.contains("requests>=2.28.0"));
-    }
-
-    #[test]
-    fn test_apply_updates_pep508_with_extras() {
+    fn apply_updates_pep508_with_extras_parses_and_replaces() {
+        // Separate from the substring table because the original test also
+        // asserts pre-apply dependency-list state (len + name).
         let toml = r#"
 [project]
 dependencies = [
@@ -533,161 +577,55 @@ dependencies = [
             from: ">=2.28.0".to_owned(),
             to: ">=2.31.0".to_owned(),
         }];
-        let result = manifest.apply_updates(&updates).unwrap();
+        let result = manifest.apply_updates(&updates);
         assert!(result.contains("requests[security]>=2.31.0"));
     }
 
+    /// Covers the `let Some(spec_str) = item.as_str() else { continue; }`
+    /// branch in `apply_single_update` (parser.rs line 155). The
+    /// `dependencies` array contains an inline-table element (TOML-valid but
+    /// not a string), which `apply_single_update` must skip via `continue`
+    /// before reaching the trailing string dep, which still gets updated.
     #[test]
-    fn test_apply_updates_pep508_with_markers() {
-        let toml = r#"
-[project]
-dependencies = [
-    "pywin32>=300; sys_platform == 'win32'",
-]
-"#;
-        let mut manifest = PyProjectManifest::parse(toml).unwrap();
-        let updates = vec![PlannedUpdate {
-            name: "pywin32".to_owned(),
-            section: DependencySection::ProjectDependencies,
-            from: ">=300".to_owned(),
-            to: ">=306".to_owned(),
-        }];
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("pywin32>=306; sys_platform == 'win32'"));
-    }
-
-    #[test]
-    fn test_spec_str_matches_name_normalized() {
-        assert!(spec_str_matches_name("My-Package>=1.0", "my_package"));
-        assert!(spec_str_matches_name("my.package>=1.0", "my-package"));
-        assert!(!spec_str_matches_name("other>=1.0", "my-package"));
-    }
-
-    #[test]
-    fn test_replace_version_with_extras_and_markers() {
-        let result = replace_version_in_pep508(
-            "requests[security]>=2.28.0; python_version >= '3.8'",
-            ">=2.31.0",
-        );
-        assert_eq!(
-            result,
-            "requests[security]>=2.31.0; python_version >= '3.8'"
-        );
-    }
-
-    #[test]
-    fn test_parse_pep508_bare_name() {
-        let dep = parse_pep508_spec("requests", DependencySection::ProjectDependencies);
-        assert!(dep.is_none());
-    }
-
-    #[test]
-    fn test_parse_pep508_empty_name() {
-        let dep = parse_pep508_spec("", DependencySection::ProjectDependencies);
-        assert!(dep.is_none());
-    }
-
-    #[test]
-    fn test_parse_pep508_wildcard_version_rejected() {
-        // A PEP 508 spec that carries a wildcard version like `pkg==*` must be
-        // filtered out at parse time — there's nothing meaningful to update.
-        let dep = parse_pep508_spec("requests==*", DependencySection::ProjectDependencies);
-        assert!(dep.is_none());
-    }
-
-    #[test]
-    fn test_parse_pep508_bare_star_rejected() {
-        // `pkg *` should also be rejected via is_wildcard_req.
-        let dep = parse_pep508_spec("requests *", DependencySection::ProjectDependencies);
-        assert!(dep.is_none());
-    }
-
-    #[test]
-    fn test_invalid_toml_returns_error() {
-        let result = PyProjectManifest::parse("not valid [[[toml");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_poetry_table_form_version() {
-        let toml = r#"
-[tool.poetry.dependencies]
-python = "^3.8"
-
-[tool.poetry.dependencies.sqlalchemy]
-version = "^2.0"
-extras = ["asyncio"]
-"#;
-        let manifest = PyProjectManifest::parse(toml).unwrap();
-        let sa = manifest
-            .dependencies
-            .iter()
-            .find(|d| d.name == "sqlalchemy");
-        assert!(sa.is_some());
-        assert_eq!(sa.unwrap().current_req, "^2.0");
-    }
-
-    #[test]
-    fn test_poetry_inline_table_version() {
-        let toml = r#"
-[tool.poetry.dependencies]
-python = "^3.8"
-flask = {version = "^2.0", optional = true}
-"#;
-        let manifest = PyProjectManifest::parse(toml).unwrap();
-        let flask = manifest.dependencies.iter().find(|d| d.name == "flask");
-        assert!(flask.is_some());
-        assert_eq!(flask.unwrap().current_req, "^2.0");
-    }
-
-    #[test]
-    fn test_apply_updates_poetry_table_form() {
-        let toml = r#"
-[tool.poetry.dependencies]
-python = "^3.8"
-requests = "^2.28.0"
-"#;
-        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+    fn apply_update_skips_non_string_array_element() {
+        let toml = "[project]\nname = \"demo\"\ndependencies = [\n    { name = \"weird\", version = \"1.0\" },\n    \"requests>=2.28.0\",\n]\n";
+        let mut manifest = PyProjectManifest::parse(toml).expect("toml should parse");
         let updates = vec![PlannedUpdate {
             name: "requests".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "^2.28.0".to_owned(),
-            to: "^2.31.0".to_owned(),
+            section: DependencySection::ProjectDependencies,
+            from: ">=2.28.0".to_owned(),
+            to: ">=2.31.0".to_owned(),
         }];
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("\"^2.31.0\""));
-        // python constraint should remain unchanged
-        assert!(result.contains("python = \"^3.8\""));
+        let result = manifest.apply_updates(&updates);
+        assert!(
+            result.contains("requests>=2.31.0"),
+            "string dep after the inline-table element should still be updated:\n{result}"
+        );
+        // Inline-table element survives unchanged (the loop skipped it).
+        assert!(
+            result.contains("name = \"weird\""),
+            "non-string element should remain in the array:\n{result}"
+        );
     }
 
     #[test]
-    fn test_apply_updates_nonexistent_dep_silently_skipped() {
-        let toml = r#"
-[project]
-dependencies = ["requests>=2.28.0"]
-"#;
+    fn apply_updates_pep621_preserves_multiline_format() {
+        // Regression: replacing a PEP 621 array element must keep the element's
+        // surrounding decor (leading newline + indentation). Previously the
+        // value was swapped with a fresh `Formatted::new` carrying empty decor,
+        // which collapsed the whole `dependencies` array onto one line.
+        let toml = "[project]\nname = \"demo\"\ndependencies = [\n    \"pytz>=2024.1\",\n    \"requests>=2.30.0\",\n]\n";
         let mut manifest = PyProjectManifest::parse(toml).unwrap();
         let updates = vec![PlannedUpdate {
-            name: "nonexistent".to_owned(),
+            name: "pytz".to_owned(),
             section: DependencySection::ProjectDependencies,
-            from: ">=1.0".to_owned(),
-            to: ">=2.0".to_owned(),
+            from: ">=2024.1".to_owned(),
+            to: ">=2026.2".to_owned(),
         }];
-        // Should succeed without error, just skip the missing dep
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("requests>=2.28.0"));
-    }
-
-    #[test]
-    fn test_extract_poetry_version_bool_returns_none() {
-        // A boolean value should return None from extract_poetry_version
-        let toml = r#"
-[tool.poetry.dependencies]
-python = "^3.8"
-my-pkg = true
-"#;
-        let manifest = PyProjectManifest::parse(toml).unwrap();
-        // "my-pkg = true" is not a valid version spec, should be skipped
-        assert_eq!(manifest.dependencies.len(), 0);
+        let result = manifest.apply_updates(&updates);
+        // Byte-for-byte identical except the bumped version — newlines and the
+        // 4-space indentation of every element are preserved.
+        let expected = "[project]\nname = \"demo\"\ndependencies = [\n    \"pytz>=2026.2\",\n    \"requests>=2.30.0\",\n]\n";
+        assert_eq!(result, expected);
     }
 }

@@ -290,6 +290,7 @@ pub struct ScanResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::{fixture, rstest};
     use std::fs;
     use tempfile::TempDir;
 
@@ -297,34 +298,65 @@ mod tests {
         fs::write(dir.join(filename), content).unwrap();
     }
 
-    #[test]
-    fn test_scan_dir_finds_package_json() {
-        let dir = TempDir::new().unwrap();
-        create_temp_manifest(dir.path(), "package.json", r#"{"name":"test"}"#);
-
-        let manifests = Scanner::scan_dir(dir.path());
-        assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].kind, ManifestKind::PackageJson);
+    /// Fresh isolated working dir per generated test. Returning the guard
+    /// (not just the path) is required so the directory survives until the
+    /// case finishes.
+    #[fixture]
+    fn tmp() -> TempDir {
+        TempDir::new().expect("create temp dir")
     }
 
-    #[test]
-    fn test_scan_dir_finds_cargo_toml() {
-        let dir = TempDir::new().unwrap();
-        create_temp_manifest(dir.path(), "Cargo.toml", "[package]\nname = \"test\"");
+    /// `scan_dir` recognises every supported manifest layout when each is the
+    /// sole file in the tree. Cases cover the three flat manifests at the
+    /// root, both workflow YAML extensions under `.github/workflows/`, and
+    /// the `action.yml` composite-action layout that lives at the repo root.
+    #[rstest]
+    #[case::package_json("package.json", r#"{"name":"test"}"#, ManifestKind::PackageJson)]
+    #[case::cargo_toml("Cargo.toml", "[package]\nname = \"test\"", ManifestKind::CargoToml)]
+    #[case::pyproject_toml(
+        "pyproject.toml",
+        "[project]\nname = \"test\"",
+        ManifestKind::PyProjectToml
+    )]
+    #[case::workflow_yml(
+        ".github/workflows/CI.yml",
+        "jobs:\n  test:\n    runs-on: ubuntu-latest\n",
+        ManifestKind::GitHubWorkflow
+    )]
+    #[case::workflow_yaml(
+        ".github/workflows/release.yaml",
+        "jobs: {}\n",
+        ManifestKind::GitHubWorkflow
+    )]
+    // Composite action authors put `action.yml` at the repo root. scan_dir
+    // (no -d) must surface it so they don't have to remember `-d`.
+    #[case::root_action_yml(
+        "action.yml",
+        "name: test\nruns:\n  using: composite\n",
+        ManifestKind::GitHubWorkflow
+    )]
+    fn scan_dir_finds_single_manifest(
+        tmp: TempDir,
+        #[case] rel_path: &str,
+        #[case] content: &str,
+        #[case] kind: ManifestKind,
+    ) {
+        let full = tmp.path().join(rel_path);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&full, content).unwrap();
 
-        let manifests = Scanner::scan_dir(dir.path());
+        let manifests = Scanner::scan_dir(tmp.path());
         assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].kind, ManifestKind::CargoToml);
-    }
-
-    #[test]
-    fn test_scan_dir_finds_pyproject_toml() {
-        let dir = TempDir::new().unwrap();
-        create_temp_manifest(dir.path(), "pyproject.toml", "[project]\nname = \"test\"");
-
-        let manifests = Scanner::scan_dir(dir.path());
-        assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].kind, ManifestKind::PyProjectToml);
+        assert_eq!(manifests[0].kind, kind);
+        // Preserves the `path.ends_with("CI.yml")` guarantee from the original
+        // workflow_yml test; every case satisfies it since the scanner returns
+        // the file we created.
+        let filename = std::path::Path::new(rel_path)
+            .file_name()
+            .expect("rel_path has a file name");
+        assert!(manifests[0].path.ends_with(filename));
     }
 
     #[test]
@@ -355,28 +387,30 @@ mod tests {
         assert!(manifests.is_empty());
     }
 
-    #[test]
-    fn test_from_path_valid() {
-        let dir = TempDir::new().unwrap();
-        create_temp_manifest(dir.path(), "package.json", "{}");
-
-        let result = Scanner::from_path(&dir.path().join("package.json"));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().kind, ManifestKind::PackageJson);
+    /// `Scanner::from_path` for files that exist on disk: recognised manifest
+    /// → `Ok(kind)`, anything else → `Err`. The "file does not exist at all"
+    /// scenario stays a plain `#[test]` below because its setup (absolute,
+    /// non-existent path) does not share the fixture.
+    #[rstest]
+    #[case::valid_package_json("package.json", "{}", Some(ManifestKind::PackageJson))]
+    #[case::unknown_file("build.gradle", "", None)]
+    fn from_path_existing_file(
+        tmp: TempDir,
+        #[case] filename: &str,
+        #[case] content: &str,
+        #[case] expected: Option<ManifestKind>,
+    ) {
+        create_temp_manifest(tmp.path(), filename, content);
+        let result = Scanner::from_path(&tmp.path().join(filename));
+        match expected {
+            Some(k) => assert_eq!(result.expect("from_path should succeed").kind, k),
+            None => assert!(result.is_err(), "expected Err for {filename}"),
+        }
     }
 
     #[test]
     fn test_from_path_not_found() {
         let result = Scanner::from_path(Path::new("/nonexistent/package.json"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_from_path_unknown_file() {
-        let dir = TempDir::new().unwrap();
-        create_temp_manifest(dir.path(), "build.gradle", "");
-
-        let result = Scanner::from_path(&dir.path().join("build.gradle"));
         assert!(result.is_err());
     }
 
@@ -418,51 +452,6 @@ mod tests {
         let result = Scanner::discover(dir.path(), None, true);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 2);
-    }
-
-    #[test]
-    fn test_scan_dir_finds_workflow_yml() {
-        let dir = TempDir::new().unwrap();
-        let workflows = dir.path().join(".github").join("workflows");
-        std::fs::create_dir_all(&workflows).unwrap();
-        create_temp_manifest(
-            &workflows,
-            "CI.yml",
-            "jobs:\n  test:\n    runs-on: ubuntu-latest\n",
-        );
-
-        let manifests = Scanner::scan_dir(dir.path());
-        assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].kind, ManifestKind::GitHubWorkflow);
-        assert!(manifests[0].path.ends_with("CI.yml"));
-    }
-
-    #[test]
-    fn test_scan_dir_finds_workflow_yaml() {
-        let dir = TempDir::new().unwrap();
-        let workflows = dir.path().join(".github").join("workflows");
-        std::fs::create_dir_all(&workflows).unwrap();
-        create_temp_manifest(&workflows, "release.yaml", "jobs: {}\n");
-
-        let manifests = Scanner::scan_dir(dir.path());
-        assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].kind, ManifestKind::GitHubWorkflow);
-    }
-
-    #[test]
-    fn test_scan_dir_finds_root_action_yml() {
-        // Composite action authors put `action.yml` at the repo root. scan_dir
-        // (no -d) must surface it so they don't have to remember `-d`.
-        let dir = TempDir::new().unwrap();
-        create_temp_manifest(
-            dir.path(),
-            "action.yml",
-            "name: test\nruns:\n  using: composite\n",
-        );
-
-        let manifests = Scanner::scan_dir(dir.path());
-        assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].kind, ManifestKind::GitHubWorkflow);
     }
 
     #[test]
@@ -530,6 +519,65 @@ mod tests {
         let manifests = Scanner::scan_dir(dir.path());
         assert_eq!(manifests.len(), 1);
         assert!(manifests[0].path.ends_with("CI.yml"));
+    }
+
+    /// Deep scan must prune `node_modules` (and friends) yet still descend
+    /// into normal nested directories. Exercises the `!matches!` filter
+    /// closure on both branches: `node_modules` → false (pruned),
+    /// `pkgs`/`app` → true (kept).
+    #[test]
+    fn test_scan_deep_prunes_excluded_dirs_but_keeps_nested() {
+        let dir = TempDir::new().unwrap();
+
+        // Excluded: node_modules with a manifest inside that must NOT surface.
+        let nm = dir.path().join("node_modules").join("foo");
+        std::fs::create_dir_all(&nm).unwrap();
+        create_temp_manifest(&nm, "package.json", "{}");
+
+        // Kept: normal nested workspace member.
+        let app = dir.path().join("pkgs").join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        create_temp_manifest(&app, "Cargo.toml", "[package]\nname = \"app\"");
+
+        let manifests = Scanner::scan_deep(dir.path());
+
+        // The nested Cargo.toml must be found.
+        assert!(
+            manifests
+                .iter()
+                .any(|m| m.path.ends_with("pkgs/app/Cargo.toml")
+                    || m.path.ends_with("pkgs\\app\\Cargo.toml")),
+            "expected pkgs/app/Cargo.toml in results: {:?}",
+            manifests.iter().map(|m| &m.path).collect::<Vec<_>>()
+        );
+        // The excluded node_modules manifest must NOT be found.
+        assert!(
+            !manifests
+                .iter()
+                .any(|m| m.path.to_string_lossy().contains("node_modules")),
+            "node_modules must be pruned: {:?}",
+            manifests.iter().map(|m| &m.path).collect::<Vec<_>>()
+        );
+    }
+
+    /// `discover(root, Some(absolute), false)` must take the absolute branch
+    /// (`path.to_path_buf()`) and resolve the manifest as-is rather than
+    /// joining it with `root`. Covers the `path.is_absolute()` true arm.
+    #[test]
+    fn test_discover_with_absolute_manifest_path() {
+        let dir = TempDir::new().unwrap();
+        create_temp_manifest(dir.path(), "Cargo.toml", "[package]\nname = \"x\"");
+        let abs = dir.path().join("Cargo.toml");
+        assert!(abs.is_absolute(), "tempfile path must be absolute");
+
+        // Pass a DIFFERENT root to prove the absolute path is used verbatim,
+        // not joined with `root`.
+        let other_root = TempDir::new().unwrap();
+        let result = Scanner::discover(other_root.path(), Some(&abs), false)
+            .expect("absolute manifest path must resolve");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path, abs);
+        assert_eq!(result[0].kind, ManifestKind::CargoToml);
     }
 
     #[test]

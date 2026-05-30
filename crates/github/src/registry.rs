@@ -17,7 +17,9 @@ use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tracing::{debug, trace};
 
-use dependency_check_updates_core::{DcuError, DependencySpec, ResolvedVersion, TargetLevel};
+use dependency_check_updates_core::{
+    DcuError, DependencySpec, ResolvedVersion, TargetLevel, build_client,
+};
 
 use crate::parser::is_version_ref;
 
@@ -25,10 +27,6 @@ use crate::parser::is_version_ref;
 /// 60 req/hr; keeping concurrency modest avoids burst-rejection during deep
 /// scans of multi-workflow repos.
 const MAX_CONCURRENT_REQUESTS: usize = 5;
-
-/// HTTP request timeout. GitHub API is normally <1s; 30s leaves room for
-/// network hiccups without freezing a CI job for minutes.
-const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Tags page size — GitHub API max is 100, which comfortably covers every
 /// mainstream action; spanning multiple pages is future work.
@@ -81,17 +79,8 @@ impl GitHubActionsRegistry {
     }
 
     fn build(base_url: &str, token: Option<Arc<str>>) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .user_agent(concat!(
-                "dependency-check-updates/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .build()
-            .expect("failed to create HTTP client");
-
         Self {
-            client,
+            client: build_client(),
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
             base_url: Arc::from(base_url.trim_end_matches('/')),
             token,
@@ -245,7 +234,15 @@ impl GitHubActionsRegistry {
                 .expect("tags cache must contain every unique repo key")
             {
                 Ok(tags) => {
-                    let resolved = select_from_tags(tags, &dep.current_req, target);
+                    let mut resolved = select_from_tags(tags, &dep.current_req, target);
+                    // Collapse the resolved full version to the shortest ref
+                    // form that an actual tag backs (e.g. `v8` → `v8.1.0` when
+                    // only the full tag was published), so the emitted ref
+                    // never dangles. `compute_updates` skips its generic
+                    // precision truncation for GitHub on the strength of this.
+                    resolved.selected = resolved
+                        .selected
+                        .map(|sel| pick_existing_ref(&sel, &dep.current_req, tags));
                     trace!(
                         action = %dep.name,
                         current = %dep.current_req,
@@ -352,6 +349,18 @@ fn parse_current_ref(req: &str) -> Option<node_semver::Version> {
 }
 
 /// Select a tag for the dep based on the target level.
+///
+/// Parses + sorts the tag list, then delegates the target-match algorithm to
+/// [`dependency_check_updates_core::select_version`]. GitHub-specific
+/// behaviour is supplied via the fallbacks: the highest stable tag stands in
+/// for `latest`, while an unparseable current ref yields `None` for
+/// `Minor`/`Patch` (there is no major to stay on).
+///
+/// Note: `newest` resolves to the same result as `greatest` here. The Tags
+/// API does not expose per-tag publish dates (that would need an extra commit
+/// lookup per tag), so true publish-date ordering is intentionally not
+/// attempted — unlike the npm/crates.io/PyPI registries, whose responses
+/// already carry timestamps.
 fn select_from_tags(tags: &[Tag], current_req: &str, target: TargetLevel) -> ResolvedVersion {
     // Parse + sort ascending by semver.
     let mut versions: Vec<node_semver::Version> =
@@ -365,73 +374,14 @@ fn select_from_tags(tags: &[Tag], current_req: &str, target: TargetLevel) -> Res
         .map(node_semver::Version::to_string);
 
     let current = parse_current_ref(current_req);
-    let current_is_pre = current.as_ref().is_some_and(|v| !v.pre_release.is_empty());
 
-    // Pre-release tail policy (matches the npm registry): if user is on a
-    // pre-release of X.Y.Z, accept further pre-releases on the same X.Y.Z
-    // train AND any stable; never jump to an unrelated pre-release.
-    //
-    // The closure relies on the invariant `current_is_pre ⇒ current.is_some()`
-    // (`is_some_and` above). When `current_is_pre` is false we never inspect
-    // `current`, so the closure has no unreachable None-branch.
-    let accept = |v: &&node_semver::Version| -> bool {
-        if v.pre_release.is_empty() {
-            return true;
-        }
-        if !current_is_pre {
-            return false;
-        }
-        // `current_is_pre == true` ⇒ `current.as_ref()` is Some, so the
-        // expect cannot fire. Keeping it explicit (over `unwrap`) documents
-        // the invariant for readers.
-        let cur = current
-            .as_ref()
-            .expect("current_is_pre implies current.is_some");
-        v.major == cur.major && v.minor == cur.minor && v.patch == cur.patch
-    };
-
-    let selected = match target {
-        TargetLevel::Latest => {
-            if current_is_pre {
-                versions
-                    .iter()
-                    .rev()
-                    .find(accept)
-                    .map(node_semver::Version::to_string)
-            } else {
-                highest_stable.clone()
-            }
-        }
-        TargetLevel::Greatest | TargetLevel::Newest => {
-            versions.last().map(node_semver::Version::to_string)
-        }
-        TargetLevel::Minor => {
-            let Some(cur) = current.as_ref() else {
-                return ResolvedVersion {
-                    latest: highest_stable,
-                    selected: None,
-                };
-            };
-            versions
-                .iter()
-                .rev()
-                .find(|v| v.major == cur.major && accept(v))
-                .map(node_semver::Version::to_string)
-        }
-        TargetLevel::Patch => {
-            let Some(cur) = current.as_ref() else {
-                return ResolvedVersion {
-                    latest: highest_stable,
-                    selected: None,
-                };
-            };
-            versions
-                .iter()
-                .rev()
-                .find(|v| v.major == cur.major && v.minor == cur.minor && accept(v))
-                .map(node_semver::Version::to_string)
-        }
-    };
+    let selected = dependency_check_updates_core::select_version(
+        current.as_ref(),
+        &versions,
+        target,
+        highest_stable.clone(),
+        None,
+    );
 
     ResolvedVersion {
         latest: highest_stable,
@@ -439,10 +389,95 @@ fn select_from_tags(tags: &[Tag], current_req: &str, target: TargetLevel) -> Res
     }
 }
 
+/// The bare numeric head of a tag (`v8.1.0` → `8.1.0`, `v8` → `8`,
+/// `v7.6` → `7.6`). Returns `None` for non-version refs (`main`, SHAs).
+fn tag_numeric_str(tag: &str) -> Option<&str> {
+    // `is_version_ref` guarantees the post-`v` head starts with a digit, so the
+    // numeric run below is always non-empty.
+    if !is_version_ref(tag) {
+        return None;
+    }
+    let stripped = tag.strip_prefix('v').unwrap_or(tag);
+    Some(
+        stripped
+            .split(|c: char| !c.is_ascii_digit() && c != '.')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('.'),
+    )
+}
+
+/// Count the segment precision of the user's current ref (`v7` → 1,
+/// `v7.6` → 2, `v7.6.0` → 3). Always at least 1.
+fn ref_precision(req: &str) -> usize {
+    let stripped = req.strip_prefix('v').unwrap_or(req);
+    stripped
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .filter(|s| !s.is_empty())
+        .count()
+        .max(1)
+}
+
+/// Collapse a resolved full version to the shortest tag form that an actual
+/// tag backs, preferring the user's current pin precision or longer.
+///
+/// Actions usually publish a moving major tag (`v8`) next to `v8.1.0`, but not
+/// always — when only `v8.1.0` exists, the naive major float `@v8` would 404.
+/// This walks the user's precision upward (`v8` → `v8.1` → `v8.1.0`) and, only
+/// if nothing at or above that precision is published, downward, returning the
+/// first form an actual tag matches. Pre-release / build refs are published
+/// only as exact full tags and are returned verbatim.
+fn pick_existing_ref(selected: &str, current_req: &str, tags: &[Tag]) -> String {
+    let (numeric, suffix) = selected
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .map_or((selected, ""), |i| selected.split_at(i));
+    if !suffix.is_empty() {
+        return selected.to_owned();
+    }
+
+    let segments: Vec<&str> = numeric.split('.').filter(|s| !s.is_empty()).collect();
+    let len = segments.len();
+    let start = ref_precision(current_req).clamp(1, len.max(1));
+
+    let exists = |p: usize| {
+        let candidate = segments[..p].join(".");
+        tags.iter()
+            .any(|t| tag_numeric_str(&t.name) == Some(candidate.as_str()))
+    };
+
+    // Prefer the shortest form at or above the pin precision; otherwise the
+    // longest shorter form. The resolved version always came from a real tag,
+    // so some precision in this order always matches — the `expect` documents
+    // that invariant and keeps the success line on the covered path.
+    let chosen = (start..=len)
+        .chain((1..start).rev())
+        .find(|&p| exists(p))
+        .expect("resolved version is always backed by at least one tag");
+    segments[..chosen].join(".")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dependency_check_updates_core::DependencySection;
+    use rstest::rstest;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path as match_path},
+    };
 
+    /// Idempotent rustls provider install. Returning `Err` (already set) is
+    /// the expected steady-state once any test has run — `let _ =` swallows it.
+    ///
+    /// Kept as a plain helper rather than an rstest `#[fixture]` because the
+    /// idiomatic `#[from(...)] _setup: ()` pattern collides with clippy's
+    /// `pedantic::used_underscore_binding` lint (rstest's expansion references
+    /// the underscore-prefixed binding), and any non-underscore name would
+    /// require boilerplate to silence `unused_variables`. Calling it inline
+    /// at the top of each test reads cleanly and stays clippy-clean.
     fn install_crypto_provider() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
@@ -453,195 +488,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_normalize_tag_v_prefix() {
-        assert_eq!(normalize_tag("v5").unwrap().to_string(), "5.0.0");
-        assert_eq!(normalize_tag("v5.1").unwrap().to_string(), "5.1.0");
-        assert_eq!(normalize_tag("v5.1.0").unwrap().to_string(), "5.1.0");
-    }
-
-    #[test]
-    fn test_normalize_tag_prerelease() {
-        let v = normalize_tag("v1.0.0-beta.1").unwrap();
-        assert_eq!(v.to_string(), "1.0.0-beta.1");
-    }
-
-    #[test]
-    fn test_normalize_tag_rejects_branch() {
-        assert!(normalize_tag("main").is_none());
-        assert!(normalize_tag("release/v5").is_none());
-    }
-
-    #[test]
-    fn test_normalize_tag_rejects_sha() {
-        assert!(normalize_tag("8e5e7e5a3b4c1234abcdef0123456789abcdef01").is_none());
-    }
-
-    #[test]
-    fn test_select_latest_basic() {
-        let tags = vec![
-            make_tag("v4"),
-            make_tag("v4.1.0"),
-            make_tag("v5"),
-            make_tag("v5.0.0"),
-            make_tag("v5.1.0"),
-        ];
-        let r = select_from_tags(&tags, "v4", TargetLevel::Latest);
-        assert_eq!(r.selected.as_deref(), Some("5.1.0"));
-        assert_eq!(r.latest.as_deref(), Some("5.1.0"));
-    }
-
-    #[test]
-    fn test_select_latest_skips_prerelease() {
-        let tags = vec![make_tag("v4.0.0"), make_tag("v5.0.0-beta.1")];
-        let r = select_from_tags(&tags, "v4", TargetLevel::Latest);
-        assert_eq!(r.selected.as_deref(), Some("4.0.0"));
-    }
-
-    #[test]
-    fn test_select_greatest_includes_prerelease() {
-        let tags = vec![make_tag("v4.0.0"), make_tag("v5.0.0-beta.1")];
-        let r = select_from_tags(&tags, "v4", TargetLevel::Greatest);
-        assert_eq!(r.selected.as_deref(), Some("5.0.0-beta.1"));
-    }
-
-    #[test]
-    fn test_select_minor_stays_same_major() {
-        let tags = vec![
-            make_tag("v4.0.0"),
-            make_tag("v4.1.0"),
-            make_tag("v4.2.0"),
-            make_tag("v5.0.0"),
-        ];
-        let r = select_from_tags(&tags, "v4.0.0", TargetLevel::Minor);
-        assert_eq!(r.selected.as_deref(), Some("4.2.0"));
-    }
-
-    #[test]
-    fn test_select_patch_stays_same_minor() {
-        let tags = vec![
-            make_tag("v4.0.0"),
-            make_tag("v4.0.1"),
-            make_tag("v4.0.2"),
-            make_tag("v4.1.0"),
-        ];
-        let r = select_from_tags(&tags, "v4.0.0", TargetLevel::Patch);
-        assert_eq!(r.selected.as_deref(), Some("4.0.2"));
-    }
-
-    #[test]
-    fn test_select_handles_empty_tag_list() {
-        let r = select_from_tags(&[], "v4", TargetLevel::Latest);
-        assert_eq!(r.selected, None);
-        assert_eq!(r.latest, None);
-    }
-
-    #[test]
-    fn test_select_ignores_non_version_tags() {
-        let tags = vec![
-            make_tag("main"),
-            make_tag("v4.0.0"),
-            make_tag("release/v5"),
-            make_tag("v4.1.0"),
-        ];
-        let r = select_from_tags(&tags, "v4", TargetLevel::Latest);
-        assert_eq!(r.selected.as_deref(), Some("4.1.0"));
-    }
-
-    #[test]
-    fn test_repo_key_normal() {
-        assert_eq!(
-            GitHubActionsRegistry::repo_key("actions/checkout"),
-            Some("actions/checkout".to_owned())
-        );
-    }
-
-    #[test]
-    fn test_repo_key_with_subdir() {
-        assert_eq!(
-            GitHubActionsRegistry::repo_key("actions/checkout/sub/dir"),
-            Some("actions/checkout".to_owned())
-        );
-    }
-
-    #[test]
-    fn test_repo_key_invalid() {
-        assert_eq!(GitHubActionsRegistry::repo_key("checkout"), None);
-        assert_eq!(GitHubActionsRegistry::repo_key(""), None);
-    }
-
-    #[test]
-    fn test_repo_key_empty_owner_or_repo_half() {
-        // `splitn(3, '/')` happily yields empty strings for `foo/` and `/foo`.
-        // The empty-half guard must catch them; otherwise we'd build URLs like
-        // `/repos/foo//tags`.
-        assert_eq!(GitHubActionsRegistry::repo_key("foo/"), None);
-        assert_eq!(GitHubActionsRegistry::repo_key("/foo"), None);
-        assert_eq!(GitHubActionsRegistry::repo_key("/"), None);
-    }
-
-    #[test]
-    fn test_select_minor_rejects_prerelease_when_current_is_stable() {
-        // Stable v4.1.0 is encountered first in the reverse iteration, so
-        // `accept` returns true immediately without inspecting the prerelease.
-        // This case validates the happy path; the next test exercises the
-        // `!current_is_pre` branch directly.
-        let tags = vec![
-            make_tag("v4.0.0"),
-            make_tag("v4.1.0-beta.1"),
-            make_tag("v4.1.0"),
-        ];
-        let r = select_from_tags(&tags, "v4.0.0", TargetLevel::Minor);
-        assert_eq!(r.selected.as_deref(), Some("4.1.0"));
-    }
-
-    #[test]
-    fn test_select_minor_rejects_prerelease_when_no_higher_stable_exists() {
-        // Force the reverse iterator to inspect the prerelease *before* any
-        // stable: `v4.0.0` is the only stable on major 4, and `v4.1.0-beta.1`
-        // sits semver-above it. With a stable current, accept must reject the
-        // prerelease (the `!current_is_pre` branch) and fall back to v4.0.0.
-        let tags = vec![make_tag("v4.0.0"), make_tag("v4.1.0-beta.1")];
-        let r = select_from_tags(&tags, "v4.0.0", TargetLevel::Minor);
-        assert_eq!(r.selected.as_deref(), Some("4.0.0"));
-    }
-
-    #[test]
-    fn test_select_minor_with_unparseable_current_returns_none() {
-        // `select_from_tags("main", …, Minor)` — Minor needs a parseable
-        // current to know which major to stay on; without it, `selected` is
-        // None (latest still returned for context).
-        let tags = vec![make_tag("v4.0.0"), make_tag("v4.1.0")];
-        let r = select_from_tags(&tags, "main", TargetLevel::Minor);
-        assert_eq!(r.selected, None);
-        assert_eq!(r.latest.as_deref(), Some("4.1.0"));
-    }
-
-    #[test]
-    fn test_select_patch_with_unparseable_current_returns_none() {
-        let tags = vec![make_tag("v4.0.0"), make_tag("v4.0.1")];
-        let r = select_from_tags(&tags, "main", TargetLevel::Patch);
-        assert_eq!(r.selected, None);
-        assert_eq!(r.latest.as_deref(), Some("4.0.1"));
-    }
-
-    #[test]
-    fn test_select_prerelease_tail_picks_higher_prerelease() {
-        let tags = vec![
-            make_tag("v3.5.0"),
-            make_tag("v4.0.0-beta.1"),
-            make_tag("v4.0.0-beta.3"),
-        ];
-        let r = select_from_tags(&tags, "v4.0.0-beta.1", TargetLevel::Latest);
-        assert_eq!(r.selected.as_deref(), Some("4.0.0-beta.3"));
-    }
-
-    #[test]
-    fn test_select_prerelease_to_stable_upgrade() {
-        let tags = vec![make_tag("v4.0.0-beta.1"), make_tag("v4.0.0")];
-        let r = select_from_tags(&tags, "v4.0.0-beta.1", TargetLevel::Latest);
-        // Same train stable wins over the prerelease.
-        assert_eq!(r.selected.as_deref(), Some("4.0.0"));
+    fn make_tags(names: &[&str]) -> Vec<Tag> {
+        names.iter().copied().map(make_tag).collect()
     }
 
     fn tags_response(names: &[&str]) -> serde_json::Value {
@@ -652,18 +500,263 @@ mod tests {
         serde_json::Value::Array(arr)
     }
 
-    #[tokio::test]
-    async fn test_resolve_batch_fetches_each_repo_once() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+    fn dep(name: &str, current_req: &str) -> DependencySpec {
+        DependencySpec {
+            name: name.to_owned(),
+            current_req: current_req.to_owned(),
+            section: DependencySection::GitHubActions,
+        }
+    }
 
+    #[rstest]
+    // v-prefix tags pad to three segments.
+    #[case::v_major("v5", Some("5.0.0"))]
+    #[case::v_major_minor("v5.1", Some("5.1.0"))]
+    #[case::v_major_minor_patch("v5.1.0", Some("5.1.0"))]
+    // Pre-release suffix survives unchanged.
+    #[case::prerelease("v1.0.0-beta.1", Some("1.0.0-beta.1"))]
+    // Branch-like / slashed refs are not version-like.
+    #[case::branch_main("main", None)]
+    #[case::branch_release_slash("release/v5", None)]
+    // 40-char SHA fails the hex+length heuristic.
+    #[case::sha_40_char("8e5e7e5a3b4c1234abcdef0123456789abcdef01", None)]
+    fn normalize_tag_cases(#[case] input: &str, #[case] expected: Option<&str>) {
+        let actual = normalize_tag(input).map(|v| v.to_string());
+        assert_eq!(actual.as_deref(), expected);
+    }
+
+    #[rstest]
+    // Latest stable across a v4/v5 train.
+    #[case::latest_basic(
+        &["v4", "v4.1.0", "v5", "v5.0.0", "v5.1.0"],
+        "v4",
+        TargetLevel::Latest,
+        Some("5.1.0"),
+        Some("5.1.0")
+    )]
+    // Latest must skip prereleases when current is stable.
+    #[case::latest_skips_prerelease(
+        &["v4.0.0", "v5.0.0-beta.1"],
+        "v4",
+        TargetLevel::Latest,
+        Some("4.0.0"),
+        Some("4.0.0")
+    )]
+    // Greatest includes prereleases.
+    #[case::greatest_includes_prerelease(
+        &["v4.0.0", "v5.0.0-beta.1"],
+        "v4",
+        TargetLevel::Greatest,
+        Some("5.0.0-beta.1"),
+        Some("4.0.0")
+    )]
+    // Minor stays on the current major.
+    #[case::minor_stays_same_major(
+        &["v4.0.0", "v4.1.0", "v4.2.0", "v5.0.0"],
+        "v4.0.0",
+        TargetLevel::Minor,
+        Some("4.2.0"),
+        Some("5.0.0")
+    )]
+    // Patch stays on the current minor.
+    #[case::patch_stays_same_minor(
+        &["v4.0.0", "v4.0.1", "v4.0.2", "v4.1.0"],
+        "v4.0.0",
+        TargetLevel::Patch,
+        Some("4.0.2"),
+        Some("4.1.0")
+    )]
+    // Empty tag list yields None for both.
+    #[case::empty_tag_list(
+        &[],
+        "v4",
+        TargetLevel::Latest,
+        None,
+        None
+    )]
+    // Non-version tags interspersed are filtered out.
+    #[case::ignores_non_version_tags(
+        &["main", "v4.0.0", "release/v5", "v4.1.0"],
+        "v4",
+        TargetLevel::Latest,
+        Some("4.1.0"),
+        Some("4.1.0")
+    )]
+    // Minor happy-path: stable v4.1.0 wins over the in-between prerelease.
+    #[case::minor_rejects_pre_when_current_is_stable_happy_path(
+        &["v4.0.0", "v4.1.0-beta.1", "v4.1.0"],
+        "v4.0.0",
+        TargetLevel::Minor,
+        Some("4.1.0"),
+        Some("4.1.0")
+    )]
+    // Minor edge: prerelease sits above the only stable → reject it, fall back.
+    #[case::minor_rejects_pre_when_no_higher_stable_exists(
+        &["v4.0.0", "v4.1.0-beta.1"],
+        "v4.0.0",
+        TargetLevel::Minor,
+        Some("4.0.0"),
+        Some("4.0.0")
+    )]
+    // Minor with unparseable current → selected None, latest still surfaced.
+    #[case::minor_with_unparseable_current_returns_none(
+        &["v4.0.0", "v4.1.0"],
+        "main",
+        TargetLevel::Minor,
+        None,
+        Some("4.1.0")
+    )]
+    // Patch with unparseable current → selected None, latest still surfaced.
+    #[case::patch_with_unparseable_current_returns_none(
+        &["v4.0.0", "v4.0.1"],
+        "main",
+        TargetLevel::Patch,
+        None,
+        Some("4.0.1")
+    )]
+    // Prerelease train: pick the highest prerelease on the same train.
+    #[case::prerelease_tail_picks_higher_prerelease(
+        &["v3.5.0", "v4.0.0-beta.1", "v4.0.0-beta.3"],
+        "v4.0.0-beta.1",
+        TargetLevel::Latest,
+        Some("4.0.0-beta.3"),
+        Some("3.5.0")
+    )]
+    // Same-train stable beats the prerelease it came from.
+    #[case::prerelease_to_stable_upgrade(
+        &["v4.0.0-beta.1", "v4.0.0"],
+        "v4.0.0-beta.1",
+        TargetLevel::Latest,
+        Some("4.0.0"),
+        Some("4.0.0")
+    )]
+    fn select_from_tags_cases(
+        #[case] tag_names: &[&str],
+        #[case] current_req: &str,
+        #[case] target: TargetLevel,
+        #[case] expected_selected: Option<&str>,
+        #[case] expected_latest: Option<&str>,
+    ) {
+        let tags = make_tags(tag_names);
+        let r = select_from_tags(&tags, current_req, target);
+        assert_eq!(r.selected.as_deref(), expected_selected);
+        assert_eq!(r.latest.as_deref(), expected_latest);
+    }
+
+    #[rstest]
+    #[case::v_major("v8", Some("8"))]
+    #[case::v_major_minor("v7.6", Some("7.6"))]
+    #[case::v_full("v8.1.0", Some("8.1.0"))]
+    #[case::no_v_prefix("5", Some("5"))]
+    #[case::prerelease_head("v2.0.0-rc.1", Some("2.0.0"))]
+    #[case::branch("main", None)]
+    #[case::sha("8e5e7e5a3b4c1234abcdef0123456789abcdef01", None)]
+    fn tag_numeric_str_cases(#[case] input: &str, #[case] expected: Option<&str>) {
+        assert_eq!(tag_numeric_str(input), expected);
+    }
+
+    #[rstest]
+    #[case::major("v7", 1)]
+    #[case::major_minor("v7.6", 2)]
+    #[case::major_minor_patch("v7.6.0", 3)]
+    #[case::no_v("5", 1)]
+    #[case::unparseable_falls_back_to_one("main", 1)]
+    fn ref_precision_cases(#[case] input: &str, #[case] expected: usize) {
+        assert_eq!(ref_precision(input), expected);
+    }
+
+    #[rstest]
+    // selected full version, current pin, available tag names, expected ref form.
+    // Major moving tag exists → preserve the major-pin precision.
+    #[case::major_tag_exists("6.0.0", "v5", &["v5", "v6", "v6.0.0"], "6")]
+    // `v8` moving tag missing → escalate v8 → v8.1 → v8.1.0 (the real tag).
+    #[case::escalate_to_full("8.1.0", "v7", &["v7", "v8.0.0", "v8.1.0"], "8.1.0")]
+    // `v8.1` short tag exists → stop escalating there.
+    #[case::escalate_to_two_segment("8.1.0", "v7", &["v7", "v8.1", "v8.1.0"], "8.1")]
+    // Full pin stays full when the full tag exists.
+    #[case::full_pin_keeps_full("6.0.0", "v5.1.0", &["v6", "v6.0.0"], "6.0.0")]
+    // Full pin but only a major moving tag exists → de-escalate to it.
+    #[case::de_escalate_to_major("9.0.0", "v8.1.0", &["v8.1.0", "v9"], "9")]
+    // Non-version tags in the list are ignored by the existence check.
+    #[case::ignores_non_version_tags("8.1.0", "v7", &["main", "v8.1.0"], "8.1.0")]
+    // Pre-release refs are returned verbatim (only ever exact full tags).
+    #[case::prerelease_verbatim("2.0.0-rc.1", "v1", &["v2.0.0-rc.1"], "2.0.0-rc.1")]
+    fn pick_existing_ref_cases(
+        #[case] selected: &str,
+        #[case] current: &str,
+        #[case] tag_names: &[&str],
+        #[case] expected: &str,
+    ) {
+        let tags = make_tags(tag_names);
+        assert_eq!(pick_existing_ref(selected, current, &tags), expected);
+    }
+
+    #[rstest]
+    #[case::normal("actions/checkout", Some("actions/checkout"))]
+    #[case::with_subdir("actions/checkout/sub/dir", Some("actions/checkout"))]
+    #[case::single_segment("checkout", None)]
+    #[case::empty_string("", None)]
+    // `splitn(3, '/')` yields empty strings for `foo/` and `/foo`; the
+    // empty-half guard must catch them to avoid `/repos/foo//tags` URLs.
+    #[case::trailing_slash("foo/", None)]
+    #[case::leading_slash("/foo", None)]
+    #[case::just_slash("/", None)]
+    fn repo_key_cases(#[case] input: &str, #[case] expected: Option<&str>) {
+        assert_eq!(GitHubActionsRegistry::repo_key(input).as_deref(), expected);
+    }
+
+    #[rstest]
+    // 25 minutes ahead → minute-level message.
+    #[case::minutes(1500, "minute")]
+    // 30 seconds ahead → second-level message.
+    #[case::seconds_for_under_minute(30, "second")]
+    fn format_reset_hint_unit_cases(#[case] delta_secs: u64, #[case] unit: &str) {
+        let future = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + delta_secs;
+        let hint = format_reset_hint(future);
+        assert!(hint.contains("Resets in"));
+        assert!(hint.contains(unit));
+    }
+
+    #[test]
+    fn format_reset_hint_singular_form() {
+        // Exactly 1 minute ahead.
+        let future = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60;
+        let hint = format_reset_hint(future);
+        assert!(hint.contains("1 minute."), "got: {hint}");
+        assert!(!hint.contains("minutes"));
+    }
+
+    #[test]
+    fn format_reset_hint_past_returns_empty() {
+        // Reset already happened — no hint to give.
+        assert_eq!(format_reset_hint(0), "");
+    }
+
+    #[test]
+    fn new_default_construct() {
+        install_crypto_provider();
+        let _ = GitHubActionsRegistry::new();
+        let _ = GitHubActionsRegistry::default();
+    }
+
+    #[tokio::test]
+    async fn resolve_batch_fetches_each_repo_once() {
         install_crypto_provider();
         let mock = MockServer::start().await;
 
         // The mock expects exactly ONE call to `/repos/actions/checkout/tags`
-        // even though two deps reference the same repo.
+        // even though two deps reference the same repo (one direct, one
+        // sub-action which collapses to the same key).
         Mock::given(method("GET"))
-            .and(path("/repos/actions/checkout/tags"))
+            .and(match_path("/repos/actions/checkout/tags"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(tags_response(&["v4", "v4.0.0", "v5", "v5.0.0"])),
@@ -674,45 +767,33 @@ mod tests {
 
         let reg = GitHubActionsRegistry::with_base_url(&mock.uri());
         let deps = vec![
-            DependencySpec {
-                name: "actions/checkout".to_owned(),
-                current_req: "v4".to_owned(),
-                section: dependency_check_updates_core::DependencySection::GitHubActions,
-            },
-            DependencySpec {
-                name: "actions/checkout/sub".to_owned(),
-                current_req: "v4".to_owned(),
-                section: dependency_check_updates_core::DependencySection::GitHubActions,
-            },
+            dep("actions/checkout", "v4"),
+            dep("actions/checkout/sub", "v4"),
         ];
         let results = reg.resolve_batch(&deps, TargetLevel::Latest).await;
         assert_eq!(results.len(), 2);
         for (_, result) in &results {
             assert!(result.is_ok());
-            assert_eq!(result.as_ref().unwrap().selected.as_deref(), Some("5.0.0"));
+            // `v4` is a major pin and a `v5` moving tag exists, so the resolved
+            // ref collapses to the major form `5` (→ `v5`), not the full
+            // `5.0.0`. This is `pick_existing_ref` preserving the pin precision.
+            assert_eq!(result.as_ref().unwrap().selected.as_deref(), Some("5"));
         }
     }
 
     #[tokio::test]
-    async fn test_resolve_batch_404_per_dep() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
+    async fn resolve_batch_404_per_dep() {
         install_crypto_provider();
         let mock = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/repos/does-not/exist/tags"))
+            .and(match_path("/repos/does-not/exist/tags"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&mock)
             .await;
 
         let reg = GitHubActionsRegistry::with_base_url(&mock.uri());
-        let deps = vec![DependencySpec {
-            name: "does-not/exist".to_owned(),
-            current_req: "v1".to_owned(),
-            section: dependency_check_updates_core::DependencySection::GitHubActions,
-        }];
+        let deps = vec![dep("does-not/exist", "v1")];
         let results = reg.resolve_batch(&deps, TargetLevel::Latest).await;
         assert_eq!(results.len(), 1);
         let (_, ref result) = results[0];
@@ -720,133 +801,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_batch_invalid_name_errors() {
+    async fn resolve_batch_invalid_name_errors() {
         install_crypto_provider();
+        // No `/` in the name → `repo_key` returns None → per-dep error
+        // without ever issuing an HTTP call.
         let reg = GitHubActionsRegistry::with_base_url("http://127.0.0.1:1");
-        let deps = vec![DependencySpec {
-            name: "no-slash".to_owned(),
-            current_req: "v1".to_owned(),
-            section: dependency_check_updates_core::DependencySection::GitHubActions,
-        }];
+        let deps = vec![dep("no-slash", "v1")];
         let results = reg.resolve_batch(&deps, TargetLevel::Latest).await;
         assert_eq!(results.len(), 1);
         let (_, ref result) = results[0];
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_new_default_construct() {
-        install_crypto_provider();
-        let _ = GitHubActionsRegistry::new();
-        let _ = GitHubActionsRegistry::default();
-    }
-
-    #[test]
-    fn test_format_reset_hint_minutes() {
-        let future = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 1500; // 25 minutes ahead
-        let hint = format_reset_hint(future);
-        assert!(hint.contains("Resets in"));
-        assert!(hint.contains("minute"));
-    }
-
-    #[test]
-    fn test_format_reset_hint_seconds_for_under_minute() {
-        let future = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 30;
-        let hint = format_reset_hint(future);
-        assert!(hint.contains("Resets in"));
-        assert!(hint.contains("second"));
-    }
-
-    #[test]
-    fn test_format_reset_hint_singular_form() {
-        let future = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 60; // exactly 1 minute
-        let hint = format_reset_hint(future);
-        assert!(hint.contains("1 minute."), "got: {hint}");
-        assert!(!hint.contains("minutes"));
-    }
-
-    #[test]
-    fn test_format_reset_hint_past_returns_empty() {
-        // Reset already happened — no hint to give.
-        let hint = format_reset_hint(0);
-        assert_eq!(hint, "");
-    }
-
     #[tokio::test]
-    async fn test_rate_limit_403_produces_helpful_error() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        install_crypto_provider();
-        let mock = MockServer::start().await;
-
-        // Future reset timestamp so the hint formatter produces output.
-        let reset = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 300;
-
-        Mock::given(method("GET"))
-            .and(path("/repos/actions/checkout/tags"))
-            .respond_with(
-                ResponseTemplate::new(403)
-                    .insert_header("X-RateLimit-Remaining", "0")
-                    .insert_header("X-RateLimit-Reset", reset.to_string().as_str())
-                    .set_body_string("rate limited"),
-            )
-            .mount(&mock)
-            .await;
-
-        // Build with an explicit `None` token so the assertion below for
-        // "GITHUB_TOKEN" in the error hint is deterministic regardless of
-        // whatever the developer's shell has exported.
-        let reg = GitHubActionsRegistry::with_base_url_and_token(&mock.uri(), None);
-
-        let deps = vec![DependencySpec {
-            name: "actions/checkout".to_owned(),
-            current_req: "v5".to_owned(),
-            section: dependency_check_updates_core::DependencySection::GitHubActions,
-        }];
-        let results = reg.resolve_batch(&deps, TargetLevel::Latest).await;
-        assert_eq!(results.len(), 1);
-        let (_, ref result) = results[0];
-        let err = result.as_ref().expect_err("expected rate-limit error");
-        let msg = err.to_string();
-        // The DcuError::RegistryLookup variant prints only the package name;
-        // the detailed `detail` lives in the Display source chain.
-        // We can pull it back out via the source().
-        let detail = format!("{err:?}");
-        assert!(
-            detail.contains("rate limit") && detail.contains("GITHUB_TOKEN"),
-            "expected helpful rate-limit message, got: {msg} / debug: {detail}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_token_sends_authorization_header() {
-        use wiremock::matchers::{header, method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
+    async fn token_sends_authorization_header() {
         install_crypto_provider();
         let mock = MockServer::start().await;
 
         // Mount only matches requests that include the exact bearer header,
         // so a missing Authorization header → 404 from wiremock → test failure.
         Mock::given(method("GET"))
-            .and(path("/repos/actions/checkout/tags"))
+            .and(match_path("/repos/actions/checkout/tags"))
             .and(header("authorization", "Bearer secret-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(tags_response(&["v5.0.0"])))
             .expect(1)
@@ -854,95 +829,106 @@ mod tests {
             .await;
 
         let reg = GitHubActionsRegistry::with_base_url_and_token(&mock.uri(), Some("secret-token"));
-        let deps = vec![DependencySpec {
-            name: "actions/checkout".to_owned(),
-            current_req: "v4".to_owned(),
-            section: dependency_check_updates_core::DependencySection::GitHubActions,
-        }];
+        let deps = vec![dep("actions/checkout", "v4")];
         let results = reg.resolve_batch(&deps, TargetLevel::Latest).await;
         let (_, ref result) = results[0];
         assert!(result.is_ok(), "auth header should have matched");
         assert_eq!(result.as_ref().unwrap().selected.as_deref(), Some("5.0.0"));
     }
 
+    /// 403-handling matrix.
+    ///
+    /// Three near-identical mock setups — only the response headers, the
+    /// token presence, and the substrings we expect in the error message
+    /// differ. Each case parametrizes (path, token, X-RateLimit-Remaining,
+    /// reset-header included?, dep name, must-contain[], must-not-contain[]).
+    ///
+    /// The detailed `detail` string lives in the source chain of
+    /// `DcuError::RegistryLookup`, so we inspect it via `Debug` of the error.
+    #[rstest]
+    // Rate-limited without a token → message must point at GITHUB_TOKEN.
+    #[case::rate_limit_no_token(
+        "/repos/actions/checkout/tags",
+        None,
+        Some("0"),
+        true,
+        "actions/checkout",
+        &["rate limit", "GITHUB_TOKEN"],
+        &[]
+    )]
+    // Rate-limited WITH a token → message must NOT suggest setting one;
+    // the user is already past the unauthenticated tier.
+    #[case::rate_limit_with_token_omits_set_token_hint(
+        "/repos/actions/checkout/tags",
+        Some("present-token"),
+        Some("0"),
+        true,
+        "actions/checkout",
+        &["rate limit", "Resets in"],
+        &["GITHUB_TOKEN"]
+    )]
+    // 403 with `Remaining: 42` is a permission issue (e.g. private repo) —
+    // NOT a rate limit. Keep the generic "HTTP 403" message.
+    #[case::generic_403_keeps_status_code(
+        "/repos/private/repo/tags",
+        None,
+        Some("42"),
+        false,
+        "private/repo",
+        &["HTTP 403"],
+        &["rate limit"]
+    )]
     #[tokio::test]
-    async fn test_rate_limit_with_token_omits_set_token_hint() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
+    async fn http_403_handling(
+        #[case] api_path: &str,
+        #[case] token: Option<&str>,
+        #[case] x_ratelimit_remaining: Option<&str>,
+        #[case] include_reset_header: bool,
+        #[case] dep_name: &str,
+        #[case] must_contain: &[&str],
+        #[case] must_not_contain: &[&str],
+    ) {
         install_crypto_provider();
         let mock = MockServer::start().await;
 
-        let reset = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 600;
+        let mut response = ResponseTemplate::new(403);
+        if let Some(rl) = x_ratelimit_remaining {
+            response = response.insert_header("X-RateLimit-Remaining", rl);
+        }
+        if include_reset_header {
+            // Future reset timestamp so the hint formatter produces output.
+            let reset = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 600;
+            response = response.insert_header("X-RateLimit-Reset", reset.to_string().as_str());
+        }
 
         Mock::given(method("GET"))
-            .and(path("/repos/actions/checkout/tags"))
-            .respond_with(
-                ResponseTemplate::new(403)
-                    .insert_header("X-RateLimit-Remaining", "0")
-                    .insert_header("X-RateLimit-Reset", reset.to_string().as_str()),
-            )
+            .and(match_path(api_path))
+            .respond_with(response)
             .mount(&mock)
             .await;
 
-        // User HAS already set a token but still got rate-limited → suggesting
-        // they set GITHUB_TOKEN would be unhelpful, so that hint must be
-        // omitted (they need to wait for reset instead).
-        let reg =
-            GitHubActionsRegistry::with_base_url_and_token(&mock.uri(), Some("present-token"));
-        let deps = vec![DependencySpec {
-            name: "actions/checkout".to_owned(),
-            current_req: "v5".to_owned(),
-            section: dependency_check_updates_core::DependencySection::GitHubActions,
-        }];
+        let reg = GitHubActionsRegistry::with_base_url_and_token(&mock.uri(), token);
+        let deps = vec![dep(dep_name, "v1")];
         let results = reg.resolve_batch(&deps, TargetLevel::Latest).await;
+        assert_eq!(results.len(), 1);
         let (_, ref result) = results[0];
-        let err = result.as_ref().expect_err("expected rate-limit error");
+        let err = result.as_ref().expect_err("expected 403 error");
         let detail = format!("{err:?}");
-        assert!(
-            detail.contains("rate limit") && detail.contains("Resets in"),
-            "rate-limit message and reset-time hint expected: {detail}"
-        );
-        assert!(
-            !detail.contains("GITHUB_TOKEN"),
-            "must not suggest setting a token the user already provided: {detail}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_403_without_rate_limit_header_remains_generic() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        install_crypto_provider();
-        let mock = MockServer::start().await;
-
-        // 403 with `X-RateLimit-Remaining: 42` indicates a private repo or other
-        // permission issue — NOT a rate limit. We must keep the generic
-        // "HTTP 403" message in that case.
-        Mock::given(method("GET"))
-            .and(path("/repos/private/repo/tags"))
-            .respond_with(ResponseTemplate::new(403).insert_header("X-RateLimit-Remaining", "42"))
-            .mount(&mock)
-            .await;
-
-        let reg = GitHubActionsRegistry::with_base_url(&mock.uri());
-        let deps = vec![DependencySpec {
-            name: "private/repo".to_owned(),
-            current_req: "v1".to_owned(),
-            section: dependency_check_updates_core::DependencySection::GitHubActions,
-        }];
-        let results = reg.resolve_batch(&deps, TargetLevel::Latest).await;
-        let (_, ref result) = results[0];
-        let err = result.as_ref().expect_err("expected error");
-        let detail = format!("{err:?}");
-        assert!(
-            detail.contains("HTTP 403") && !detail.contains("rate limit"),
-            "private-repo 403 must keep generic message, got: {detail}"
-        );
+        for needle in must_contain {
+            assert!(
+                detail.contains(needle),
+                "expected `{needle}` in error: {detail}"
+            );
+        }
+        for needle in must_not_contain {
+            assert!(
+                !detail.contains(needle),
+                "expected `{needle}` NOT in error: {detail}"
+            );
+        }
     }
 }

@@ -1,7 +1,12 @@
+//! File formatting detection (indentation, line endings, trailing newline)
+//! used to preserve a manifest's original style when rewriting it.
+
 /// Detected indentation style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndentStyle {
+    /// Indentation by the given number of spaces per level.
     Spaces(u8),
+    /// Indentation by a single tab character per level.
     Tab,
 }
 
@@ -14,16 +19,21 @@ impl Default for IndentStyle {
 /// Detected line ending style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LineEnding {
+    /// Unix line endings (`\n`).
     #[default]
     Lf,
+    /// Windows line endings (`\r\n`).
     CrLf,
 }
 
 /// The detected formatting style of a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileStyle {
+    /// Detected indentation style.
     pub indent: IndentStyle,
+    /// Detected line-ending style.
     pub line_ending: LineEnding,
+    /// Whether the file ends with a trailing newline.
     pub trailing_newline: bool,
 }
 

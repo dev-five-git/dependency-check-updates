@@ -1,16 +1,17 @@
 //! `PyPI` registry client for looking up Python package versions.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
-use tracing::{debug, warn};
+use tracing::debug;
 
-use dependency_check_updates_core::{DcuError, DependencySpec, ResolvedVersion, TargetLevel};
-
-const MAX_CONCURRENT_REQUESTS: usize = 10;
-const REQUEST_TIMEOUT_SECS: u64 = 30;
+use dependency_check_updates_core::{
+    DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
+    build_client, collect_task_results, select_version, strip_range_prefix,
+};
 
 /// `PyPI` registry client.
 #[derive(Clone)]
@@ -23,11 +24,25 @@ pub struct PyPiRegistry {
 #[derive(Debug, Deserialize)]
 struct PyPiResponse {
     info: PyPiInfo,
+    /// Map of version string → list of distribution files. Used to enumerate
+    /// every published release (for `--target` resolution) and their upload
+    /// times (for `newest`). Absent/partial responses default to empty, in
+    /// which case resolution falls back to `info.version`.
+    #[serde(default)]
+    releases: std::collections::HashMap<String, Vec<PyPiFile>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PyPiInfo {
     version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PyPiFile {
+    #[serde(default)]
+    upload_time_iso_8601: String,
+    #[serde(default)]
+    yanked: bool,
 }
 
 impl PyPiRegistry {
@@ -44,32 +59,23 @@ impl PyPiRegistry {
     /// Panics if the HTTP client cannot be built.
     #[must_use]
     pub fn with_base_url(base_url: &str) -> Self {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .user_agent(concat!(
-                "dependency-check-updates/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .build()
-            .expect("failed to create HTTP client");
-
         Self {
-            client,
-            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            client: build_client(),
+            semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS)),
             base_url: Arc::from(base_url.trim_end_matches('/')),
         }
     }
 
     /// Fetch package info from `PyPI`.
     async fn fetch_package_info(&self, name: &str) -> Result<PyPiResponse, DcuError> {
+        // `acquire` only errors once the semaphore is closed; this registry
+        // never closes its semaphore, so success is the sole reachable path
+        // (mirrors `build_client`'s infallible-by-construction `expect`).
         let _permit = self
             .semaphore
             .acquire()
             .await
-            .map_err(|e| DcuError::RegistryLookup {
-                package: name.to_owned(),
-                detail: format!("semaphore error: {e}"),
-            })?;
+            .expect("semaphore is never closed");
 
         // PyPI uses normalized names (lowercase, hyphens)
         let normalized = name.to_lowercase().replace('_', "-");
@@ -102,29 +108,75 @@ impl PyPiRegistry {
 
     /// Resolve the target version for a dependency.
     ///
+    /// Enumerates every published release from the `PyPI` `releases` map,
+    /// parses them with PEP 440 ordering, and applies the requested
+    /// [`TargetLevel`] via the shared selection algorithm. `newest` uses the
+    /// per-file `upload_time_iso_8601` timestamps. When `releases` is empty
+    /// (a minimal/legacy response), it falls back to the `PyPI`-reported
+    /// `info.version`.
+    ///
     /// # Errors
     ///
     /// Returns an error if the registry lookup fails.
     pub async fn resolve_version(
         &self,
         dep: &DependencySpec,
-        _target: TargetLevel,
+        target: TargetLevel,
     ) -> Result<ResolvedVersion, DcuError> {
         let info = self.fetch_package_info(&dep.name).await?;
 
+        // PyPI's `info.version` is the canonical latest stable; it doubles as
+        // the fallback for `Latest`/empty-list and unparseable `Minor`/`Patch`.
         let latest = Some(info.info.version.clone());
+
+        // (parsed PEP 440 version, max upload timestamp) for every release that
+        // has at least one non-yanked file and parses cleanly.
+        let mut candidates: Vec<(pep440_rs::Version, String)> = info
+            .releases
+            .iter()
+            .filter_map(|(ver_str, files)| {
+                if files.is_empty() || files.iter().all(|f| f.yanked) {
+                    return None;
+                }
+                let parsed = pep440_rs::Version::from_str(ver_str).ok()?;
+                let upload = files
+                    .iter()
+                    .map(|f| f.upload_time_iso_8601.clone())
+                    .max()
+                    .unwrap_or_default();
+                Some((parsed, upload))
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let versions: Vec<pep440_rs::Version> = candidates.iter().map(|(v, _)| v.clone()).collect();
+
+        let selected = if target == TargetLevel::Newest {
+            // Most recently uploaded by date (ISO-8601 sorts chronologically),
+            // which can differ from the highest version number.
+            candidates
+                .iter()
+                .max_by(|a, b| a.1.cmp(&b.1))
+                .map(|(v, _)| v.to_string())
+                .or_else(|| versions.last().map(ToString::to_string))
+        } else {
+            let current = pep440_rs::Version::from_str(strip_range_prefix(&dep.current_req)).ok();
+            select_version(
+                current.as_ref(),
+                &versions,
+                target,
+                latest.clone(),
+                latest.clone(),
+            )
+        };
 
         debug!(
             package = %dep.name,
             current = %dep.current_req,
-            latest = ?latest,
+            selected = ?selected,
+            target = %target,
             "resolved PyPI version"
         );
-
-        // For Python, version resolution is simpler for MVP:
-        // Just report the latest version. PEP 440 version ordering
-        // is complex; for MVP we use the PyPI-reported latest.
-        let selected = latest.clone();
 
         Ok(ResolvedVersion { latest, selected })
     }
@@ -155,18 +207,6 @@ impl PyPiRegistry {
     }
 }
 
-/// Collect results from spawned tasks, logging any `JoinError`s (e.g. panics).
-async fn collect_task_results<T>(handles: Vec<tokio::task::JoinHandle<T>>) -> Vec<T> {
-    let mut results = Vec::with_capacity(handles.len());
-    for handle in handles {
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(e) => warn!("task join error: {e}"),
-        }
-    }
-    results
-}
-
 impl Default for PyPiRegistry {
     fn default() -> Self {
         Self::new()
@@ -177,115 +217,124 @@ impl Default for PyPiRegistry {
 mod tests {
     use super::PyPiRegistry;
 
-    /// Install the rustls ring provider once per process so reqwest (rustls-no-provider) works.
+    use dependency_check_updates_core::{DependencySection, DependencySpec, TargetLevel};
+    use rstest::{fixture, rstest};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Install the rustls ring provider once per process so reqwest
+    /// (rustls-no-provider) works. Safe to call repeatedly: subsequent installs
+    /// no-op because a default provider is already set.
     fn install_crypto_provider() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
 
+    /// Async fixture: install the crypto provider, then start a fresh
+    /// `wiremock::MockServer` for the test. Each test gets its own server so
+    /// mounted mocks never leak across cases.
+    #[fixture]
+    async fn mock_server() -> MockServer {
+        install_crypto_provider();
+        MockServer::start().await
+    }
+
+    /// Build a project-dependency spec — keeps individual `#[case]` rows short.
+    fn make_dep(name: &str, current_req: &str) -> DependencySpec {
+        DependencySpec {
+            name: name.to_owned(),
+            current_req: current_req.to_owned(),
+            section: DependencySection::ProjectDependencies,
+        }
+    }
+
     #[test]
-    fn test_normalized_name() {
+    fn normalized_name_converts_underscores_and_case() {
         // PyPI normalizes names: underscores -> hyphens, lowercase
         let name = "My_Package";
         let normalized = name.to_lowercase().replace('_', "-");
         assert_eq!(normalized, "my-package");
     }
 
-    #[tokio::test]
-    async fn test_resolve_version_latest() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+    #[rstest]
+    #[case::new_ctor(|| PyPiRegistry::new())]
+    #[case::default_ctor(|| PyPiRegistry::default())]
+    fn registry_constructors_succeed(#[case] make: fn() -> PyPiRegistry) {
         install_crypto_provider();
-
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/requests/json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "info": {"version": "2.31.0"}
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let registry = PyPiRegistry::with_base_url(&mock_server.uri());
-        let dep = dependency_check_updates_core::DependencySpec {
-            name: "requests".to_owned(),
-            current_req: ">=2.28.0".to_owned(),
-            section: dependency_check_updates_core::DependencySection::ProjectDependencies,
-        };
-
-        let result = registry
-            .resolve_version(&dep, dependency_check_updates_core::TargetLevel::Latest)
-            .await
-            .expect("resolve_version should succeed");
-
-        assert_eq!(result.selected, Some("2.31.0".to_owned()));
+        let _registry = make();
     }
 
+    /// `Latest`-target lookups with a minimal `info.version` body. Covers the
+    /// basic and normalized-name (`My_Package` → `/my-package/json`) paths.
+    #[rstest]
+    #[case::basic_latest("/requests/json", "requests", "2.31.0")]
+    #[case::normalized_name_lookup("/my-package/json", "My_Package", "1.2.3")]
     #[tokio::test]
-    async fn test_resolve_version_404() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        install_crypto_provider();
+    async fn resolve_version_latest_cases(
+        #[future] mock_server: MockServer,
+        #[case] mock_path: &str,
+        #[case] dep_name: &str,
+        #[case] expected_version: &str,
+    ) {
+        let server = mock_server.await;
+        Mock::given(method("GET"))
+            .and(path(mock_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": expected_version}
+            })))
+            .mount(&server)
+            .await;
 
-        let mock_server = MockServer::start().await;
+        let registry = PyPiRegistry::with_base_url(&server.uri());
+        let dep = make_dep(dep_name, ">=1.0.0");
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .expect("resolve_version should succeed");
+        assert_eq!(result.selected, Some(expected_version.to_owned()));
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn resolve_version_404_returns_error(#[future] mock_server: MockServer) {
+        let server = mock_server.await;
         Mock::given(method("GET"))
             .and(path("/nonexistent-package/json"))
             .respond_with(ResponseTemplate::new(404))
-            .mount(&mock_server)
+            .mount(&server)
             .await;
 
-        let registry = PyPiRegistry::with_base_url(&mock_server.uri());
-        let dep = dependency_check_updates_core::DependencySpec {
-            name: "nonexistent-package".to_owned(),
-            current_req: ">=1.0.0".to_owned(),
-            section: dependency_check_updates_core::DependencySection::ProjectDependencies,
-        };
-
-        let result = registry
-            .resolve_version(&dep, dependency_check_updates_core::TargetLevel::Latest)
-            .await;
-
+        let registry = PyPiRegistry::with_base_url(&server.uri());
+        let dep = make_dep("nonexistent-package", ">=1.0.0");
+        let result = registry.resolve_version(&dep, TargetLevel::Latest).await;
         assert!(result.is_err(), "expected error for 404 response");
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_resolve_batch() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        install_crypto_provider();
-
-        let mock_server = MockServer::start().await;
+    async fn resolve_batch_preserves_order_and_results(#[future] mock_server: MockServer) {
+        let server = mock_server.await;
         Mock::given(method("GET"))
             .and(path("/requests/json"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "info": {"version": "2.31.0"}
             })))
-            .mount(&mock_server)
+            .mount(&server)
             .await;
         Mock::given(method("GET"))
             .and(path("/flask/json"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "info": {"version": "3.0.0"}
             })))
-            .mount(&mock_server)
+            .mount(&server)
             .await;
 
-        let registry = PyPiRegistry::with_base_url(&mock_server.uri());
+        let registry = PyPiRegistry::with_base_url(&server.uri());
         let deps = vec![
-            dependency_check_updates_core::DependencySpec {
-                name: "requests".to_owned(),
-                current_req: ">=2.28.0".to_owned(),
-                section: dependency_check_updates_core::DependencySection::ProjectDependencies,
-            },
-            dependency_check_updates_core::DependencySpec {
-                name: "flask".to_owned(),
-                current_req: ">=2.0.0".to_owned(),
-                section: dependency_check_updates_core::DependencySection::ProjectDependencies,
-            },
+            make_dep("requests", ">=2.28.0"),
+            make_dep("flask", ">=2.0.0"),
         ];
 
-        let results = registry
-            .resolve_batch(&deps, dependency_check_updates_core::TargetLevel::Latest)
-            .await;
+        let results = registry.resolve_batch(&deps, TargetLevel::Latest).await;
 
         assert_eq!(results.len(), 2);
         let (idx0, ref res0) = results[0];
@@ -302,74 +351,140 @@ mod tests {
         );
     }
 
+    /// `Patch`/`Minor` targets against a 4-release Flask response: each target
+    /// must clamp to the highest version inside its band.
+    #[rstest]
+    #[case::patch_stays_in_2_0_x(TargetLevel::Patch, "2.0.5")]
+    #[case::minor_stays_in_2_x(TargetLevel::Minor, "2.1.0")]
     #[tokio::test]
-    async fn test_resolve_version_normalized_name() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        install_crypto_provider();
-
-        let mock_server = MockServer::start().await;
-        // URL must use normalized name: My_Package -> my-package
+    async fn resolve_version_patch_minor_cases(
+        #[future] mock_server: MockServer,
+        #[case] target: TargetLevel,
+        #[case] expected: &str,
+    ) {
+        let server = mock_server.await;
         Mock::given(method("GET"))
-            .and(path("/my-package/json"))
+            .and(path("/flask/json"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "info": {"version": "1.2.3"}
+                "info": {"version": "3.0.0"},
+                "releases": {
+                    "2.0.0": [{"upload_time_iso_8601": "2021-01-01T00:00:00Z", "yanked": false}],
+                    "2.0.5": [{"upload_time_iso_8601": "2021-06-01T00:00:00Z", "yanked": false}],
+                    "2.1.0": [{"upload_time_iso_8601": "2021-09-01T00:00:00Z", "yanked": false}],
+                    "3.0.0": [{"upload_time_iso_8601": "2022-01-01T00:00:00Z", "yanked": false}]
+                }
             })))
-            .mount(&mock_server)
+            .mount(&server)
             .await;
 
-        let registry = PyPiRegistry::with_base_url(&mock_server.uri());
-        let dep = dependency_check_updates_core::DependencySpec {
-            name: "My_Package".to_owned(),
-            current_req: ">=1.0.0".to_owned(),
-            section: dependency_check_updates_core::DependencySection::ProjectDependencies,
-        };
-
-        let result = registry
-            .resolve_version(&dep, dependency_check_updates_core::TargetLevel::Latest)
-            .await
-            .expect("resolve_version should succeed with normalized name");
-
-        assert_eq!(result.selected, Some("1.2.3".to_owned()));
+        let registry = PyPiRegistry::with_base_url(&server.uri());
+        let dep = make_dep("flask", ">=2.0.0");
+        let result = registry.resolve_version(&dep, target).await.unwrap();
+        assert_eq!(result.selected.as_deref(), Some(expected));
     }
 
-    #[test]
-    fn test_new_creates_registry() {
-        install_crypto_provider();
-        let _registry = PyPiRegistry::new();
-    }
-
-    #[test]
-    fn test_default_creates_registry() {
-        install_crypto_provider();
-        let _registry = PyPiRegistry::default();
-    }
-
+    /// `Newest` picks by upload date (1.5.0 published most recently),
+    /// `Greatest` picks by version (2.0.0 is the highest). Same fixture body.
+    #[rstest]
+    #[case::newest_by_upload_date(TargetLevel::Newest, "1.5.0")]
+    #[case::greatest_by_version(TargetLevel::Greatest, "2.0.0")]
     #[tokio::test]
-    async fn test_collect_task_results_join_error() {
-        use dependency_check_updates_core::{DcuError, ResolvedVersion};
+    async fn resolve_version_newest_vs_greatest(
+        #[future] mock_server: MockServer,
+        #[case] target: TargetLevel,
+        #[case] expected: &str,
+    ) {
+        let server = mock_server.await;
+        Mock::given(method("GET"))
+            .and(path("/requests/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": "2.0.0"},
+                "releases": {
+                    "1.0.0": [{"upload_time_iso_8601": "2022-01-01T00:00:00Z", "yanked": false}],
+                    "2.0.0": [{"upload_time_iso_8601": "2023-01-01T00:00:00Z", "yanked": false}],
+                    "1.5.0": [{"upload_time_iso_8601": "2024-06-01T00:00:00Z", "yanked": false}]
+                }
+            })))
+            .mount(&server)
+            .await;
 
-        // Suppress panic output from the intentionally-panicking task.
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let registry = PyPiRegistry::with_base_url(&server.uri());
+        let dep = make_dep("requests", ">=1.0.0");
+        let result = registry.resolve_version(&dep, target).await.unwrap();
+        assert_eq!(result.selected.as_deref(), Some(expected));
+    }
 
-        let handles: Vec<tokio::task::JoinHandle<(usize, Result<ResolvedVersion, DcuError>)>> = vec![
-            tokio::spawn(async {
-                (
-                    0,
-                    Ok(ResolvedVersion {
-                        latest: Some("1.0.0".into()),
-                        selected: None,
-                    }),
-                )
-            }),
-            tokio::spawn(async { panic!("simulated join error") }),
-        ];
-        let results = super::collect_task_results(handles).await;
+    /// Covers the `.json().await.map_err(...)` parse-error closure in
+    /// `fetch_package_info` (registry.rs lines 104-105). The mock returns
+    /// HTTP 200 with a body that is not valid JSON, so the deserializer
+    /// fails and `resolve_version` must surface the error.
+    #[rstest]
+    #[tokio::test]
+    async fn resolve_version_invalid_json_returns_error(#[future] mock_server: MockServer) {
+        let server = mock_server.await;
+        Mock::given(method("GET"))
+            .and(path("/badjson/json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("this is not json {{{")
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
 
-        std::panic::set_hook(prev_hook);
+        let registry = PyPiRegistry::with_base_url(&server.uri());
+        let dep = make_dep("badjson", ">=1.0.0");
+        let result = registry.resolve_version(&dep, TargetLevel::Latest).await;
+        assert!(result.is_err(), "expected JSON parse error to bubble up");
+    }
 
-        // The panicking task is dropped; only 1 result survives.
-        assert_eq!(results.len(), 1);
+    /// Covers the `.send().await.map_err(...)` network-error closure
+    /// (registry.rs lines 91-92). Port 1 on loopback refuses connections,
+    /// so reqwest returns a connect error before any HTTP response is
+    /// produced.
+    #[tokio::test]
+    async fn resolve_version_network_error_returns_err() {
+        install_crypto_provider();
+        let registry = PyPiRegistry::with_base_url("http://127.0.0.1:1");
+        let dep = make_dep("anything", ">=1.0.0");
+        let result = registry.resolve_version(&dep, TargetLevel::Latest).await;
+        assert!(result.is_err(), "expected network error from refused port");
+    }
+
+    /// Covers the `files.is_empty() || files.iter().all(|f| f.yanked)` early
+    /// return inside the candidate `filter_map` (registry.rs line 139). The
+    /// `1.9.0` release has every file marked yanked, so `Greatest` must
+    /// pick `1.5.0` (the highest non-yanked release) instead.
+    #[rstest]
+    #[tokio::test]
+    async fn resolve_version_skips_all_yanked_release(#[future] mock_server: MockServer) {
+        let server = mock_server.await;
+        Mock::given(method("GET"))
+            .and(path("/yanky/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": "1.5.0"},
+                "releases": {
+                    "1.0.0": [{"upload_time_iso_8601": "2022-01-01T00:00:00Z", "yanked": false}],
+                    "1.5.0": [{"upload_time_iso_8601": "2023-01-01T00:00:00Z", "yanked": false}],
+                    "1.9.0": [
+                        {"upload_time_iso_8601": "2024-01-01T00:00:00Z", "yanked": true},
+                        {"upload_time_iso_8601": "2024-01-02T00:00:00Z", "yanked": true}
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let registry = PyPiRegistry::with_base_url(&server.uri());
+        let dep = make_dep("yanky", ">=1.0.0");
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Greatest)
+            .await
+            .expect("resolve_version should succeed");
+        assert_eq!(
+            result.selected.as_deref(),
+            Some("1.5.0"),
+            "all-yanked 1.9.0 must be excluded; Greatest should fall back to 1.5.0"
+        );
     }
 }

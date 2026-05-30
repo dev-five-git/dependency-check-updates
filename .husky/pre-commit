@@ -1,0 +1,4 @@
+# Run the full lint suite before every commit so CI never fails on lint.
+# Mirrors the CI "Lint" step: clippy --all-targets --all-features, rustfmt
+# check, and the JS workspace lints.
+bun run lint

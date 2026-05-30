@@ -195,10 +195,30 @@ pub enum CargoTomlError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn test_parse_simple_deps() {
-        let toml = r#"
+    /// Expected parsed dependencies: list of `(name, current_req, section)`.
+    type ExpectedDeps<'a> = &'a [(&'a str, &'a str, DependencySection)];
+
+    /// Planned updates expressed as `(name, section, to)`; `from` is always
+    /// `"1.0"` in these tests so it is filled in by the helper.
+    type UpdateSpecs<'a> = &'a [(&'a str, DependencySection, &'a str)];
+
+    fn build_updates(specs: UpdateSpecs<'_>) -> Vec<PlannedUpdate> {
+        specs
+            .iter()
+            .map(|(name, section, to)| PlannedUpdate {
+                name: (*name).to_owned(),
+                section: *section,
+                from: "1.0".to_owned(),
+                to: (*to).to_owned(),
+            })
+            .collect()
+    }
+
+    #[rstest]
+    #[case::simple_deps(
+        r#"
 [package]
 name = "my-crate"
 version = "0.1.0"
@@ -206,407 +226,299 @@ version = "0.1.0"
 [dependencies]
 serde = "1.0"
 tokio = "1.0"
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 2);
-        assert_eq!(manifest.dependencies[0].name, "serde");
-        assert_eq!(manifest.dependencies[0].current_req, "1.0");
-        assert_eq!(
-            manifest.dependencies[0].section,
-            DependencySection::Dependencies
-        );
-    }
-
-    #[test]
-    fn test_parse_table_form_deps() {
-        let toml = r#"
+"#,
+        &[
+            ("serde", "1.0", DependencySection::Dependencies),
+            ("tokio", "1.0", DependencySection::Dependencies),
+        ]
+    )]
+    #[case::table_form_deps(
+        r#"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.0", features = ["full"] }
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 2);
-        assert_eq!(manifest.dependencies[0].current_req, "1.0");
-    }
-
-    #[test]
-    fn test_parse_dev_dependencies() {
-        let toml = r#"
+"#,
+        &[
+            ("serde", "1.0", DependencySection::Dependencies),
+            ("tokio", "1.0", DependencySection::Dependencies),
+        ]
+    )]
+    #[case::dev_dependencies(
+        r#"
 [dev-dependencies]
 insta = "1.0"
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(
-            manifest.dependencies[0].section,
-            DependencySection::DevDependencies
-        );
-    }
-
-    #[test]
-    fn test_parse_build_dependencies() {
-        let toml = r#"
+"#,
+        &[("insta", "1.0", DependencySection::DevDependencies)]
+    )]
+    #[case::build_dependencies(
+        r#"
 [build-dependencies]
 cc = "1.0"
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(
-            manifest.dependencies[0].section,
-            DependencySection::BuildDependencies
-        );
-    }
-
-    #[test]
-    fn test_parse_workspace_dependencies() {
-        let toml = r#"
+"#,
+        &[("cc", "1.0", DependencySection::BuildDependencies)]
+    )]
+    #[case::workspace_dependencies(
+        r#"
 [workspace.dependencies]
 serde = "1.0"
 tokio = { version = "1.0", features = ["full"] }
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 2);
-        assert_eq!(
-            manifest.dependencies[0].section,
-            DependencySection::WorkspaceDependencies
-        );
-    }
-
-    #[test]
-    fn test_skip_workspace_true() {
-        let toml = r#"
+"#,
+        &[
+            ("serde", "1.0", DependencySection::WorkspaceDependencies),
+            ("tokio", "1.0", DependencySection::WorkspaceDependencies),
+        ]
+    )]
+    #[case::skip_workspace_true(
+        r#"
 [dependencies]
 serde = { workspace = true }
 tokio = "1.0"
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "tokio");
-    }
-
-    #[test]
-    fn test_skip_git_deps() {
-        let toml = r#"
+"#,
+        &[("tokio", "1.0", DependencySection::Dependencies)]
+    )]
+    #[case::skip_git_deps(
+        r#"
 [dependencies]
 my-fork = { git = "https://github.com/user/repo" }
 tokio = "1.0"
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "tokio");
-    }
-
-    #[test]
-    fn test_skip_path_deps() {
-        let toml = r#"
+"#,
+        &[("tokio", "1.0", DependencySection::Dependencies)]
+    )]
+    #[case::skip_path_deps(
+        r#"
 [dependencies]
 my-local = { path = "../my-local" }
 tokio = "1.0"
-"#;
+"#,
+        &[("tokio", "1.0", DependencySection::Dependencies)]
+    )]
+    #[case::no_deps_empty(
+        r#"
+[package]
+name = "empty"
+version = "0.1.0"
+"#,
+        &[]
+    )]
+    #[case::mixed_sections(
+        r#"
+[dependencies]
+serde = "1.0"
+
+[dev-dependencies]
+insta = "1.0"
+
+[build-dependencies]
+cc = "1.0"
+"#,
+        &[
+            ("serde", "1.0", DependencySection::Dependencies),
+            ("insta", "1.0", DependencySection::DevDependencies),
+            ("cc", "1.0", DependencySection::BuildDependencies),
+        ]
+    )]
+    #[case::array_dep_value_skipped(
+        r#"
+[dependencies]
+serde = "1.0"
+weird = [1, 2, 3]
+"#,
+        &[("serde", "1.0", DependencySection::Dependencies)]
+    )]
+    #[case::skip_workspace_true_full_table_form(
+        r#"
+[dependencies.serde]
+workspace = true
+
+[dependencies]
+tokio = "1.0"
+"#,
+        &[("tokio", "1.0", DependencySection::Dependencies)]
+    )]
+    #[case::full_table_form_version(
+        r#"
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+"#,
+        &[("serde", "1.0", DependencySection::Dependencies)]
+    )]
+    // `test_extract_version_none_for_unknown_item` parses the same simple TOML
+    // and only asserts the first dependency's `current_req`. Covered by the
+    // identical assertions in `simple_deps` / this minimal case.
+    #[case::extract_version_returns_simple_string(
+        r#"
+[dependencies]
+serde = "1.0"
+"#,
+        &[("serde", "1.0", DependencySection::Dependencies)]
+    )]
+    // Pre-apply parse coverage for `apply_updates_unhandled_value_type`:
+    // weird-dep first, then serde. Only serde is collected (len == 1).
+    #[case::array_first_then_string(
+        r#"
+[dependencies]
+weird-dep = [1, 2, 3]
+serde = "1.0"
+"#,
+        &[("serde", "1.0", DependencySection::Dependencies)]
+    )]
+    fn parse_dependencies_cases(#[case] toml: &str, #[case] expected: ExpectedDeps<'_>) {
         let manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(
+            manifest.dependencies.len(),
+            expected.len(),
+            "dep count mismatch"
+        );
+        for (i, (name, req, section)) in expected.iter().enumerate() {
+            assert_eq!(manifest.dependencies[i].name, *name);
+            assert_eq!(manifest.dependencies[i].current_req, *req);
+            assert_eq!(manifest.dependencies[i].section, *section);
+        }
     }
 
     #[test]
-    fn test_apply_updates_string_form() {
-        let toml = r#"
+    fn invalid_toml_returns_error() {
+        let result = CargoTomlManifest::parse("not valid toml [[[");
+        assert!(result.is_err());
+    }
+
+    #[rstest]
+    #[case::string_form(
+        r#"
 [dependencies]
 serde = "1.0"
 tokio = "1.0"
-"#;
-        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
-        let updates = vec![PlannedUpdate {
-            name: "serde".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "1.0".to_owned(),
-            to: "1.0.228".to_owned(),
-        }];
-
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("\"1.0.228\""));
-        assert!(result.contains("tokio = \"1.0\""));
-    }
-
-    #[test]
-    fn test_apply_updates_table_form() {
-        let toml = r#"
+"#,
+        &[("serde", DependencySection::Dependencies, "1.0.228")],
+        true,
+        &["\"1.0.228\"", "tokio = \"1.0\""]
+    )]
+    #[case::table_form(
+        r#"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-"#;
-        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
-        let updates = vec![PlannedUpdate {
-            name: "serde".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "1.0".to_owned(),
-            to: "1.0.228".to_owned(),
-        }];
-
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("\"1.0.228\""));
-        assert!(result.contains("features = [\"derive\"]"));
-    }
-
-    #[test]
-    fn test_comments_preserved() {
-        let toml = r#"
+"#,
+        &[("serde", DependencySection::Dependencies, "1.0.228")],
+        true,
+        &["\"1.0.228\"", "features = [\"derive\"]"]
+    )]
+    #[case::comments_preserved(
+        r#"
 # This is an important comment
 [dependencies]
 # Serialization
 serde = "1.0"
 # Async runtime
 tokio = "1.0"
-"#;
-        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
-        let updates = vec![PlannedUpdate {
-            name: "serde".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "1.0".to_owned(),
-            to: "2.0".to_owned(),
-        }];
-
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("# This is an important comment"));
-        assert!(result.contains("# Serialization"));
-        assert!(result.contains("# Async runtime"));
-    }
-
-    #[test]
-    fn test_no_deps_empty() {
-        let toml = r#"
-[package]
-name = "empty"
-version = "0.1.0"
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert!(manifest.dependencies.is_empty());
-    }
-
-    #[test]
-    fn test_mixed_sections() {
-        let toml = r#"
-[dependencies]
-serde = "1.0"
-
-[dev-dependencies]
-insta = "1.0"
-
-[build-dependencies]
-cc = "1.0"
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 3);
-    }
-
-    #[test]
-    fn test_apply_updates_workspace_deps() {
-        let toml = r#"
+"#,
+        &[("serde", DependencySection::Dependencies, "2.0")],
+        true,
+        &[
+            "# This is an important comment",
+            "# Serialization",
+            "# Async runtime",
+        ]
+    )]
+    #[case::workspace_deps(
+        r#"
 [workspace.dependencies]
 serde = "1.0"
 tokio = { version = "1.0", features = ["full"] }
-"#;
-        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 2);
-        assert_eq!(
-            manifest.dependencies[0].section,
-            DependencySection::WorkspaceDependencies
-        );
-
-        let updates = vec![PlannedUpdate {
-            name: "serde".to_owned(),
-            section: DependencySection::WorkspaceDependencies,
-            from: "1.0".to_owned(),
-            to: "2.0".to_owned(),
-        }];
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("\"2.0\""));
-    }
-
-    #[test]
-    fn test_apply_updates_full_table_form() {
-        let toml = r#"
+"#,
+        &[("serde", DependencySection::WorkspaceDependencies, "2.0")],
+        true,
+        &["\"2.0\""]
+    )]
+    #[case::full_table_form(
+        r#"
 [dependencies.serde]
 version = "1.0"
 features = ["derive"]
-"#;
-        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].current_req, "1.0");
-
-        let updates = vec![PlannedUpdate {
-            name: "serde".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "1.0".to_owned(),
-            to: "1.0.228".to_owned(),
-        }];
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("1.0.228"));
-    }
-
-    #[test]
-    fn test_apply_updates_dev_and_build_deps() {
-        let toml = r#"
+"#,
+        &[("serde", DependencySection::Dependencies, "1.0.228")],
+        true,
+        &["1.0.228"]
+    )]
+    #[case::dev_and_build_deps(
+        r#"
 [dev-dependencies]
 insta = "1.0"
 
 [build-dependencies]
 cc = "1.0"
-"#;
-        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
-        let updates = vec![
-            PlannedUpdate {
-                name: "insta".to_owned(),
-                section: DependencySection::DevDependencies,
-                from: "1.0".to_owned(),
-                to: "1.46".to_owned(),
-            },
-            PlannedUpdate {
-                name: "cc".to_owned(),
-                section: DependencySection::BuildDependencies,
-                from: "1.0".to_owned(),
-                to: "1.2".to_owned(),
-            },
-        ];
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("\"1.46\""));
-        assert!(result.contains("\"1.2\""));
-    }
-
-    #[test]
-    fn test_apply_updates_dep_not_found() {
-        let toml = r#"
+"#,
+        &[
+            ("insta", DependencySection::DevDependencies, "1.46"),
+            ("cc", DependencySection::BuildDependencies, "1.2"),
+        ],
+        true,
+        &["\"1.46\"", "\"1.2\""]
+    )]
+    #[case::non_applicable_section(
+        r#"
 [dependencies]
 serde = "1.0"
-"#;
-        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
-        let updates = vec![PlannedUpdate {
-            name: "nonexistent".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "1.0".to_owned(),
-            to: "2.0".to_owned(),
-        }];
-        let result = manifest.apply_updates(&updates);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_extract_version_none_for_unknown_item() {
-        // An item that is neither string nor table should return None
-        let toml = r#"
-[dependencies]
-serde = "1.0"
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        // We know parse works; just ensure it handles properly
-        assert_eq!(manifest.dependencies[0].current_req, "1.0");
-    }
-
-    #[test]
-    fn test_invalid_toml_returns_error() {
-        let result = CargoTomlManifest::parse("not valid toml [[[");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_array_dep_value_skipped() {
-        let toml = r#"
-[dependencies]
-serde = "1.0"
-weird = [1, 2, 3]
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        // "weird" with array value should be skipped
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "serde");
-    }
-
-    #[test]
-    fn test_skip_workspace_true_full_table_form() {
-        // Full [dependencies.name] Table form with workspace = true
-        let toml = r#"
-[dependencies.serde]
-workspace = true
-
-[dependencies]
-tokio = "1.0"
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        // serde with workspace=true should be skipped
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "tokio");
-    }
-
-    #[test]
-    fn test_apply_updates_non_applicable_section() {
-        // ProjectDependencies is not a Cargo.toml section - should be silently skipped
-        let toml = r#"
-[dependencies]
-serde = "1.0"
-"#;
-        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
-        let updates = vec![PlannedUpdate {
-            name: "requests".to_owned(),
-            section: DependencySection::ProjectDependencies,
-            from: ">=2.28.0".to_owned(),
-            to: ">=2.31.0".to_owned(),
-        }];
-        // Should not error - just skip the non-applicable section
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("serde = \"1.0\""));
-    }
-
-    #[test]
-    fn test_apply_updates_workspace_table_form() {
-        let toml = r#"
+"#,
+        // ProjectDependencies is not applicable to Cargo.toml — silently skipped.
+        // The original test used `from: ">=2.28.0"` / `to: ">=2.31.0"`; since
+        // `apply_updates` ignores non-applicable sections entirely, the
+        // request values are irrelevant — using the helper's `from = "1.0"` is
+        // semantically identical (no edit occurs either way).
+        &[("requests", DependencySection::ProjectDependencies, ">=2.31.0")],
+        true,
+        &["serde = \"1.0\""]
+    )]
+    #[case::workspace_table_form(
+        r#"
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
-"#;
-        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
-        let updates = vec![PlannedUpdate {
-            name: "serde".to_owned(),
-            section: DependencySection::WorkspaceDependencies,
-            from: "1.0".to_owned(),
-            to: "1.0.228".to_owned(),
-        }];
-        let result = manifest.apply_updates(&updates).unwrap();
-        assert!(result.contains("\"1.0.228\""));
-    }
-
-    #[test]
-    fn test_full_table_form_version() {
-        // Full table form: [dependencies.serde] version = "1.0"
-        let toml = r#"
-[dependencies.serde]
-version = "1.0"
-features = ["derive"]
-"#;
-        let manifest = CargoTomlManifest::parse(toml).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "serde");
-        assert_eq!(manifest.dependencies[0].current_req, "1.0");
-    }
-
-    #[test]
-    fn test_apply_updates_unhandled_value_type() {
-        // A dependency entry that is an array (not string/inline-table/table)
-        // hits the catch-all `_ => {}` arm in update_dep_in_table.
-        let toml = r#"
+"#,
+        &[("serde", DependencySection::WorkspaceDependencies, "1.0.228")],
+        true,
+        &["\"1.0.228\""]
+    )]
+    #[case::unhandled_value_type(
+        // Array-valued entry hits the catch-all `_ => {}` arm in
+        // `update_dep_in_table` — apply succeeds silently, value unchanged.
+        r#"
 [dependencies]
 weird-dep = [1, 2, 3]
 serde = "1.0"
-"#;
+"#,
+        &[("weird-dep", DependencySection::Dependencies, "2.0")],
+        true,
+        &["weird-dep = [1, 2, 3]"]
+    )]
+    #[case::dep_not_found(
+        r#"
+[dependencies]
+serde = "1.0"
+"#,
+        &[("nonexistent", DependencySection::Dependencies, "2.0")],
+        false,
+        // Error path: substrings ignored.
+        &[]
+    )]
+    fn apply_updates_cases(
+        #[case] toml: &str,
+        #[case] updates: UpdateSpecs<'_>,
+        #[case] should_succeed: bool,
+        #[case] expected_contains: &[&str],
+    ) {
         let mut manifest = CargoTomlManifest::parse(toml).unwrap();
-        // Array-valued dep is not collected as a dependency
-        assert_eq!(manifest.dependencies.len(), 1);
-
-        // Attempting to update the array-valued dep should succeed silently
-        let updates = vec![PlannedUpdate {
-            name: "weird-dep".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "1.0".to_owned(),
-            to: "2.0".to_owned(),
-        }];
-        let result = manifest.apply_updates(&updates).unwrap();
-        // Original value unchanged — the catch-all arm is a no-op
-        assert!(result.contains("weird-dep = [1, 2, 3]"));
+        let planned = build_updates(updates);
+        let result = manifest.apply_updates(&planned);
+        if should_succeed {
+            let output = result.unwrap();
+            for s in expected_contains {
+                assert!(
+                    output.contains(s),
+                    "expected output to contain {s:?}, got:\n{output}"
+                );
+            }
+        } else {
+            assert!(result.is_err());
+        }
     }
 }

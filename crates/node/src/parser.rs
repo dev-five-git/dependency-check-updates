@@ -19,8 +19,6 @@ pub const DEPENDENCY_SECTIONS: &[(DependencySection, &str)] = &[
 pub struct PackageJsonManifest {
     /// The original raw text (preserved for surgical patching).
     pub original_text: String,
-    /// The parsed JSON value.
-    pub parsed: Value,
     /// All collected dependency specs.
     pub dependencies: Vec<DependencySpec>,
 }
@@ -39,7 +37,6 @@ impl PackageJsonManifest {
 
         Ok(Self {
             original_text: text.to_owned(),
-            parsed,
             dependencies,
         })
     }
@@ -100,70 +97,71 @@ pub enum PackageJsonError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn test_basic_dependencies() {
-        let json = r#"{
+    #[rstest]
+    // JSON in which a single dependency section is populated. Verifies every
+    // collected entry's `(name, current_req, section)` triple against the
+    // expected first-entry fields and overall count.
+    #[case::dependencies(
+        r#"{
   "name": "test",
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   }
-}"#;
-        let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.dependencies.len(), 2);
-        assert_eq!(manifest.dependencies[0].name, "react");
-        assert_eq!(manifest.dependencies[0].current_req, "^18.2.0");
-        assert_eq!(
-            manifest.dependencies[0].section,
-            DependencySection::Dependencies
-        );
-    }
-
-    #[test]
-    fn test_dev_dependencies() {
-        let json = r#"{
+}"#,
+        2,
+        "react",
+        "^18.2.0",
+        DependencySection::Dependencies
+    )]
+    #[case::dev_dependencies(
+        r#"{
   "devDependencies": {
     "typescript": "^5.0.0",
     "eslint": "^8.0.0"
   }
-}"#;
-        let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.dependencies.len(), 2);
-        assert_eq!(
-            manifest.dependencies[0].section,
-            DependencySection::DevDependencies
-        );
-    }
-
-    #[test]
-    fn test_peer_dependencies() {
-        let json = r#"{
+}"#,
+        2,
+        "typescript",
+        "^5.0.0",
+        DependencySection::DevDependencies
+    )]
+    #[case::peer_dependencies(
+        r#"{
   "peerDependencies": {
     "react": "^17.0.0 || ^18.0.0"
   }
-}"#;
-        let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(
-            manifest.dependencies[0].section,
-            DependencySection::PeerDependencies
-        );
-    }
-
-    #[test]
-    fn test_optional_dependencies() {
-        let json = r#"{
+}"#,
+        1,
+        "react",
+        "^17.0.0 || ^18.0.0",
+        DependencySection::PeerDependencies
+    )]
+    #[case::optional_dependencies(
+        r#"{
   "optionalDependencies": {
     "fsevents": "^2.3.0"
   }
-}"#;
+}"#,
+        1,
+        "fsevents",
+        "^2.3.0",
+        DependencySection::OptionalDependencies
+    )]
+    fn parses_single_section(
+        #[case] json: &str,
+        #[case] expected_count: usize,
+        #[case] first_name: &str,
+        #[case] first_req: &str,
+        #[case] section: DependencySection,
+    ) {
         let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(
-            manifest.dependencies[0].section,
-            DependencySection::OptionalDependencies
-        );
+        assert_eq!(manifest.dependencies.len(), expected_count);
+        assert_eq!(manifest.dependencies[0].name, first_name);
+        assert_eq!(manifest.dependencies[0].current_req, first_req);
+        assert_eq!(manifest.dependencies[0].section, section);
     }
 
     #[test]
@@ -184,16 +182,10 @@ mod tests {
         assert!(sections.contains(&DependencySection::OptionalDependencies));
     }
 
-    #[test]
-    fn test_empty_dependencies() {
-        let json = r#"{ "dependencies": {} }"#;
-        let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert!(manifest.dependencies.is_empty());
-    }
-
-    #[test]
-    fn test_missing_dependencies_key() {
-        let json = r#"{ "name": "test", "version": "1.0.0" }"#;
+    #[rstest]
+    #[case::empty_dependencies(r#"{ "dependencies": {} }"#)]
+    #[case::missing_dependencies_key(r#"{ "name": "test", "version": "1.0.0" }"#)]
+    fn no_dependencies_collected(#[case] json: &str) {
         let manifest = PackageJsonManifest::parse(json).unwrap();
         assert!(manifest.dependencies.is_empty());
     }
@@ -214,72 +206,83 @@ mod tests {
         assert_eq!(manifest.dependencies[2].name, "@scope/nested-pkg");
     }
 
-    #[test]
-    fn test_workspace_protocol_skipped() {
-        let json = r#"{
+    #[rstest]
+    // JSON containing one resolvable spec plus various skipped specs.
+    // Only the named survivor remains after parsing.
+    #[case::workspace_protocol(
+        r#"{
   "dependencies": {
     "my-lib": "workspace:*",
     "my-other": "workspace:^1.0.0",
     "react": "^18.0.0"
   }
-}"#;
-        let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "react");
-    }
-
-    #[test]
-    fn test_npm_alias_skipped() {
-        let json = r#"{
+}"#,
+        "react"
+    )]
+    #[case::npm_alias(
+        r#"{
   "dependencies": {
     "my-react": "npm:react@^18.0.0",
     "lodash": "^4.17.0"
   }
-}"#;
-        let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "lodash");
-    }
-
-    #[test]
-    fn test_git_url_skipped() {
-        let json = r#"{
+}"#,
+        "lodash"
+    )]
+    #[case::git_url(
+        r#"{
   "dependencies": {
     "my-fork": "git+https://github.com/user/repo.git",
     "other-fork": "github:user/repo",
     "react": "^18.0.0"
   }
-}"#;
-        let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "react");
-    }
-
-    #[test]
-    fn test_file_and_link_skipped() {
-        let json = r#"{
+}"#,
+        "react"
+    )]
+    #[case::file_and_link(
+        r#"{
   "dependencies": {
     "local-pkg": "file:../local-pkg",
     "linked": "link:../linked",
     "react": "^18.0.0"
   }
-}"#;
-        let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "react");
-    }
-
-    #[test]
-    fn test_object_form_skipped() {
-        let json = r#"{
+}"#,
+        "react"
+    )]
+    #[case::object_form(
+        r#"{
   "dependencies": {
     "complex": { "version": "^1.0.0", "optional": true },
     "react": "^18.0.0"
   }
-}"#;
+}"#,
+        "react"
+    )]
+    #[case::latest_and_wildcard(
+        r#"{
+  "dependencies": {
+    "always-new": "latest",
+    "any": "*",
+    "x-any": "x",
+    "X-any": "X",
+    "react": "^18.0.0"
+  }
+}"#,
+        "react"
+    )]
+    #[case::http_url(
+        r#"{
+  "dependencies": {
+    "tarball-pkg": "https://example.com/pkg.tgz",
+    "http-pkg": "http://example.com/pkg.tgz",
+    "react": "^18.0.0"
+  }
+}"#,
+        "react"
+    )]
+    fn skips_unresolvable_specs(#[case] json: &str, #[case] survivor: &str) {
         let manifest = PackageJsonManifest::parse(json).unwrap();
         assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "react");
+        assert_eq!(manifest.dependencies[0].name, survivor);
     }
 
     #[test]
@@ -316,38 +319,8 @@ mod tests {
     }
 
     #[test]
-    fn test_latest_and_wildcard_skipped() {
-        let json = r#"{
-  "dependencies": {
-    "always-new": "latest",
-    "any": "*",
-    "x-any": "x",
-    "X-any": "X",
-    "react": "^18.0.0"
-  }
-}"#;
-        let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "react");
-    }
-
-    #[test]
     fn test_invalid_json_returns_error() {
         let result = PackageJsonManifest::parse("not json");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_http_url_skipped() {
-        let json = r#"{
-  "dependencies": {
-    "tarball-pkg": "https://example.com/pkg.tgz",
-    "http-pkg": "http://example.com/pkg.tgz",
-    "react": "^18.0.0"
-  }
-}"#;
-        let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "react");
     }
 }

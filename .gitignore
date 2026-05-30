@@ -16,3 +16,4 @@ tarpaulin-report.html
 .sisyphus/**
 .ruff_cache
 .omc
+.omo
