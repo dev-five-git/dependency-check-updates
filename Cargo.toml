@@ -61,7 +61,6 @@ napi = { version = "3.9", features = ["tokio_rt"] }
 napi-derive = "3.5"
 futures = "0.3"
 owo-colors = "4.3"
-insta = "1.47"
 tempfile = "3.27"
 wiremock = "0.6"
 rstest = "0.26"
