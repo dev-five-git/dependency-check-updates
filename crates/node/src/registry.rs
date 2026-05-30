@@ -26,6 +26,10 @@ struct NpmPackageInfo {
     #[serde(rename = "dist-tags")]
     dist_tags: Option<DistTags>,
     versions: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Map of version → ISO-8601 publish time. Only present in the *full*
+    /// packument (the abbreviated `install-v1` format omits it), so it is
+    /// fetched on demand for `--target newest`.
+    time: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,7 +71,12 @@ impl NpmRegistry {
     }
 
     /// Fetch package info from the npm registry.
-    async fn fetch_package_info(&self, name: &str) -> Result<NpmPackageInfo, DcuError> {
+    ///
+    /// When `full` is true the *full* packument is requested
+    /// (`Accept: application/json`) so the `time` map is present — needed for
+    /// `--target newest`. Otherwise the cheaper abbreviated `install-v1`
+    /// format is used, which omits `time`.
+    async fn fetch_package_info(&self, name: &str, full: bool) -> Result<NpmPackageInfo, DcuError> {
         let _permit = self
             .semaphore
             .acquire()
@@ -80,15 +89,18 @@ impl NpmRegistry {
         let encoded = Self::encode_package_name(name);
         let url = format!("{}/{encoded}", self.base_url);
 
-        debug!(package = name, %url, "fetching package info");
+        debug!(package = name, %url, full, "fetching package info");
+
+        let accept = if full {
+            "application/json"
+        } else {
+            "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*"
+        };
 
         let response = self
             .client
             .get(&url)
-            .header(
-                "Accept",
-                "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*",
-            )
+            .header("Accept", accept)
             .send()
             .await
             .map_err(|e| DcuError::RegistryLookup {
@@ -120,7 +132,11 @@ impl NpmRegistry {
         dep: &DependencySpec,
         target: TargetLevel,
     ) -> Result<ResolvedVersion, DcuError> {
-        let info = self.fetch_package_info(&dep.name).await?;
+        // `newest` needs publish timestamps, which only the full packument
+        // carries; every other target uses the cheaper abbreviated format.
+        let info = self
+            .fetch_package_info(&dep.name, target == TargetLevel::Newest)
+            .await?;
 
         let latest = info.dist_tags.as_ref().and_then(|dt| dt.latest.clone());
 
@@ -149,7 +165,14 @@ impl NpmRegistry {
                 current_is_prerelease,
                 "fetched version list"
             );
-            select_version(&dep.current_req, latest.as_ref(), &all_versions, target)
+            if target == TargetLevel::Newest {
+                // Most recently published by date (from the `time` map), which
+                // can differ from the highest version number.
+                newest_by_date(&info, &all_versions)
+                    .or_else(|| all_versions.last().map(ToString::to_string))
+            } else {
+                select_version(&dep.current_req, latest.as_ref(), &all_versions, target)
+            }
         };
 
         // NOTE: we do NOT filter out versions that satisfy the current range.
@@ -202,7 +225,30 @@ impl Default for NpmRegistry {
     }
 }
 
-/// Extract and sort all version strings from package info, excluding pre-releases.
+/// Pick the most-recently-published version using the packument `time` map.
+///
+/// `time` maps each version string to an ISO-8601 timestamp (plus the meta
+/// keys `created`/`modified`, which never match a parsed version and are thus
+/// ignored). ISO-8601 sorts lexicographically in chronological order. Returns
+/// `None` when `time` is absent (abbreviated packument) so the caller can fall
+/// back to the highest version.
+fn newest_by_date(info: &NpmPackageInfo, all_versions: &[node_semver::Version]) -> Option<String> {
+    let times = info.time.as_ref()?;
+    all_versions
+        .iter()
+        .filter_map(|v| {
+            let s = v.to_string();
+            times
+                .get(&s)
+                .and_then(serde_json::Value::as_str)
+                .map(|t| (t.to_owned(), s))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, s)| s)
+}
+
+/// Extract and sort all version strings from the packument (pre-releases
+/// included — filtering happens later in version selection).
 fn extract_sorted_versions(info: &NpmPackageInfo) -> Vec<node_semver::Version> {
     let Some(versions) = &info.versions else {
         return Vec::new();
@@ -482,6 +528,7 @@ mod tests {
                 );
                 map
             }),
+            time: None,
         };
         let versions = extract_sorted_versions(&info);
         assert_eq!(versions.len(), 3);
@@ -495,6 +542,7 @@ mod tests {
         let info = NpmPackageInfo {
             dist_tags: None,
             versions: None,
+            time: None,
         };
         let versions = extract_sorted_versions(&info);
         assert!(versions.is_empty());
@@ -817,6 +865,43 @@ mod tests {
         assert_eq!(result.selected.as_deref(), Some("18.2.0"));
         // Confirm it did NOT pick 19.0.0-rc.1 (which would happen if fast path was skipped)
         assert_ne!(result.selected.as_deref(), Some("19.0.0-rc.1"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_newest_by_date() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        install_crypto_provider();
+        let mock_server = MockServer::start().await;
+        // 1.5.0 was published most recently even though 2.0.0 is higher. The
+        // `time` map (full packument) drives `newest`; `greatest` would differ.
+        Mock::given(method("GET"))
+            .and(path("/pkg"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "dist-tags": { "latest": "2.0.0" },
+                "versions": { "1.0.0": {}, "1.5.0": {}, "2.0.0": {} },
+                "time": {
+                    "created": "2021-01-01T00:00:00Z",
+                    "1.0.0": "2022-01-01T00:00:00Z",
+                    "2.0.0": "2023-01-01T00:00:00Z",
+                    "1.5.0": "2024-06-01T00:00:00Z"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = NpmRegistry::with_base_url(&mock_server.uri());
+        let dep = DependencySpec {
+            name: "pkg".to_owned(),
+            current_req: "^1.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::Dependencies,
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Newest)
+            .await
+            .unwrap();
+        assert_eq!(result.selected.as_deref(), Some("1.5.0"));
     }
 
     #[test]

@@ -347,6 +347,12 @@ fn parse_current_ref(req: &str) -> Option<node_semver::Version> {
 /// behaviour is supplied via the fallbacks: the highest stable tag stands in
 /// for `latest`, while an unparseable current ref yields `None` for
 /// `Minor`/`Patch` (there is no major to stay on).
+///
+/// Note: `newest` resolves to the same result as `greatest` here. The Tags
+/// API does not expose per-tag publish dates (that would need an extra commit
+/// lookup per tag), so true publish-date ordering is intentionally not
+/// attempted — unlike the npm/crates.io/PyPI registries, whose responses
+/// already carry timestamps.
 fn select_from_tags(tags: &[Tag], current_req: &str, target: TargetLevel) -> ResolvedVersion {
     // Parse + sort ascending by semver.
     let mut versions: Vec<node_semver::Version> =

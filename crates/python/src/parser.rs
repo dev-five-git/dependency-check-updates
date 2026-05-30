@@ -151,13 +151,25 @@ impl PyProjectManifest {
         if let Some(project) = self.doc.get_mut("project").and_then(Item::as_table_mut) {
             if let Some(dep_array) = project.get_mut("dependencies").and_then(Item::as_array_mut) {
                 for item in dep_array.iter_mut() {
-                    if let Some(spec_str) = item.as_str() {
-                        if spec_str_matches_name(spec_str, &update.name) {
-                            let new_spec = replace_version_in_pep508(spec_str, &update.to);
-                            *item = toml_edit::Value::String(toml_edit::Formatted::new(new_spec));
-                            return;
-                        }
+                    let Some(spec_str) = item.as_str() else {
+                        continue;
+                    };
+                    if !spec_str_matches_name(spec_str, &update.name) {
+                        continue;
                     }
+                    let new_spec = replace_version_in_pep508(spec_str, &update.to);
+                    // Preserve the element's surrounding decor (leading newline +
+                    // indentation, trailing whitespace/comment) instead of
+                    // replacing the value wholesale — a fresh `Formatted::new`
+                    // carries empty decor, which collapses a multi-line
+                    // `dependencies` array onto a single line. Mirrors the
+                    // decor-preserving Poetry path below.
+                    if let toml_edit::Value::String(s) = item {
+                        let mut new_s = toml_edit::Formatted::new(new_spec);
+                        *new_s.decor_mut() = s.decor().clone();
+                        *s = new_s;
+                    }
+                    return;
                 }
             }
         }
@@ -479,6 +491,27 @@ dependencies = [
         let result = manifest.apply_updates(&updates);
         assert!(result.contains("requests>=2.31.0"));
         assert!(result.contains("flask~=2.0"));
+    }
+
+    #[test]
+    fn test_apply_updates_pep621_preserves_multiline_format() {
+        // Regression: replacing a PEP 621 array element must keep the element's
+        // surrounding decor (leading newline + indentation). Previously the
+        // value was swapped with a fresh `Formatted::new` carrying empty decor,
+        // which collapsed the whole `dependencies` array onto one line.
+        let toml = "[project]\nname = \"demo\"\ndependencies = [\n    \"pytz>=2024.1\",\n    \"requests>=2.30.0\",\n]\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "pytz".to_owned(),
+            section: DependencySection::ProjectDependencies,
+            from: ">=2024.1".to_owned(),
+            to: ">=2026.2".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        // Byte-for-byte identical except the bumped version — newlines and the
+        // 4-space indentation of every element are preserved.
+        let expected = "[project]\nname = \"demo\"\ndependencies = [\n    \"pytz>=2026.2\",\n    \"requests>=2.30.0\",\n]\n";
+        assert_eq!(result, expected);
     }
 
     #[test]

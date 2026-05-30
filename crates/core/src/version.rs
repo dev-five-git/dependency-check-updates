@@ -55,6 +55,23 @@ impl SelectableVersion for semver::Version {
     }
 }
 
+impl SelectableVersion for pep440_rs::Version {
+    /// `any_prerelease` covers alpha/beta/rc *and* dev releases — all of which
+    /// are "not a final stable release" for selection purposes.
+    fn is_prerelease(&self) -> bool {
+        self.any_prerelease()
+    }
+    fn major(&self) -> u64 {
+        self.release().first().copied().unwrap_or(0)
+    }
+    fn minor(&self) -> u64 {
+        self.release().get(1).copied().unwrap_or(0)
+    }
+    fn patch(&self) -> u64 {
+        self.release().get(2).copied().unwrap_or(0)
+    }
+}
+
 /// Select the best candidate for `target` from a pre-sorted (ascending)
 /// `all_versions` list.
 ///
@@ -260,5 +277,23 @@ mod tests {
         assert_eq!(nv.major(), 6);
         assert_eq!(nv.minor(), 7);
         assert_eq!(nv.patch(), 8);
+
+        let pv: pep440_rs::Version = "9.10.11".parse().unwrap();
+        assert!(!pv.is_prerelease());
+        assert_eq!(pv.major(), 9);
+        assert_eq!(pv.minor(), 10);
+        assert_eq!(pv.patch(), 11);
+
+        // PEP 440 pre/dev releases and short release tuples.
+        let pre: pep440_rs::Version = "2.0a1".parse().unwrap();
+        assert!(pre.is_prerelease());
+        assert_eq!(pre.major(), 2);
+        assert_eq!(pre.minor(), 0);
+        let dev: pep440_rs::Version = "1.0.dev0".parse().unwrap();
+        assert!(dev.is_prerelease());
+        let short: pep440_rs::Version = "5".parse().unwrap();
+        assert_eq!(short.major(), 5);
+        assert_eq!(short.minor(), 0);
+        assert_eq!(short.patch(), 0);
     }
 }

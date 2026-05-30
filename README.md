@@ -197,8 +197,10 @@ Usage: dcu [OPTIONS] [FILTER]...
 | `patch` | Only patch bumps (e.g., `1.0.1 → 1.0.2`) |
 | `minor` | Patch + minor bumps (e.g., `1.0.0 → 1.1.0`) |
 | `latest` | Latest **stable** version; prereleases are skipped (**default**) |
-| `newest` | Most recently published version by publish date |
+| `newest` | Most recently published version **by publish date** (npm `time`, crates.io `created_at`, PyPI upload time). For GitHub Actions this falls back to `greatest` — the Tags API exposes no per-tag dates. |
 | `greatest` | Highest version number, **including prereleases** |
+
+> All five targets apply to every ecosystem, including Python (`pyproject.toml` / `PyPI`), which resolves PEP 440 versions from the full release list.
 
 ### Examples
 

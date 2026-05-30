@@ -1,5 +1,6 @@
 //! `PyPI` registry client for looking up Python package versions.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use reqwest::Client;
@@ -9,7 +10,7 @@ use tracing::debug;
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, collect_task_results,
+    build_client, collect_task_results, select_version, strip_range_prefix,
 };
 
 /// `PyPI` registry client.
@@ -23,11 +24,25 @@ pub struct PyPiRegistry {
 #[derive(Debug, Deserialize)]
 struct PyPiResponse {
     info: PyPiInfo,
+    /// Map of version string → list of distribution files. Used to enumerate
+    /// every published release (for `--target` resolution) and their upload
+    /// times (for `newest`). Absent/partial responses default to empty, in
+    /// which case resolution falls back to `info.version`.
+    #[serde(default)]
+    releases: std::collections::HashMap<String, Vec<PyPiFile>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PyPiInfo {
     version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PyPiFile {
+    #[serde(default)]
+    upload_time_iso_8601: String,
+    #[serde(default)]
+    yanked: bool,
 }
 
 impl PyPiRegistry {
@@ -93,29 +108,70 @@ impl PyPiRegistry {
 
     /// Resolve the target version for a dependency.
     ///
+    /// Enumerates every published release from the `PyPI` `releases` map,
+    /// parses them with PEP 440 ordering, and applies the requested
+    /// [`TargetLevel`] via the shared selection algorithm. `newest` uses the
+    /// per-file `upload_time_iso_8601` timestamps. When `releases` is empty
+    /// (a minimal/legacy response), it falls back to the `PyPI`-reported
+    /// `info.version`.
+    ///
     /// # Errors
     ///
     /// Returns an error if the registry lookup fails.
     pub async fn resolve_version(
         &self,
         dep: &DependencySpec,
-        _target: TargetLevel,
+        target: TargetLevel,
     ) -> Result<ResolvedVersion, DcuError> {
         let info = self.fetch_package_info(&dep.name).await?;
 
+        // PyPI's `info.version` is the canonical latest stable; it doubles as
+        // the fallback for `Latest`/empty-list and unparseable `Minor`/`Patch`.
         let latest = Some(info.info.version.clone());
+
+        // (parsed PEP 440 version, max upload timestamp) for every release that
+        // has at least one non-yanked file and parses cleanly.
+        let mut candidates: Vec<(pep440_rs::Version, String)> = info
+            .releases
+            .iter()
+            .filter_map(|(ver_str, files)| {
+                if files.is_empty() || files.iter().all(|f| f.yanked) {
+                    return None;
+                }
+                let parsed = pep440_rs::Version::from_str(ver_str).ok()?;
+                let upload = files
+                    .iter()
+                    .map(|f| f.upload_time_iso_8601.clone())
+                    .max()
+                    .unwrap_or_default();
+                Some((parsed, upload))
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let versions: Vec<pep440_rs::Version> =
+            candidates.iter().map(|(v, _)| v.clone()).collect();
+
+        let selected = if target == TargetLevel::Newest {
+            // Most recently uploaded by date (ISO-8601 sorts chronologically),
+            // which can differ from the highest version number.
+            candidates
+                .iter()
+                .max_by(|a, b| a.1.cmp(&b.1))
+                .map(|(v, _)| v.to_string())
+                .or_else(|| versions.last().map(ToString::to_string))
+        } else {
+            let current = pep440_rs::Version::from_str(strip_range_prefix(&dep.current_req)).ok();
+            select_version(current.as_ref(), &versions, target, latest.clone(), latest.clone())
+        };
 
         debug!(
             package = %dep.name,
             current = %dep.current_req,
-            latest = ?latest,
+            selected = ?selected,
+            target = %target,
             "resolved PyPI version"
         );
-
-        // For Python, version resolution is simpler for MVP:
-        // Just report the latest version. PEP 440 version ordering
-        // is complex; for MVP we use the PyPI-reported latest.
-        let selected = latest.clone();
 
         Ok(ResolvedVersion { latest, selected })
     }
@@ -310,6 +366,86 @@ mod tests {
             .expect("resolve_version should succeed with normalized name");
 
         assert_eq!(result.selected, Some("1.2.3".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_patch_target() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        install_crypto_provider();
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/flask/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": "3.0.0"},
+                "releases": {
+                    "2.0.0": [{"upload_time_iso_8601": "2021-01-01T00:00:00Z", "yanked": false}],
+                    "2.0.5": [{"upload_time_iso_8601": "2021-06-01T00:00:00Z", "yanked": false}],
+                    "2.1.0": [{"upload_time_iso_8601": "2021-09-01T00:00:00Z", "yanked": false}],
+                    "3.0.0": [{"upload_time_iso_8601": "2022-01-01T00:00:00Z", "yanked": false}]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = PyPiRegistry::with_base_url(&mock_server.uri());
+        let dep = dependency_check_updates_core::DependencySpec {
+            name: "flask".to_owned(),
+            current_req: ">=2.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::ProjectDependencies,
+        };
+        // Patch: stay on 2.0.x → highest is 2.0.5 (no longer ignores target!).
+        let patch = registry
+            .resolve_version(&dep, dependency_check_updates_core::TargetLevel::Patch)
+            .await
+            .unwrap();
+        assert_eq!(patch.selected.as_deref(), Some("2.0.5"));
+        // Minor: stay on 2.x → highest is 2.1.0.
+        let minor = registry
+            .resolve_version(&dep, dependency_check_updates_core::TargetLevel::Minor)
+            .await
+            .unwrap();
+        assert_eq!(minor.selected.as_deref(), Some("2.1.0"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_version_newest_by_date() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        install_crypto_provider();
+
+        let mock_server = MockServer::start().await;
+        // 1.5.0 uploaded most recently though 2.0.0 is higher.
+        Mock::given(method("GET"))
+            .and(path("/requests/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": "2.0.0"},
+                "releases": {
+                    "1.0.0": [{"upload_time_iso_8601": "2022-01-01T00:00:00Z", "yanked": false}],
+                    "2.0.0": [{"upload_time_iso_8601": "2023-01-01T00:00:00Z", "yanked": false}],
+                    "1.5.0": [{"upload_time_iso_8601": "2024-06-01T00:00:00Z", "yanked": false}]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let registry = PyPiRegistry::with_base_url(&mock_server.uri());
+        let dep = dependency_check_updates_core::DependencySpec {
+            name: "requests".to_owned(),
+            current_req: ">=1.0.0".to_owned(),
+            section: dependency_check_updates_core::DependencySection::ProjectDependencies,
+        };
+        let newest = registry
+            .resolve_version(&dep, dependency_check_updates_core::TargetLevel::Newest)
+            .await
+            .unwrap();
+        assert_eq!(newest.selected.as_deref(), Some("1.5.0"));
+        let greatest = registry
+            .resolve_version(&dep, dependency_check_updates_core::TargetLevel::Greatest)
+            .await
+            .unwrap();
+        assert_eq!(greatest.selected.as_deref(), Some("2.0.0"));
     }
 
     #[test]

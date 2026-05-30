@@ -78,7 +78,7 @@ pub(crate) fn compute_updates(
         // intent to pin only at that granularity.
         let precision = count_version_segments(current_bare);
 
-        if precision < 3 && !is_plain_three_segment_version(selected) {
+        if precision < 3 && !is_plain_numeric_version(selected) {
             trace!(
                 package = %dep.name,
                 current = %dep.current_req,
@@ -156,18 +156,28 @@ fn count_version_segments(bare: &str) -> usize {
     numeric_part.split('.').filter(|s| !s.is_empty()).count()
 }
 
-fn is_plain_three_segment_version(version: &str) -> bool {
-    let mut parts = version.split('.');
-    matches!(
-        (parts.next(), parts.next(), parts.next(), parts.next()),
-        (Some(major), Some(minor), Some(patch), None)
-            if !major.is_empty()
-                && !minor.is_empty()
-                && !patch.is_empty()
-                && major.chars().all(|c| c.is_ascii_digit())
-                && minor.chars().all(|c| c.is_ascii_digit())
-                && patch.chars().all(|c| c.is_ascii_digit())
-    )
+/// Whether `version` is a plain numeric version — one or more dot-separated
+/// segments that are *all* ASCII digits, with no pre-release (`-…`) or build
+/// (`+…`) suffix.
+///
+/// Such versions are always safe to truncate to fewer segments (`5.1` → `5`,
+/// `4.0.0` → `4.0`): there is no pre-release tag that could be silently
+/// promoted into a stable-looking pin. This intentionally accepts clean
+/// two-segment stables like `5.1` (e.g. Django) — the previous
+/// exactly-three-segment check rejected them, which made `--target
+/// greatest/newest/minor/patch` silently skip such packages whenever the user
+/// pinned at <3-segment precision. Versions carrying a suffix
+/// (`4.0.0-beta.0`, `1.2.3+build`) return `false` so the caller refuses to
+/// truncate them.
+fn is_plain_numeric_version(version: &str) -> bool {
+    let mut any = false;
+    for segment in version.split('.') {
+        if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        any = true;
+    }
+    any
 }
 
 /// Truncate a version string to the given number of segments.
@@ -320,6 +330,68 @@ mod tests {
         )];
         let updates = compute_updates(&deps, &resolved);
         assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn test_is_plain_numeric_version() {
+        // Plain numeric versions of any segment count are truncatable.
+        assert!(is_plain_numeric_version("5"));
+        assert!(is_plain_numeric_version("5.1"));
+        assert!(is_plain_numeric_version("4.2"));
+        assert!(is_plain_numeric_version("4.0.0"));
+        assert!(is_plain_numeric_version("1.2.3.4"));
+        // Pre-release / build suffixes are NOT safe to truncate.
+        assert!(!is_plain_numeric_version("4.0.0-beta.0"));
+        assert!(!is_plain_numeric_version("1.2.3+build"));
+        assert!(!is_plain_numeric_version("5.1-rc.1"));
+        // Malformed / empty segments.
+        assert!(!is_plain_numeric_version(""));
+        assert!(!is_plain_numeric_version("5."));
+        assert!(!is_plain_numeric_version(".5"));
+        assert!(!is_plain_numeric_version("v5"));
+    }
+
+    #[test]
+    fn test_compute_updates_two_segment_selected_truncatable() {
+        // Django-style 2-segment versioning: current pinned at 2-segment
+        // precision, registry resolves a higher 2-segment version (e.g. via
+        // `-t greatest`/`newest`). The clean 2-segment stable MUST be applied,
+        // not silently skipped as "cannot be safely truncated".
+        let deps = vec![DependencySpec {
+            name: "django".to_owned(),
+            current_req: ">=4.2".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("5.1".to_owned()),
+                selected: Some("5.1".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates.len(), 1, "2-segment stable must update, got: {updates:?}");
+        assert_eq!(updates[0].to, ">=5.1");
+    }
+
+    #[test]
+    fn test_compute_updates_two_segment_selected_no_prefix() {
+        // Same as above but a bare 2-segment pin with no range operator.
+        let deps = vec![DependencySpec {
+            name: "django".to_owned(),
+            current_req: "4.2".to_owned(),
+            section: DependencySection::Dependencies,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some("5.1".to_owned()),
+                selected: Some("5.1".to_owned()),
+            }),
+        )];
+        let updates = compute_updates(&deps, &resolved);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].to, "5.1");
     }
 
     #[test]
