@@ -220,223 +220,106 @@ mod tests {
     use dependency_check_updates_core::{
         DcuError, DependencySection, DependencySpec, ResolvedVersion,
     };
+    use rstest::rstest;
 
-    #[test]
-    fn test_compute_updates_basic() {
-        let deps = vec![DependencySpec {
-            name: "react".to_owned(),
-            current_req: "^17.0.0".to_owned(),
+    /// Owned `(idx, resolved)` batch handed to [`compute_updates`].
+    type ResolvedInput = Vec<(usize, Result<ResolvedVersion, DcuError>)>;
+
+    /// Build a `Dependencies`-section spec.
+    fn dep(name: &str, current_req: &str) -> DependencySpec {
+        DependencySpec {
+            name: name.to_owned(),
+            current_req: current_req.to_owned(),
             section: DependencySection::Dependencies,
-        }];
+        }
+    }
+
+    /// Build the single-dependency input + resolved batch shared by the bulk of
+    /// the `compute_updates` cases (`name` is irrelevant to the result).
+    fn single(current: &str, latest: &str, selected: &str) -> (Vec<DependencySpec>, ResolvedInput) {
+        let deps = vec![dep("pkg", current)];
         let resolved = vec![(
             0,
             Ok(ResolvedVersion {
-                latest: Some("18.2.0".to_owned()),
-                selected: Some("18.2.0".to_owned()),
+                latest: Some(latest.to_owned()),
+                selected: Some(selected.to_owned()),
             }),
         )];
+        (deps, resolved)
+    }
+
+    #[rstest]
+    // current, registry latest, registry selected, expected `to` (None = skip).
+    #[case::basic("^17.0.0", "18.2.0", "18.2.0", Some("^18.2.0"))]
+    #[case::already_up_to_date("^18.2.0", "18.2.0", "18.2.0", None)]
+    #[case::preserves_tilde("~4.17.0", "4.17.21", "4.17.21", Some("~4.17.21"))]
+    #[case::preserves_gte(">=1.0.0", "2.0.0", "2.0.0", Some(">=2.0.0"))]
+    #[case::no_prefix("1.0.0", "2.0.0", "2.0.0", Some("2.0.0"))]
+    #[case::prerelease_not_truncated_to_stable("3.1", "3.1.0", "4.0.0-beta.0", None)]
+    #[case::truncates_plain_three_segment("3.1", "4.0.0", "4.0.0", Some("4.0"))]
+    #[case::two_segment_selected_gte(">=4.2", "5.1", "5.1", Some(">=5.1"))]
+    #[case::two_segment_selected_no_prefix("4.2", "5.1", "5.1", Some("5.1"))]
+    #[case::short_version_upgrade("v5", "6.0.0", "6.0.0", Some("v6"))]
+    #[case::blocks_downgrade_short_version("v5", "4.0.0", "4.0.0", None)]
+    #[case::respects_major_minor_precision("0.6", "0.6.5", "0.6.5", None)]
+    #[case::major_minor_bumps_minor("0.6", "0.7.2", "0.7.2", Some("0.7"))]
+    #[case::major_only_bumps_major("1", "2.5.0", "2.5.0", Some("2"))]
+    #[case::major_only_stays_same("1", "1.5.0", "1.5.0", None)]
+    #[case::full_precision_uses_full_version("1.0.0", "1.0.228", "1.0.228", Some("1.0.228"))]
+    #[case::strips_build_metadata("0.25.10", "0.25.11+spec-1.1.0", "0.25.11+spec-1.1.0", Some("0.25.11"))]
+    #[case::blocks_downgrade_prerelease_to_stable("2.0.0-rc.37", "1.1.20", "1.1.20", None)]
+    #[case::blocks_downgrade_same_major("2.5.0", "2.4.0", "2.4.0", None)]
+    #[case::allows_prerelease_to_prerelease("2.0.0-rc.37", "2.0.0-rc.40", "2.0.0-rc.40", Some("2.0.0-rc.40"))]
+    #[case::allows_beta_to_newer_beta("4.0.0-beta.0", "4.0.0-beta.2", "4.0.0-beta.2", Some("4.0.0-beta.2"))]
+    #[case::allows_prerelease_to_stable("2.0.0-rc.37", "2.0.0", "2.0.0", Some("2.0.0"))]
+    #[case::equal_semver_skipped("1.2.3", "1.2.3", "1.2.3", None)]
+    fn compute_updates_single(
+        #[case] current: &str,
+        #[case] latest: &str,
+        #[case] selected: &str,
+        #[case] expected_to: Option<&str>,
+    ) {
+        let (deps, resolved) = single(current, latest, selected);
         let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].name, "react");
-        assert_eq!(updates[0].to, "^18.2.0");
+        match expected_to {
+            Some(to) => {
+                assert_eq!(
+                    updates.len(),
+                    1,
+                    "expected one update for {current} -> {selected}, got: {updates:?}"
+                );
+                assert_eq!(updates[0].to, to);
+            }
+            None => assert!(
+                updates.is_empty(),
+                "expected no update for {current} -> {selected}, got: {updates:?}"
+            ),
+        }
     }
 
     #[test]
-    fn test_compute_updates_already_up_to_date() {
-        let deps = vec![DependencySpec {
-            name: "react".to_owned(),
-            current_req: "^18.2.0".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("18.2.0".to_owned()),
-                selected: Some("18.2.0".to_owned()),
-            }),
-        )];
+    fn compute_updates_sets_package_name() {
+        let (deps, resolved) = single("^17.0.0", "18.2.0", "18.2.0");
         let updates = compute_updates(&deps, &resolved);
-        assert!(updates.is_empty());
+        assert_eq!(updates[0].name, "pkg");
     }
 
     #[test]
-    fn test_compute_updates_preserves_tilde_prefix() {
-        let deps = vec![DependencySpec {
-            name: "lodash".to_owned(),
-            current_req: "~4.17.0".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("4.17.21".to_owned()),
-                selected: Some("4.17.21".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].to, "~4.17.21");
-    }
-
-    #[test]
-    fn test_compute_updates_preserves_gte_prefix() {
-        let deps = vec![DependencySpec {
-            name: "pkg".to_owned(),
-            current_req: ">=1.0.0".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("2.0.0".to_owned()),
-                selected: Some("2.0.0".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates[0].to, ">=2.0.0");
-    }
-
-    #[test]
-    fn test_compute_updates_no_prefix() {
-        let deps = vec![DependencySpec {
-            name: "pkg".to_owned(),
-            current_req: "1.0.0".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("2.0.0".to_owned()),
-                selected: Some("2.0.0".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates[0].to, "2.0.0");
-    }
-
-    #[test]
-    fn test_compute_updates_does_not_truncate_prerelease_to_stable() {
-        let deps = vec![DependencySpec {
-            name: "pkg".to_owned(),
-            current_req: "3.1".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("3.1.0".to_owned()),
-                selected: Some("4.0.0-beta.0".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert!(updates.is_empty());
-    }
-
-    #[test]
-    fn test_is_plain_numeric_version() {
-        // Plain numeric versions of any segment count are truncatable.
-        assert!(is_plain_numeric_version("5"));
-        assert!(is_plain_numeric_version("5.1"));
-        assert!(is_plain_numeric_version("4.2"));
-        assert!(is_plain_numeric_version("4.0.0"));
-        assert!(is_plain_numeric_version("1.2.3.4"));
-        // Pre-release / build suffixes are NOT safe to truncate.
-        assert!(!is_plain_numeric_version("4.0.0-beta.0"));
-        assert!(!is_plain_numeric_version("1.2.3+build"));
-        assert!(!is_plain_numeric_version("5.1-rc.1"));
-        // Malformed / empty segments.
-        assert!(!is_plain_numeric_version(""));
-        assert!(!is_plain_numeric_version("5."));
-        assert!(!is_plain_numeric_version(".5"));
-        assert!(!is_plain_numeric_version("v5"));
-    }
-
-    #[test]
-    fn test_compute_updates_two_segment_selected_truncatable() {
-        // Django-style 2-segment versioning: current pinned at 2-segment
-        // precision, registry resolves a higher 2-segment version (e.g. via
-        // `-t greatest`/`newest`). The clean 2-segment stable MUST be applied,
-        // not silently skipped as "cannot be safely truncated".
-        let deps = vec![DependencySpec {
-            name: "django".to_owned(),
-            current_req: ">=4.2".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("5.1".to_owned()),
-                selected: Some("5.1".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates.len(), 1, "2-segment stable must update, got: {updates:?}");
-        assert_eq!(updates[0].to, ">=5.1");
-    }
-
-    #[test]
-    fn test_compute_updates_two_segment_selected_no_prefix() {
-        // Same as above but a bare 2-segment pin with no range operator.
-        let deps = vec![DependencySpec {
-            name: "django".to_owned(),
-            current_req: "4.2".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("5.1".to_owned()),
-                selected: Some("5.1".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].to, "5.1");
-    }
-
-    #[test]
-    fn test_compute_updates_truncates_plain_three_segment_version() {
-        let deps = vec![DependencySpec {
-            name: "pkg".to_owned(),
-            current_req: "3.1".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("4.0.0".to_owned()),
-                selected: Some("4.0.0".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates[0].to, "4.0");
-    }
-
-    #[test]
-    fn test_compute_updates_skips_failed_resolution() {
-        let deps = vec![DependencySpec {
-            name: "missing".to_owned(),
-            current_req: "^1.0.0".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved: Vec<(usize, Result<ResolvedVersion, DcuError>)> = vec![(
+    fn compute_updates_skips_failed_resolution() {
+        let deps = vec![dep("missing", "^1.0.0")];
+        let resolved: ResolvedInput = vec![(
             0,
             Err(DcuError::RegistryLookup {
                 package: "missing".to_owned(),
                 detail: "not found".to_owned(),
             }),
         )];
-        let updates = compute_updates(&deps, &resolved);
-        assert!(updates.is_empty());
+        assert!(compute_updates(&deps, &resolved).is_empty());
     }
 
     #[test]
-    fn test_compute_updates_skips_no_selected() {
-        let deps = vec![DependencySpec {
-            name: "pkg".to_owned(),
-            current_req: "^1.0.0".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
+    fn compute_updates_skips_no_selected() {
+        let deps = vec![dep("pkg", "^1.0.0")];
         let resolved = vec![(
             0,
             Ok(ResolvedVersion {
@@ -444,132 +327,19 @@ mod tests {
                 selected: None,
             }),
         )];
-        let updates = compute_updates(&deps, &resolved);
-        assert!(updates.is_empty());
+        assert!(compute_updates(&deps, &resolved).is_empty());
     }
 
     #[test]
-    fn test_filter_deps_no_filters() {
+    fn compute_updates_multiple_deps() {
         let deps = vec![
-            DependencySpec {
-                name: "react".to_owned(),
-                current_req: "^18.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
-            DependencySpec {
-                name: "lodash".to_owned(),
-                current_req: "^4.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
-        ];
-        let result = filter_deps(&deps, &[], &[]);
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn test_filter_deps_include() {
-        let deps = vec![
-            DependencySpec {
-                name: "react".to_owned(),
-                current_req: "^18.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
-            DependencySpec {
-                name: "lodash".to_owned(),
-                current_req: "^4.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
-        ];
-        let include = vec!["react".to_owned()];
-        let result = filter_deps(&deps, &include, &[]);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "react");
-    }
-
-    #[test]
-    fn test_filter_deps_exclude() {
-        let deps = vec![
-            DependencySpec {
-                name: "react".to_owned(),
-                current_req: "^18.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
-            DependencySpec {
-                name: "lodash".to_owned(),
-                current_req: "^4.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
-        ];
-        let exclude = vec!["lodash".to_owned()];
-        let result = filter_deps(&deps, &[], &exclude);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "react");
-    }
-
-    #[test]
-    fn test_filter_deps_include_and_exclude() {
-        let deps = vec![
-            DependencySpec {
-                name: "react".to_owned(),
-                current_req: "^18.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
-            DependencySpec {
-                name: "react-dom".to_owned(),
-                current_req: "^18.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
-            DependencySpec {
-                name: "lodash".to_owned(),
-                current_req: "^4.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
-        ];
-        let include = vec!["react".to_owned()];
-        let exclude = vec!["react-dom".to_owned()];
-        let result = filter_deps(&deps, &include, &exclude);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "react");
-    }
-
-    #[test]
-    fn test_filter_deps_partial_match() {
-        let deps = vec![
-            DependencySpec {
-                name: "@types/react".to_owned(),
-                current_req: "^18.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
-            DependencySpec {
-                name: "lodash".to_owned(),
-                current_req: "^4.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
-        ];
-        let include = vec!["react".to_owned()];
-        let result = filter_deps(&deps, &include, &[]);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "@types/react");
-    }
-
-    #[test]
-    fn test_compute_updates_multiple_deps() {
-        let deps = vec![
-            DependencySpec {
-                name: "a".to_owned(),
-                current_req: "^1.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
+            dep("a", "^1.0.0"),
             DependencySpec {
                 name: "b".to_owned(),
                 current_req: "~2.0.0".to_owned(),
                 section: DependencySection::DevDependencies,
             },
-            DependencySpec {
-                name: "c".to_owned(),
-                current_req: "^3.0.0".to_owned(),
-                section: DependencySection::Dependencies,
-            },
+            dep("c", "^3.0.0"),
         ];
         let resolved = vec![
             (
@@ -604,323 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pad_to_three_segments() {
-        assert_eq!(pad_to_three_segments("5"), "5.0.0");
-        assert_eq!(pad_to_three_segments("5.1"), "5.1.0");
-        assert_eq!(pad_to_three_segments("5.1.0"), "5.1.0");
-        assert_eq!(pad_to_three_segments("5.1.2.3"), "5.1.2.3"); // 4+ left as-is
-        assert_eq!(pad_to_three_segments("5.1.0-rc.1"), "5.1.0-rc.1");
-        assert_eq!(pad_to_three_segments("1.2-beta"), "1.2.0-beta");
-        assert_eq!(pad_to_three_segments("5-beta"), "5.0.0-beta");
-        assert_eq!(pad_to_three_segments(""), "");
-    }
-
-    #[test]
-    fn test_compute_updates_blocks_downgrade_short_version() {
-        // Regression: `v5` should not be downgraded to `v4` even though semver
-        // parse of bare "5" fails — the padded path now catches this.
-        let deps = vec![DependencySpec {
-            name: "actions/checkout".to_owned(),
-            current_req: "v5".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("4.0.0".to_owned()),
-                selected: Some("4.0.0".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert!(
-            updates.is_empty(),
-            "must not downgrade v5 → v4, got: {updates:?}"
-        );
-    }
-
-    #[test]
-    fn test_compute_updates_short_version_upgrade() {
-        // v5 → registry returns 6.0.0 → output v6 (precision-truncated).
-        let deps = vec![DependencySpec {
-            name: "actions/checkout".to_owned(),
-            current_req: "v5".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("6.0.0".to_owned()),
-                selected: Some("6.0.0".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].to, "v6");
-    }
-
-    #[test]
-    fn test_count_version_segments() {
-        assert_eq!(count_version_segments("1"), 1);
-        assert_eq!(count_version_segments("1.0"), 2);
-        assert_eq!(count_version_segments("1.0.0"), 3);
-        assert_eq!(count_version_segments("1.0.0-beta.1"), 3);
-        assert_eq!(count_version_segments(""), 0);
-    }
-
-    #[test]
-    fn test_truncate_version() {
-        assert_eq!(truncate_version("1.2.3+build.7", 0), "1.2.3"); // segments=0 keeps stripped version
-        assert_eq!(truncate_version("1.2.3", 2), "1.2");
-        assert_eq!(truncate_version("1.2.3", 3), "1.2.3");
-        assert_eq!(truncate_version("1.2.3", 1), "1");
-        assert_eq!(truncate_version("1.2", 3), "1.2"); // cannot extend
-        assert_eq!(truncate_version("0.25.11+spec-1.1.0", 3), "0.25.11"); // strip build metadata
-        assert_eq!(truncate_version("1.2.3-rc.1", 3), "1.2.3-rc.1"); // preserve pre-release
-        assert_eq!(truncate_version("1.2.3-rc.1", 2), "1.2"); // drop pre-release when truncating
-    }
-
-    #[test]
-    fn test_compute_updates_respects_major_minor_precision() {
-        // current = "0.6" (2 segments), latest = "0.6.5" → no update needed
-        let deps = vec![DependencySpec {
-            name: "wiremock".to_owned(),
-            current_req: "0.6".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("0.6.5".to_owned()),
-                selected: Some("0.6.5".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert!(updates.is_empty(), "0.6 should not be rewritten to 0.6.5");
-    }
-
-    #[test]
-    fn test_compute_updates_major_minor_bumps_minor() {
-        // current = "0.6" (2 segments), latest = "0.7.2" → update to "0.7"
-        let deps = vec![DependencySpec {
-            name: "wiremock".to_owned(),
-            current_req: "0.6".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("0.7.2".to_owned()),
-                selected: Some("0.7.2".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].to, "0.7");
-    }
-
-    #[test]
-    fn test_compute_updates_major_only_bumps_major() {
-        // current = "1" (1 segment), latest = "2.5.0" → update to "2"
-        let deps = vec![DependencySpec {
-            name: "pkg".to_owned(),
-            current_req: "1".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("2.5.0".to_owned()),
-                selected: Some("2.5.0".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].to, "2");
-    }
-
-    #[test]
-    fn test_compute_updates_major_only_stays_same() {
-        // current = "1" (1 segment), latest = "1.5.0" → no update
-        let deps = vec![DependencySpec {
-            name: "pkg".to_owned(),
-            current_req: "1".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("1.5.0".to_owned()),
-                selected: Some("1.5.0".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert!(updates.is_empty());
-    }
-
-    #[test]
-    fn test_compute_updates_full_precision_uses_full_version() {
-        // current = "1.0.0" (3 segments), latest = "1.0.228" → update to "1.0.228"
-        let deps = vec![DependencySpec {
-            name: "serde".to_owned(),
-            current_req: "1.0.0".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("1.0.228".to_owned()),
-                selected: Some("1.0.228".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].to, "1.0.228");
-    }
-
-    #[test]
-    fn test_compute_updates_strips_build_metadata() {
-        // current = "0.25.10" (3 segments), latest = "0.25.11+spec-1.1.0" → "0.25.11" (no +metadata)
-        let deps = vec![DependencySpec {
-            name: "toml_edit".to_owned(),
-            current_req: "0.25.10".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("0.25.11+spec-1.1.0".to_owned()),
-                selected: Some("0.25.11+spec-1.1.0".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].to, "0.25.11");
-    }
-
-    #[test]
-    fn test_compute_updates_blocks_downgrade_from_prerelease_to_stable() {
-        // Regression test for the sea-orm 2.0.0-rc.37 -> 1.1.20 bug.
-        // When the current version is a higher prerelease (2.0.0-rc.37) and
-        // the registry filtering returns an older stable (1.1.20), the
-        // safety net MUST skip this update instead of suggesting a downgrade.
-        let deps = vec![DependencySpec {
-            name: "sea-orm".to_owned(),
-            current_req: "2.0.0-rc.37".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("1.1.20".to_owned()),
-                selected: Some("1.1.20".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert!(
-            updates.is_empty(),
-            "must not suggest downgrade from 2.0.0-rc.37 to 1.1.20, got: {updates:?}"
-        );
-    }
-
-    #[test]
-    fn test_compute_updates_blocks_downgrade_same_major() {
-        // Current is newer stable; registry returned something older. Skip.
-        let deps = vec![DependencySpec {
-            name: "pkg".to_owned(),
-            current_req: "2.5.0".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("2.4.0".to_owned()),
-                selected: Some("2.4.0".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert!(updates.is_empty(), "must not downgrade 2.5.0 -> 2.4.0");
-    }
-
-    #[test]
-    fn test_compute_updates_allows_prerelease_to_prerelease_upgrade() {
-        // Current: 2.0.0-rc.37, Selected: 2.0.0-rc.40 → valid upgrade.
-        let deps = vec![DependencySpec {
-            name: "sea-orm".to_owned(),
-            current_req: "2.0.0-rc.37".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("2.0.0-rc.40".to_owned()),
-                selected: Some("2.0.0-rc.40".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].to, "2.0.0-rc.40");
-    }
-
-    #[test]
-    fn test_compute_updates_allows_beta_to_newer_beta_upgrade() {
-        let deps = vec![DependencySpec {
-            name: "pkg".to_owned(),
-            current_req: "4.0.0-beta.0".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("4.0.0-beta.2".to_owned()),
-                selected: Some("4.0.0-beta.2".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].to, "4.0.0-beta.2");
-    }
-
-    #[test]
-    fn test_compute_updates_allows_prerelease_to_stable_upgrade() {
-        // Current: 2.0.0-rc.37 (prerelease), Selected: 2.0.0 (stable) → semver: stable > prerelease of same version.
-        let deps = vec![DependencySpec {
-            name: "sea-orm".to_owned(),
-            current_req: "2.0.0-rc.37".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("2.0.0".to_owned()),
-                selected: Some("2.0.0".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].to, "2.0.0");
-    }
-
-    #[test]
-    fn test_compute_updates_equal_semver_skipped() {
-        // Exact same version: must skip (not a "downgrade", but not an upgrade either).
-        let deps = vec![DependencySpec {
-            name: "pkg".to_owned(),
-            current_req: "1.2.3".to_owned(),
-            section: DependencySection::Dependencies,
-        }];
-        let resolved = vec![(
-            0,
-            Ok(ResolvedVersion {
-                latest: Some("1.2.3".to_owned()),
-                selected: Some("1.2.3".to_owned()),
-            }),
-        )];
-        let updates = compute_updates(&deps, &resolved);
-        assert!(updates.is_empty());
-    }
-
-    #[test]
-    fn test_compute_updates_preserves_section() {
+    fn compute_updates_preserves_section() {
         let deps = vec![DependencySpec {
             name: "a".to_owned(),
             current_req: "^1.0.0".to_owned(),
@@ -936,5 +390,86 @@ mod tests {
         let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates[0].section, DependencySection::DevDependencies);
         assert_eq!(updates[0].from, "^1.0.0");
+    }
+
+    #[rstest]
+    // dependency names, include filters, exclude filters, expected surviving names.
+    #[case::no_filters(&["react", "lodash"], &[], &[], &["react", "lodash"])]
+    #[case::include(&["react", "lodash"], &["react"], &[], &["react"])]
+    #[case::exclude(&["react", "lodash"], &[], &["lodash"], &["react"])]
+    #[case::include_and_exclude(&["react", "react-dom", "lodash"], &["react"], &["react-dom"], &["react"])]
+    #[case::partial_match(&["@types/react", "lodash"], &["react"], &[], &["@types/react"])]
+    fn filter_deps_cases(
+        #[case] names: &[&str],
+        #[case] include: &[&str],
+        #[case] exclude: &[&str],
+        #[case] expected: &[&str],
+    ) {
+        let deps: Vec<DependencySpec> = names.iter().map(|n| dep(n, "^1.0.0")).collect();
+        let include: Vec<String> = include.iter().map(|s| (*s).to_owned()).collect();
+        let exclude: Vec<String> = exclude.iter().map(|s| (*s).to_owned()).collect();
+        let result = filter_deps(&deps, &include, &exclude);
+        let got: Vec<&str> = result.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(got, expected);
+    }
+
+    #[rstest]
+    #[case("5", "5.0.0")]
+    #[case("5.1", "5.1.0")]
+    #[case("5.1.0", "5.1.0")]
+    #[case("5.1.2.3", "5.1.2.3")] // 4+ segments left as-is
+    #[case("5.1.0-rc.1", "5.1.0-rc.1")]
+    #[case("1.2-beta", "1.2.0-beta")]
+    #[case("5-beta", "5.0.0-beta")]
+    #[case("", "")]
+    fn pad_to_three_segments_cases(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(pad_to_three_segments(input), expected);
+    }
+
+    #[rstest]
+    #[case("1", 1)]
+    #[case("1.0", 2)]
+    #[case("1.0.0", 3)]
+    #[case("1.0.0-beta.1", 3)]
+    #[case("", 0)]
+    fn count_version_segments_cases(#[case] input: &str, #[case] expected: usize) {
+        assert_eq!(count_version_segments(input), expected);
+    }
+
+    #[rstest]
+    #[case("1.2.3+build.7", 0, "1.2.3")] // segments=0 keeps stripped version
+    #[case("1.2.3", 2, "1.2")]
+    #[case("1.2.3", 3, "1.2.3")]
+    #[case("1.2.3", 1, "1")]
+    #[case("1.2", 3, "1.2")] // cannot extend
+    #[case("0.25.11+spec-1.1.0", 3, "0.25.11")] // strip build metadata
+    #[case("1.2.3-rc.1", 3, "1.2.3-rc.1")] // preserve pre-release
+    #[case("1.2.3-rc.1", 2, "1.2")] // drop pre-release when truncating
+    fn truncate_version_cases(
+        #[case] version: &str,
+        #[case] segments: usize,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(truncate_version(version, segments), expected);
+    }
+
+    #[rstest]
+    // Plain numeric versions of any segment count are truncatable.
+    #[case("5", true)]
+    #[case("5.1", true)]
+    #[case("4.2", true)]
+    #[case("4.0.0", true)]
+    #[case("1.2.3.4", true)]
+    // Pre-release / build suffixes are NOT safe to truncate.
+    #[case("4.0.0-beta.0", false)]
+    #[case("1.2.3+build", false)]
+    #[case("5.1-rc.1", false)]
+    // Malformed / empty segments.
+    #[case("", false)]
+    #[case("5.", false)]
+    #[case(".5", false)]
+    #[case("v5", false)]
+    fn is_plain_numeric_version_cases(#[case] input: &str, #[case] expected: bool) {
+        assert_eq!(is_plain_numeric_version(input), expected);
     }
 }

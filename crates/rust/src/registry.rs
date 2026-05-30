@@ -58,14 +58,14 @@ impl CratesIoRegistry {
 
     /// Fetch all versions of a crate from crates.io.
     async fn fetch_versions(&self, name: &str) -> Result<Vec<CrateVersion>, DcuError> {
+        // `acquire` only errors once the semaphore is closed; this registry
+        // never closes its semaphore, so success is the sole reachable path
+        // (mirrors `build_client`'s infallible-by-construction `expect`).
         let _permit = self
             .semaphore
             .acquire()
             .await
-            .map_err(|e| DcuError::RegistryLookup {
-                package: name.to_owned(),
-                detail: format!("semaphore error: {e}"),
-            })?;
+            .expect("semaphore is never closed");
 
         let url = format!("{}/crates/{name}/versions", self.base_url);
         debug!(crate_name = name, %url, "fetching crate versions");
@@ -235,7 +235,18 @@ fn parse_base_version(req_str: &str) -> Option<semver::Version> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dependency_check_updates_core::DependencySection;
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// Shared TLS setup for every async wiremock test. Invoked at the top of
+    /// each `#[rstest] #[tokio::test]` body — wrapping it in a typed
+    /// `#[fixture]` adds a unit-typed binding that the project's
+    /// pedantic-clippy gate (`-D warnings`) rejects as either an underscore
+    /// or unused variable. A plain shared helper preserves the
+    /// "repeated setup" intent without that friction.
     fn install_tls_provider() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
@@ -249,317 +260,239 @@ mod tests {
         v
     }
 
-    #[test]
-    fn test_parse_base_version_caret() {
-        let v = parse_base_version("^1.2.3").unwrap();
-        assert_eq!((v.major, v.minor, v.patch), (1, 2, 3));
+    fn serde_dep(current_req: &str) -> DependencySpec {
+        DependencySpec {
+            name: "serde".to_owned(),
+            current_req: current_req.to_owned(),
+            section: DependencySection::Dependencies,
+        }
+    }
+
+    async fn mock_versions_endpoint(
+        server: &MockServer,
+        crate_name: &str,
+        body: serde_json::Value,
+    ) {
+        Mock::given(method("GET"))
+            .and(path(format!("/crates/{crate_name}/versions")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    #[rstest]
+    #[case::caret("^1.2.3", (1, 2, 3))]
+    #[case::tilde("~1.2.3", (1, 2, 3))]
+    fn parse_base_version_cases(#[case] req: &str, #[case] expected: (u64, u64, u64)) {
+        let v = parse_base_version(req).unwrap();
+        assert_eq!((v.major, v.minor, v.patch), expected);
+    }
+
+    /// Pure-function `select_version` cases. `expected_eq` and `expected_ne`
+    /// are independent: when `Some`, the assertion runs; when `None`, it is
+    /// skipped. This faithfully preserves the original mix of `assert_eq!` /
+    /// `assert_ne!` / both per test, with no added or dropped assertions.
+    #[rstest]
+    #[case::select_latest("^1.0", "2.0.0", &["1.0.0", "1.5.0", "2.0.0"], TargetLevel::Latest, Some("2.0.0"), None)]
+    #[case::select_minor("^1.0.0", "2.0.0", &["1.0.0", "1.5.0", "2.0.0"], TargetLevel::Minor, Some("1.5.0"), None)]
+    #[case::select_patch("^1.0.0", "2.0.0", &["1.0.0", "1.0.5", "1.1.0", "2.0.0"], TargetLevel::Patch, Some("1.0.5"), None)]
+    #[case::skip_prerelease("^1.0.0", "1.0.0", &["1.0.0", "2.0.0-rc.1"], TargetLevel::Latest, Some("1.0.0"), None)]
+    #[case::greatest_includes_prerelease("^1.0.0", "1.0.0", &["1.0.0", "2.0.0-rc.1"], TargetLevel::Greatest, Some("2.0.0-rc.1"), None)]
+    #[case::newest_includes_prerelease("^1.0.0", "1.0.0", &["1.0.0", "2.0.0-rc.1"], TargetLevel::Newest, Some("2.0.0-rc.1"), None)]
+    // Current 2.0.0-rc.37; 3.0.0-alpha.1 (different train) must NOT be picked.
+    #[case::tail_ignores_unrelated_prereleases("2.0.0-rc.37", "1.1.20", &["1.1.20", "2.0.0-rc.37", "3.0.0-alpha.1"], TargetLevel::Latest, None, Some("3.0.0-alpha.1"))]
+    // Stable from any train is preferred over staying on a prerelease.
+    #[case::picks_higher_stable_major("2.0.0-rc.37", "3.0.0", &["1.1.20", "2.0.0-rc.37", "3.0.0"], TargetLevel::Latest, Some("3.0.0"), None)]
+    // Unrelated prerelease skipped, but cross-train stable picked.
+    #[case::stable_wins_over_unrelated_prerelease("2.0.0-rc.37", "3.0.0", &["1.1.20", "2.0.0-rc.37", "3.0.0-alpha.1", "3.0.0"], TargetLevel::Latest, Some("3.0.0"), None)]
+    // When same-train stable available, pick it (stable > prerelease).
+    #[case::tail_jumps_to_stable("2.0.0-rc.37", "2.0.0", &["1.1.20", "2.0.0-rc.37", "2.0.0-rc.40", "2.0.0"], TargetLevel::Latest, Some("2.0.0"), None)]
+    // sea-orm regression: NOT 1.1.20 (downgrade); self (2.0.0-rc.37) is fine.
+    #[case::sea_orm_regression("2.0.0-rc.37", "1.1.20", &["1.1.20", "2.0.0-rc.37"], TargetLevel::Latest, Some("2.0.0-rc.37"), Some("1.1.20"))]
+    // Stable current never picks prereleases (preserves stable-user behavior).
+    #[case::stable_current_excludes_prerelease("1.0.0", "1.0.0", &["1.0.0", "2.0.0-rc.1"], TargetLevel::Latest, Some("1.0.0"), None)]
+    #[case::empty_versions("^1.0.0", "1.0.0", &[], TargetLevel::Latest, Some("1.0.0"), None)]
+    #[case::minor_unparseable_falls_back("*", "2.0.0", &["1.0.0", "2.0.0"], TargetLevel::Minor, Some("2.0.0"), None)]
+    #[case::patch_unparseable_falls_back("*", "2.0.0", &["1.0.0", "2.0.0"], TargetLevel::Patch, Some("2.0.0"), None)]
+    fn select_version_cases(
+        #[case] req: &str,
+        #[case] latest: &str,
+        #[case] versions: &[&str],
+        #[case] target: TargetLevel,
+        #[case] expected_eq: Option<&str>,
+        #[case] expected_ne: Option<&str>,
+    ) {
+        let latest_owned = latest.to_owned();
+        let versions = make_versions(versions);
+        let result = select_version(req, Some(&latest_owned), &versions, target);
+        if let Some(eq) = expected_eq {
+            assert_eq!(result.as_deref(), Some(eq), "expected_eq mismatch");
+        }
+        if let Some(ne) = expected_ne {
+            assert_ne!(result.as_deref(), Some(ne), "expected_ne violated");
+        }
     }
 
     #[test]
-    fn test_parse_base_version_tilde() {
-        let v = parse_base_version("~1.2.3").unwrap();
-        assert_eq!((v.major, v.minor, v.patch), (1, 2, 3));
+    fn new_creates_registry() {
+        install_tls_provider();
+        let _registry = CratesIoRegistry::new();
     }
 
     #[test]
-    fn test_select_latest() {
-        let latest = "2.0.0".to_owned();
-        let versions = make_versions(&["1.0.0", "1.5.0", "2.0.0"]);
-        let result = select_version("^1.0", Some(&latest), &versions, TargetLevel::Latest);
-        assert_eq!(result, Some("2.0.0".to_owned()));
+    fn default_creates_registry() {
+        install_tls_provider();
+        let _registry = CratesIoRegistry::default();
     }
 
-    #[test]
-    fn test_select_minor() {
-        let latest = "2.0.0".to_owned();
-        let versions = make_versions(&["1.0.0", "1.5.0", "2.0.0"]);
-        let result = select_version("^1.0.0", Some(&latest), &versions, TargetLevel::Minor);
-        assert_eq!(result, Some("1.5.0".to_owned()));
-    }
-
-    #[test]
-    fn test_select_patch() {
-        let latest = "2.0.0".to_owned();
-        let versions = make_versions(&["1.0.0", "1.0.5", "1.1.0", "2.0.0"]);
-        let result = select_version("^1.0.0", Some(&latest), &versions, TargetLevel::Patch);
-        assert_eq!(result, Some("1.0.5".to_owned()));
-    }
-
-    #[test]
-    fn test_skip_prerelease() {
-        let latest = "1.0.0".to_owned();
-        let versions = make_versions(&["1.0.0", "2.0.0-rc.1"]);
-        let result = select_version("^1.0.0", Some(&latest), &versions, TargetLevel::Latest);
-        assert_eq!(result, Some("1.0.0".to_owned()));
-    }
-
-    #[test]
-    fn test_select_greatest_includes_prerelease() {
-        // Greatest: README says "Highest version number, INCLUDING prereleases".
-        // Previously this filtered prereleases out (bug). Now it must include them.
-        let latest = "1.0.0".to_owned();
-        let versions = make_versions(&["1.0.0", "2.0.0-rc.1"]);
-        let result = select_version("^1.0.0", Some(&latest), &versions, TargetLevel::Greatest);
-        assert_eq!(result, Some("2.0.0-rc.1".to_owned()));
-    }
-
-    #[test]
-    fn test_select_newest_includes_prerelease() {
-        // Newest is MVP-aliased to Greatest. Must include prereleases.
-        let latest = "1.0.0".to_owned();
-        let versions = make_versions(&["1.0.0", "2.0.0-rc.1"]);
-        let result = select_version("^1.0.0", Some(&latest), &versions, TargetLevel::Newest);
-        assert_eq!(result, Some("2.0.0-rc.1".to_owned()));
-    }
-
-    #[test]
-    fn test_latest_prerelease_tail_ignores_unrelated_prereleases() {
-        // Current: 2.0.0-rc.37. 3.0.0-alpha.1 (different train) must NOT be
-        // picked. Only the same-train prereleases or stables qualify.
-        let latest = "1.1.20".to_owned();
-        let versions = make_versions(&["1.1.20", "2.0.0-rc.37", "3.0.0-alpha.1"]);
-        let result = select_version("2.0.0-rc.37", Some(&latest), &versions, TargetLevel::Latest);
-        // 3.0.0-alpha.1 is unrelated prerelease → excluded.
-        // 2.0.0-rc.37 is current → not newer.
-        // 1.1.20 stable is older → allowed by select but the compute_updates
-        // safety net will skip the downgrade. select_version itself just
-        // picks the highest eligible candidate, which is 2.0.0-rc.37 (self).
-        // Here we confirm that unrelated prereleases are NOT selected.
-        assert_ne!(result, Some("3.0.0-alpha.1".to_owned()));
-    }
-
-    #[test]
-    fn test_latest_prerelease_current_picks_higher_stable_major() {
-        // Current: 2.0.0-rc.37. Registry: 1.1.20, 2.0.0-rc.37, 3.0.0 (higher stable major).
-        // Expected: 3.0.0 — stable is ALWAYS preferred over staying on a prerelease,
-        // regardless of "train". Only prerelease candidates are train-gated.
-        let latest = "3.0.0".to_owned();
-        let versions = make_versions(&["1.1.20", "2.0.0-rc.37", "3.0.0"]);
-        let result = select_version("2.0.0-rc.37", Some(&latest), &versions, TargetLevel::Latest);
-        assert_eq!(result, Some("3.0.0".to_owned()));
-    }
-
-    #[test]
-    fn test_latest_prerelease_current_stable_wins_over_unrelated_prerelease() {
-        // Current: 2.0.0-rc.37. Registry: 1.1.20, 2.0.0-rc.37, 3.0.0-alpha.1, 3.0.0.
-        // The unrelated prerelease 3.0.0-alpha.1 must be skipped, but the
-        // stable 3.0.0 (even from a different train) must be picked.
-        let latest = "3.0.0".to_owned();
-        let versions = make_versions(&["1.1.20", "2.0.0-rc.37", "3.0.0-alpha.1", "3.0.0"]);
-        let result = select_version("2.0.0-rc.37", Some(&latest), &versions, TargetLevel::Latest);
-        assert_eq!(result, Some("3.0.0".to_owned()));
-    }
-
-    #[test]
-    fn test_latest_prerelease_tail_jumps_to_stable() {
-        // Current: 2.0.0-rc.37. When 2.0.0 stable is available, pick it
-        // (stable > prerelease of same M.m.p in semver ordering).
-        let latest = "2.0.0".to_owned();
-        let versions = make_versions(&["1.1.20", "2.0.0-rc.37", "2.0.0-rc.40", "2.0.0"]);
-        let result = select_version("2.0.0-rc.37", Some(&latest), &versions, TargetLevel::Latest);
-        assert_eq!(result, Some("2.0.0".to_owned()));
-    }
-
-    #[test]
-    fn test_latest_sea_orm_regression() {
-        // End-to-end regression for the sea-orm 2.0.0-rc.37 -> 1.1.20 bug.
-        // select_version will naturally pick 2.0.0-rc.37 (self) as the only
-        // eligible candidate in the prerelease train, and compute_updates
-        // (CLI layer) then skips it as "not newer".
-        let latest = "1.1.20".to_owned();
-        let versions = make_versions(&["1.1.20", "2.0.0-rc.37"]);
-        let result = select_version("2.0.0-rc.37", Some(&latest), &versions, TargetLevel::Latest);
-        // NOT 1.1.20 (that would be a downgrade).
-        assert_ne!(result, Some("1.1.20".to_owned()));
-        // Self is acceptable; the CLI's safety net filters equal-or-lower.
-        assert_eq!(result, Some("2.0.0-rc.37".to_owned()));
-    }
-
-    #[test]
-    fn test_latest_stable_current_excludes_prerelease() {
-        // When current is stable, latest must NOT pick prereleases
-        // (preserves existing behavior for stable users).
-        let latest = "1.0.0".to_owned();
-        let versions = make_versions(&["1.0.0", "2.0.0-rc.1"]);
-        let result = select_version("1.0.0", Some(&latest), &versions, TargetLevel::Latest);
-        assert_eq!(result, Some("1.0.0".to_owned()));
-    }
-
+    /// Single-mock async resolve scenarios that differ only by request,
+    /// target, mock body, and expected `latest`/`selected`. The original
+    /// tests asserted only a subset of fields; `Option<&str>` preserves that
+    /// exactly (`None` = no assertion).
+    #[rstest]
+    // (latest, selected) both checked — full coverage of the original test.
+    #[case::latest(
+        "^1.0.0",
+        TargetLevel::Latest,
+        json!({"versions": [
+            {"num": "2.0.0", "yanked": false},
+            {"num": "1.5.0", "yanked": false},
+            {"num": "1.0.0", "yanked": false},
+            {"num": "0.9.0", "yanked": true}
+        ]}),
+        Some("2.0.0"),
+        Some("2.0.0")
+    )]
+    // Original asserted only `selected`.
+    #[case::minor(
+        "=1.0.0",
+        TargetLevel::Minor,
+        json!({"versions": [
+            {"num": "2.0.0", "yanked": false},
+            {"num": "1.5.0", "yanked": false},
+            {"num": "1.0.0", "yanked": false}
+        ]}),
+        None,
+        Some("1.5.0")
+    )]
+    // Original asserted only `selected`.
+    #[case::patch(
+        "=1.0.0",
+        TargetLevel::Patch,
+        json!({"versions": [
+            {"num": "1.1.0", "yanked": false},
+            {"num": "1.0.5", "yanked": false},
+            {"num": "1.0.3", "yanked": false},
+            {"num": "1.0.0", "yanked": false},
+            {"num": "2.0.0", "yanked": false}
+        ]}),
+        None,
+        Some("1.0.5")
+    )]
+    // Yanked 2.0.0 skipped; latest non-yanked is 1.5.0.
+    #[case::skips_yanked(
+        "=1.0.0",
+        TargetLevel::Latest,
+        json!({"versions": [
+            {"num": "2.0.0", "yanked": true},
+            {"num": "1.5.0", "yanked": false},
+            {"num": "1.0.0", "yanked": false}
+        ]}),
+        Some("1.5.0"),
+        Some("1.5.0")
+    )]
+    // ncu-style: report latest even when current range already satisfies it.
+    #[case::already_satisfied(
+        "^1.0.0",
+        TargetLevel::Latest,
+        json!({"versions": [
+            {"num": "1.5.0", "yanked": false},
+            {"num": "1.0.0", "yanked": false}
+        ]}),
+        Some("1.5.0"),
+        Some("1.5.0")
+    )]
+    // Prereleases skipped; only stable 1.0.0 available.
+    #[case::skips_prerelease(
+        "^1.0.0",
+        TargetLevel::Latest,
+        json!({"versions": [
+            {"num": "2.0.0-alpha.1", "yanked": false},
+            {"num": "1.5.0-rc.1", "yanked": false},
+            {"num": "1.0.0", "yanked": false}
+        ]}),
+        Some("1.0.0"),
+        Some("1.0.0")
+    )]
     #[tokio::test]
-    async fn test_resolve_version_latest() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+    async fn resolve_version_single_mock(
+        #[case] current_req: &str,
+        #[case] target: TargetLevel,
+        #[case] body: serde_json::Value,
+        #[case] expected_latest: Option<&str>,
+        #[case] expected_selected: Option<&str>,
+    ) {
+        install_tls_provider();
+        let mock_server = MockServer::start().await;
+        mock_versions_endpoint(&mock_server, "serde", body).await;
 
+        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
+        let result = registry
+            .resolve_version(&serde_dep(current_req), target)
+            .await
+            .unwrap();
+        if let Some(exp) = expected_latest {
+            assert_eq!(result.latest.as_deref(), Some(exp), "latest mismatch");
+        }
+        if let Some(exp) = expected_selected {
+            assert_eq!(result.selected.as_deref(), Some(exp), "selected mismatch");
+        }
+    }
+
+    /// Covers the `.json().await.map_err(...)` closure in `fetch_versions`
+    /// (the parse-error arm). A 200 status with non-JSON body forces
+    /// `response.json()` to fail and routes through the `RegistryLookup`
+    /// mapper.
+    #[rstest]
+    #[tokio::test]
+    async fn resolve_version_invalid_json_body_is_err() {
         install_tls_provider();
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/crates/serde/versions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "versions": [
-                    {"num": "2.0.0", "yanked": false},
-                    {"num": "1.5.0", "yanked": false},
-                    {"num": "1.0.0", "yanked": false},
-                    {"num": "0.9.0", "yanked": true}
-                ]
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json {{{"))
             .mount(&mock_server)
             .await;
 
         let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
-        let dep = DependencySpec {
-            name: "serde".to_owned(),
-            current_req: "^1.0.0".to_owned(),
-            section: dependency_check_updates_core::DependencySection::Dependencies,
-        };
         let result = registry
-            .resolve_version(&dep, TargetLevel::Latest)
-            .await
-            .unwrap();
-        assert_eq!(result.latest, Some("2.0.0".to_owned()));
-        assert_eq!(result.selected, Some("2.0.0".to_owned()));
+            .resolve_version(&serde_dep("^1.0.0"), TargetLevel::Latest)
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DcuError::RegistryLookup { .. }));
     }
 
+    /// Covers the `.send().await.map_err(...)` closure in `fetch_versions`
+    /// (the network-error arm). Port 1 on loopback is reserved/unbindable, so
+    /// the connect attempt fails immediately and the error is mapped to
+    /// `RegistryLookup`. No mock server is involved.
+    #[rstest]
     #[tokio::test]
-    async fn test_resolve_version_minor() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
+    async fn resolve_version_network_error_is_err() {
         install_tls_provider();
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/crates/serde/versions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "versions": [
-                    {"num": "2.0.0", "yanked": false},
-                    {"num": "1.5.0", "yanked": false},
-                    {"num": "1.0.0", "yanked": false}
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
-        let dep = DependencySpec {
-            name: "serde".to_owned(),
-            current_req: "=1.0.0".to_owned(),
-            section: dependency_check_updates_core::DependencySection::Dependencies,
-        };
+        let registry = CratesIoRegistry::with_base_url("http://127.0.0.1:1");
         let result = registry
-            .resolve_version(&dep, TargetLevel::Minor)
-            .await
-            .unwrap();
-        // Minor: stays on same major (1.x), highest is 1.5.0
-        assert_eq!(result.selected, Some("1.5.0".to_owned()));
+            .resolve_version(&serde_dep("^1.0.0"), TargetLevel::Latest)
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DcuError::RegistryLookup { .. }));
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_resolve_version_patch() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        install_tls_provider();
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/crates/serde/versions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "versions": [
-                    {"num": "1.1.0", "yanked": false},
-                    {"num": "1.0.5", "yanked": false},
-                    {"num": "1.0.3", "yanked": false},
-                    {"num": "1.0.0", "yanked": false},
-                    {"num": "2.0.0", "yanked": false}
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
-        let dep = DependencySpec {
-            name: "serde".to_owned(),
-            current_req: "=1.0.0".to_owned(),
-            section: dependency_check_updates_core::DependencySection::Dependencies,
-        };
-        let result = registry
-            .resolve_version(&dep, TargetLevel::Patch)
-            .await
-            .unwrap();
-        // Patch: stays on same major.minor (1.0.x), highest is 1.0.5
-        assert_eq!(result.selected, Some("1.0.5".to_owned()));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_version_skips_yanked() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        install_tls_provider();
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/crates/serde/versions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "versions": [
-                    {"num": "2.0.0", "yanked": true},
-                    {"num": "1.5.0", "yanked": false},
-                    {"num": "1.0.0", "yanked": false}
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
-        let dep = DependencySpec {
-            name: "serde".to_owned(),
-            current_req: "=1.0.0".to_owned(),
-            section: dependency_check_updates_core::DependencySection::Dependencies,
-        };
-        let result = registry
-            .resolve_version(&dep, TargetLevel::Latest)
-            .await
-            .unwrap();
-        // 2.0.0 is yanked, so latest non-yanked is 1.5.0
-        assert_eq!(result.latest, Some("1.5.0".to_owned()));
-        assert_eq!(result.selected, Some("1.5.0".to_owned()));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_version_already_satisfied() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        install_tls_provider();
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/crates/serde/versions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "versions": [
-                    {"num": "1.5.0", "yanked": false},
-                    {"num": "1.0.0", "yanked": false}
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
-        // current_req ^1.0.0 already satisfies 1.5.0 (caret allows minor/patch bumps)
-        let dep = DependencySpec {
-            name: "serde".to_owned(),
-            current_req: "^1.0.0".to_owned(),
-            section: dependency_check_updates_core::DependencySection::Dependencies,
-        };
-        let result = registry
-            .resolve_version(&dep, TargetLevel::Latest)
-            .await
-            .unwrap();
-        // ncu-style: always report latest; CLI's compute_updates decides if a spec bump is needed.
-        assert_eq!(result.selected.as_deref(), Some("1.5.0"));
-        assert_eq!(result.latest, Some("1.5.0".to_owned()));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_version_404() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
+    async fn resolve_version_404() {
         install_tls_provider();
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -572,7 +505,7 @@ mod tests {
         let dep = DependencySpec {
             name: "nonexistent".to_owned(),
             current_req: "^1.0.0".to_owned(),
-            section: dependency_check_updates_core::DependencySection::Dependencies,
+            section: DependencySection::Dependencies,
         };
         let result = registry.resolve_version(&dep, TargetLevel::Latest).await;
         assert!(result.is_err());
@@ -580,50 +513,46 @@ mod tests {
         assert!(matches!(err, DcuError::RegistryLookup { .. }));
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_resolve_batch() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
+    async fn resolve_batch_returns_sorted_results() {
         install_tls_provider();
         let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/crates/serde/versions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "versions": [
-                    {"num": "2.0.0", "yanked": false},
-                    {"num": "1.0.0", "yanked": false}
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/crates/tokio/versions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "versions": [
-                    {"num": "1.40.0", "yanked": false},
-                    {"num": "1.0.0", "yanked": false}
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
+        mock_versions_endpoint(
+            &mock_server,
+            "serde",
+            json!({"versions": [
+                {"num": "2.0.0", "yanked": false},
+                {"num": "1.0.0", "yanked": false}
+            ]}),
+        )
+        .await;
+        mock_versions_endpoint(
+            &mock_server,
+            "tokio",
+            json!({"versions": [
+                {"num": "1.40.0", "yanked": false},
+                {"num": "1.0.0", "yanked": false}
+            ]}),
+        )
+        .await;
 
         let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
         let deps = vec![
             DependencySpec {
                 name: "serde".to_owned(),
                 current_req: "^1.0.0".to_owned(),
-                section: dependency_check_updates_core::DependencySection::Dependencies,
+                section: DependencySection::Dependencies,
             },
             DependencySpec {
                 name: "tokio".to_owned(),
                 current_req: "^1.0.0".to_owned(),
-                section: dependency_check_updates_core::DependencySection::Dependencies,
+                section: DependencySection::Dependencies,
             },
         ];
         let results = registry.resolve_batch(&deps, TargetLevel::Latest).await;
         assert_eq!(results.len(), 2);
-        // Results are sorted by index
+        // Results are sorted by index.
         let (idx0, ref res0) = results[0];
         let (idx1, ref res1) = results[1];
         assert_eq!(idx0, 0);
@@ -632,69 +561,27 @@ mod tests {
         assert_eq!(res1.as_ref().unwrap().latest, Some("1.40.0".to_owned()));
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_resolve_version_skips_prerelease() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        install_tls_provider();
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/crates/serde/versions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "versions": [
-                    {"num": "2.0.0-alpha.1", "yanked": false},
-                    {"num": "1.5.0-rc.1", "yanked": false},
-                    {"num": "1.0.0", "yanked": false}
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
-        let dep = DependencySpec {
-            name: "serde".to_owned(),
-            current_req: "^1.0.0".to_owned(),
-            section: dependency_check_updates_core::DependencySection::Dependencies,
-        };
-        let result = registry
-            .resolve_version(&dep, TargetLevel::Latest)
-            .await
-            .unwrap();
-        // Pre-release versions should be skipped; only stable 1.0.0 is available
-        assert_eq!(result.latest, Some("1.0.0".to_owned()));
-        // ncu-style: resolve returns latest; bare-version comparison happens in compute_updates
-        assert_eq!(result.selected.as_deref(), Some("1.0.0"));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_version_newest_by_date() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
+    async fn resolve_version_newest_by_date_vs_greatest() {
         install_tls_provider();
         let mock_server = MockServer::start().await;
         // 1.5.0 has the LATEST publish date despite 2.0.0 being the higher
         // version (a backport published after the new major). `newest` must
         // pick 1.5.0; `greatest`/`latest` would pick 2.0.0.
-        Mock::given(method("GET"))
-            .and(path("/crates/serde/versions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "versions": [
-                    {"num": "2.0.0", "yanked": false, "created_at": "2023-01-01T00:00:00Z"},
-                    {"num": "1.5.0", "yanked": false, "created_at": "2024-06-01T00:00:00Z"},
-                    {"num": "1.0.0", "yanked": false, "created_at": "2022-01-01T00:00:00Z"}
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
+        mock_versions_endpoint(
+            &mock_server,
+            "serde",
+            json!({"versions": [
+                {"num": "2.0.0", "yanked": false, "created_at": "2023-01-01T00:00:00Z"},
+                {"num": "1.5.0", "yanked": false, "created_at": "2024-06-01T00:00:00Z"},
+                {"num": "1.0.0", "yanked": false, "created_at": "2022-01-01T00:00:00Z"}
+            ]}),
+        )
+        .await;
 
         let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
-        let dep = DependencySpec {
-            name: "serde".to_owned(),
-            current_req: "^1.0.0".to_owned(),
-            section: dependency_check_updates_core::DependencySection::Dependencies,
-        };
+        let dep = serde_dep("^1.0.0");
         let result = registry
             .resolve_version(&dep, TargetLevel::Newest)
             .await
@@ -708,49 +595,10 @@ mod tests {
         assert_eq!(greatest.selected.as_deref(), Some("2.0.0"));
     }
 
-    #[test]
-    fn test_new_creates_registry() {
-        install_tls_provider();
-        let _registry = CratesIoRegistry::new();
-    }
-
-    #[test]
-    fn test_default_creates_registry() {
-        install_tls_provider();
-        let _registry = CratesIoRegistry::default();
-    }
-
-    #[test]
-    fn test_select_version_empty_versions() {
-        let latest = "1.0.0".to_owned();
-        let versions: Vec<semver::Version> = vec![];
-        let result = select_version("^1.0.0", Some(&latest), &versions, TargetLevel::Latest);
-        assert_eq!(result, Some("1.0.0".to_owned()));
-    }
-
-    #[test]
-    fn test_select_version_minor_unparseable_falls_back() {
-        let latest = "2.0.0".to_owned();
-        let versions = make_versions(&["1.0.0", "2.0.0"]);
-        let result = select_version("*", Some(&latest), &versions, TargetLevel::Minor);
-        assert_eq!(result, Some("2.0.0".to_owned()));
-    }
-
-    #[test]
-    fn test_select_version_patch_unparseable_falls_back() {
-        let latest = "2.0.0".to_owned();
-        let versions = make_versions(&["1.0.0", "2.0.0"]);
-        let result = select_version("*", Some(&latest), &versions, TargetLevel::Patch);
-        assert_eq!(result, Some("2.0.0".to_owned()));
-    }
-
+    #[rstest]
     #[tokio::test]
-    async fn test_resolve_version_with_tracing() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
+    async fn resolve_version_with_tracing() {
         install_tls_provider();
-
         // Install a trace-level subscriber so trace!() arguments are evaluated.
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::TRACE)
@@ -759,19 +607,21 @@ mod tests {
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let mock_server = MockServer::start().await;
-        Mock::given(method("GET")).and(path("/crates/serde/versions")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "versions": [{"num": "2.0.0", "yanked": false}, {"num": "1.0.0", "yanked": false}] }))).mount(&mock_server).await;
+        mock_versions_endpoint(
+            &mock_server,
+            "serde",
+            json!({"versions": [
+                {"num": "2.0.0", "yanked": false},
+                {"num": "1.0.0", "yanked": false}
+            ]}),
+        )
+        .await;
 
         let registry = CratesIoRegistry::with_base_url(&mock_server.uri());
-        let dep = DependencySpec {
-            name: "serde".to_owned(),
-            current_req: "^1.0.0".to_owned(),
-            section: dependency_check_updates_core::DependencySection::Dependencies,
-        };
         let result = registry
-            .resolve_version(&dep, TargetLevel::Latest)
+            .resolve_version(&serde_dep("^1.0.0"), TargetLevel::Latest)
             .await
             .unwrap();
         assert_eq!(result.latest, Some("2.0.0".to_owned()));
     }
-
 }

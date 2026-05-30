@@ -199,123 +199,127 @@ pub fn is_version_ref(git_ref: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn test_is_version_ref_v_prefix() {
-        assert!(is_version_ref("v5"));
-        assert!(is_version_ref("v5.1"));
-        assert!(is_version_ref("v5.1.0"));
-        assert!(is_version_ref("v1.0.0-beta.1"));
+    #[rstest]
+    // v-prefix versions accepted as version-like.
+    #[case::v_major("v5", true)]
+    #[case::v_major_minor("v5.1", true)]
+    #[case::v_major_minor_patch("v5.1.0", true)]
+    #[case::v_prerelease("v1.0.0-beta.1", true)]
+    // Bare numeric versions accepted (with or without v prefix).
+    #[case::bare_major("5", true)]
+    #[case::bare_semver("1.2.3", true)]
+    #[case::calendar_version("2024.01.01", true)]
+    // Short v-versions: `v12345` strips to `12345` (5 chars, < 7) so it
+    // bypasses the SHA heuristic and is treated as a version.
+    #[case::v_short_numeric("v12345", true)]
+    // Branch-like refs are rejected (not version-like).
+    #[case::branch_main("main", false)]
+    #[case::branch_master("master", false)]
+    #[case::branch_develop("develop", false)]
+    #[case::branch_release_with_slash("release/v5", false)]
+    // Commit SHAs are rejected by the hex+length heuristic.
+    #[case::sha_40_char("8e5e7e5a3b4c1234abcdef0123456789abcdef01", false)]
+    #[case::sha_7_char_starting_digit("1234567", false)]
+    #[case::sha_8_char_mixed_hex("12345abc", false)]
+    // Empty / lone `v` produce no leading digit → rejected.
+    #[case::empty("", false)]
+    #[case::just_v("v", false)]
+    fn is_version_ref_cases(#[case] input: &str, #[case] expected: bool) {
+        assert_eq!(is_version_ref(input), expected);
+    }
+
+    #[rstest]
+    // Yaml that produces EXACTLY one `uses:` match — name, ref, and byte
+    // offsets must slice back to the recorded ref.
+    #[case::basic_multiline_indent(
+        "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v5\n",
+        "actions/checkout",
+        "v5"
+    )]
+    #[case::trailing_comment(
+        "      - uses: actions/checkout@v5  # pinned\n",
+        "actions/checkout",
+        "v5"
+    )]
+    #[case::single_quoted(
+        "      - uses: 'actions/checkout@v5'\n",
+        "actions/checkout",
+        "v5"
+    )]
+    #[case::double_quoted(
+        "      - uses: \"actions/checkout@v5\"\n",
+        "actions/checkout",
+        "v5"
+    )]
+    #[case::no_leading_dash(
+        "      uses: actions/checkout@v5\n",
+        "actions/checkout",
+        "v5"
+    )]
+    #[case::subdir_action(
+        "      - uses: actions/checkout/sub/path@v5\n",
+        "actions/checkout/sub/path",
+        "v5"
+    )]
+    #[case::crlf_line_ending(
+        "      - uses: actions/checkout@v5\r\n",
+        "actions/checkout",
+        "v5"
+    )]
+    #[case::bare_semver_no_v_prefix(
+        "      - uses: actions/checkout@1.2.3\n",
+        "actions/checkout",
+        "1.2.3"
+    )]
+    #[case::bare_semver_major_only(
+        "      - uses: actions/checkout@5\n",
+        "actions/checkout",
+        "5"
+    )]
+    #[case::calendar_version_supported(
+        "      - uses: cal/ver@2024.01.01\n",
+        "cal/ver",
+        "2024.01.01"
+    )]
+    fn scan_yields_single_match(
+        #[case] yaml: &str,
+        #[case] expected_name: &str,
+        #[case] expected_ref: &str,
+    ) {
+        let locs = scan(yaml);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].name, expected_name);
+        assert_eq!(locs[0].current_ref, expected_ref);
+        // Offsets must slice the original text back to the recorded ref,
+        // with no `\r`/quote/comment bleed.
+        assert_eq!(&yaml[locs[0].ref_start..locs[0].ref_end], expected_ref);
+    }
+
+    #[rstest]
+    // Yaml the scanner intentionally rejects (no `uses:` match emitted).
+    #[case::skips_branch_ref("      - uses: foo/bar@main\n")]
+    #[case::skips_sha_ref("      - uses: foo/bar@8e5e7e5a3b4c1234abcdef0123456789abcdef01\n")]
+    // The literal text "uses:" appears in a scalar value, not as a key.
+    #[case::ignores_uses_as_value("      description: This uses: pattern is fine\n")]
+    #[case::ignores_missing_slash("      - uses: checkout@v5\n")]
+    #[case::empty_value_skipped("      - uses:\n")]
+    fn scan_yields_no_matches(#[case] yaml: &str) {
+        let locs = scan(yaml);
+        assert!(locs.is_empty(), "expected no matches, got {locs:?}");
     }
 
     #[test]
-    fn test_is_version_ref_bare_digits() {
-        assert!(is_version_ref("5"));
-        assert!(is_version_ref("1.2.3"));
-        assert!(is_version_ref("2024.01.01"));
-    }
-
-    #[test]
-    fn test_is_version_ref_rejects_branches() {
-        assert!(!is_version_ref("main"));
-        assert!(!is_version_ref("master"));
-        assert!(!is_version_ref("develop"));
-        assert!(!is_version_ref("release/v5"));
-    }
-
-    #[test]
-    fn test_is_version_ref_rejects_shas() {
-        // 40-char SHA
-        assert!(!is_version_ref("8e5e7e5a3b4c1234abcdef0123456789abcdef01"));
-        // 7-char short SHA starting with digit
-        assert!(!is_version_ref("1234567"));
-        // 8-char hex starting with digit
-        assert!(!is_version_ref("12345abc"));
-    }
-
-    #[test]
-    fn test_is_version_ref_short_versions_passthrough() {
-        // `v5` strips to `5` (1 char, < 7) → passes SHA check.
-        assert!(is_version_ref("v5"));
-        // `v12345` strips to `12345` (5 chars, < 7) → version-like.
-        assert!(is_version_ref("v12345"));
-    }
-
-    #[test]
-    fn test_is_version_ref_rejects_empty() {
-        assert!(!is_version_ref(""));
-        assert!(!is_version_ref("v"));
-    }
-
-    #[test]
-    fn test_scan_basic() {
-        let yaml = "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v5\n";
+    fn scan_ignores_uses_inside_comment_but_finds_real_one() {
+        let yaml = "      # uses: foo/bar@v1\n      - uses: actions/checkout@v5\n";
         let locs = scan(yaml);
         assert_eq!(locs.len(), 1);
         assert_eq!(locs[0].name, "actions/checkout");
-        assert_eq!(locs[0].current_ref, "v5");
-        // Verify offsets actually point at the ref bytes.
-        assert_eq!(&yaml[locs[0].ref_start..locs[0].ref_end], "v5");
     }
 
     #[test]
-    fn test_scan_with_trailing_comment() {
-        let yaml = "      - uses: actions/checkout@v5  # pinned\n";
-        let locs = scan(yaml);
-        assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0].current_ref, "v5");
-        assert_eq!(&yaml[locs[0].ref_start..locs[0].ref_end], "v5");
-    }
-
-    #[test]
-    fn test_scan_single_quoted() {
-        let yaml = "      - uses: 'actions/checkout@v5'\n";
-        let locs = scan(yaml);
-        assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0].current_ref, "v5");
-        assert_eq!(&yaml[locs[0].ref_start..locs[0].ref_end], "v5");
-    }
-
-    #[test]
-    fn test_scan_double_quoted() {
-        let yaml = "      - uses: \"actions/checkout@v5\"\n";
-        let locs = scan(yaml);
-        assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0].current_ref, "v5");
-    }
-
-    #[test]
-    fn test_scan_no_leading_dash() {
-        let yaml = "      uses: actions/checkout@v5\n";
-        let locs = scan(yaml);
-        assert_eq!(locs.len(), 1);
-    }
-
-    #[test]
-    fn test_scan_subdir_action() {
-        let yaml = "      - uses: actions/checkout/sub/path@v5\n";
-        let locs = scan(yaml);
-        assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0].name, "actions/checkout/sub/path");
-        assert_eq!(locs[0].current_ref, "v5");
-    }
-
-    #[test]
-    fn test_scan_skips_branch_ref() {
-        let yaml = "      - uses: foo/bar@main\n";
-        let locs = scan(yaml);
-        assert!(locs.is_empty());
-    }
-
-    #[test]
-    fn test_scan_skips_sha_ref() {
-        let yaml = "      - uses: foo/bar@8e5e7e5a3b4c1234abcdef0123456789abcdef01\n";
-        let locs = scan(yaml);
-        assert!(locs.is_empty());
-    }
-
-    #[test]
-    fn test_scan_multiple_lines() {
+    fn scan_multiple_lines() {
         let yaml = concat!(
             "jobs:\n  test:\n    steps:\n",
             "      - uses: actions/checkout@v4\n",
@@ -329,41 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_ignores_uses_inside_comment() {
-        let yaml = "      # uses: foo/bar@v1\n      - uses: actions/checkout@v5\n";
-        let locs = scan(yaml);
-        assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0].name, "actions/checkout");
-    }
-
-    #[test]
-    fn test_scan_ignores_uses_as_value() {
-        // The literal text "uses:" appears in a scalar value, not as a key.
-        let yaml = "      description: This uses: pattern is fine\n";
-        let locs = scan(yaml);
-        assert!(locs.is_empty());
-    }
-
-    #[test]
-    fn test_scan_ignores_missing_slash() {
-        let yaml = "      - uses: checkout@v5\n";
-        let locs = scan(yaml);
-        assert!(locs.is_empty());
-    }
-
-    #[test]
-    fn test_scan_handles_crlf() {
-        let yaml = "      - uses: actions/checkout@v5\r\n";
-        let locs = scan(yaml);
-        assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0].current_ref, "v5");
-        // Slicing the original text by the recorded offsets must yield
-        // exactly the ref bytes, with no `\r` bleed.
-        assert_eq!(&yaml[locs[0].ref_start..locs[0].ref_end], "v5");
-    }
-
-    #[test]
-    fn test_scan_offsets_match_original_text() {
+    fn scan_offsets_match_original_text() {
         // Smoke test: every recorded location must slice the original text
         // back into the recorded `current_ref`.
         let yaml = concat!(
@@ -380,48 +350,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_workflow_manifest() {
+    fn parse_workflow_manifest_collects_dependency_spec() {
         let yaml = "      - uses: actions/checkout@v5\n";
         let m = WorkflowManifest::parse(yaml);
         assert_eq!(m.dependencies.len(), 1);
         assert_eq!(m.dependencies[0].name, "actions/checkout");
         assert_eq!(m.dependencies[0].current_req, "v5");
-    }
-
-    #[test]
-    fn test_scan_empty_value_skipped() {
-        let yaml = "      - uses:\n";
-        let locs = scan(yaml);
-        assert!(locs.is_empty());
-    }
-
-    #[test]
-    fn test_scan_bare_semver_no_v_prefix() {
-        // Some users / actions publish tags as plain semver without the
-        // `v` prefix. Validate the full pipeline: parser recognises them as
-        // version refs and exposes them for resolution.
-        let yaml = "      - uses: actions/checkout@1.2.3\n";
-        let locs = scan(yaml);
-        assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0].name, "actions/checkout");
-        assert_eq!(locs[0].current_ref, "1.2.3");
-        assert_eq!(&yaml[locs[0].ref_start..locs[0].ref_end], "1.2.3");
-    }
-
-    #[test]
-    fn test_scan_bare_semver_major_only() {
-        let yaml = "      - uses: actions/checkout@5\n";
-        let locs = scan(yaml);
-        assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0].current_ref, "5");
-    }
-
-    #[test]
-    fn test_scan_calendar_version_supported() {
-        // CalVer tags (`2024.01.01`) are version-like and should be tracked.
-        let yaml = "      - uses: cal/ver@2024.01.01\n";
-        let locs = scan(yaml);
-        assert_eq!(locs.len(), 1);
-        assert_eq!(locs[0].current_ref, "2024.01.01");
     }
 }

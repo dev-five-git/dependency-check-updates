@@ -51,26 +51,44 @@ mod tests {
     use super::*;
     use dependency_check_updates_core::DependencySection;
     use dependency_check_updates_core::manifest::ManifestHandler;
+    use rstest::rstest;
     use std::path::Path;
 
-    #[test]
-    fn test_python_handler_parse() {
+    /// Parse outcomes: a valid PEP 621 doc parses to one dep, invalid TOML
+    /// fails. Same call shape → parametrize.
+    #[rstest]
+    #[case::valid_pep621(
+        "[project]\nname = \"test\"\ndependencies = [\"requests>=2.28.0\"]\n",
+        true,
+    )]
+    #[case::invalid_toml("invalid [[[toml", false)]
+    fn python_handler_parse_cases(#[case] text: &str, #[case] should_succeed: bool) {
         let handler = PythonHandler;
-        let text = "[project]\nname = \"test\"\ndependencies = [\"requests>=2.28.0\"]\n";
-        let result = handler.parse(text, Path::new("pyproject.toml")).unwrap();
-        assert_eq!(result.dependencies.len(), 1);
-        assert_eq!(result.manifest_ref.kind, ManifestKind::PyProjectToml);
+        let result = handler.parse(text, Path::new("pyproject.toml"));
+        assert_eq!(result.is_ok(), should_succeed);
+        if let Ok(parsed) = result {
+            assert_eq!(parsed.dependencies.len(), 1);
+            assert_eq!(parsed.manifest_ref.kind, ManifestKind::PyProjectToml);
+        }
+    }
+
+    /// Covers the `PyProjectManifest::parse(...).map_err(...)` error path in
+    /// `ManifestHandler::apply_updates` (lib.rs lines 40-43). Feeding invalid
+    /// TOML forces the parser to fail, which the handler must wrap as
+    /// `DcuError::PatchFailed`.
+    #[test]
+    fn python_handler_apply_updates_invalid_toml_returns_error() {
+        let handler = PythonHandler;
+        let result = handler.apply_updates("not valid [[[toml", &[]);
+        assert!(result.is_err(), "invalid TOML must surface as PatchFailed");
+        match result {
+            Err(DcuError::PatchFailed { .. }) => {}
+            other => panic!("expected DcuError::PatchFailed, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_python_handler_parse_invalid() {
-        let handler = PythonHandler;
-        let result = handler.parse("invalid [[[toml", Path::new("pyproject.toml"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_python_handler_apply_updates() {
+    fn python_handler_apply_updates_rewrites_version() {
         let handler = PythonHandler;
         let text = "[project]\nname = \"test\"\ndependencies = [\"requests>=2.28.0\"]\n";
         let updates = vec![PlannedUpdate {

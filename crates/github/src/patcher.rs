@@ -107,6 +107,7 @@ fn apply_patches(original: &str, patches: &[Patch]) -> Result<String, PatchError
 mod tests {
     use super::*;
     use dependency_check_updates_core::DependencySection;
+    use rstest::rstest;
 
     fn upd(name: &str, from: &str, to: &str) -> PlannedUpdate {
         PlannedUpdate {
@@ -117,109 +118,109 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_apply_empty_updates_is_identity() {
-        let text = "      - uses: actions/checkout@v4\n";
-        let result = WorkflowPatcher::apply(text, &[]).unwrap();
-        assert_eq!(result, text);
+    fn make_updates(rows: &[(&str, &str, &str)]) -> Vec<PlannedUpdate> {
+        rows.iter().map(|(n, f, t)| upd(n, f, t)).collect()
     }
 
-    #[test]
-    fn test_apply_single_update() {
-        let text = "      - uses: actions/checkout@v4\n";
-        let expected = "      - uses: actions/checkout@v5\n";
-        let result = WorkflowPatcher::apply(text, &[upd("actions/checkout", "v4", "v5")]).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_apply_preserves_comment() {
-        let text = "      - uses: actions/checkout@v4  # pinned\n";
-        let expected = "      - uses: actions/checkout@v5  # pinned\n";
-        let result = WorkflowPatcher::apply(text, &[upd("actions/checkout", "v4", "v5")]).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_apply_preserves_quotes() {
-        let text = "      - uses: 'actions/checkout@v4'\n";
-        let expected = "      - uses: 'actions/checkout@v5'\n";
-        let result = WorkflowPatcher::apply(text, &[upd("actions/checkout", "v4", "v5")]).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_apply_leaves_branch_refs_alone() {
-        let text = concat!(
+    #[rstest]
+    // No updates at all — the patcher must return the original text byte-for-byte.
+    #[case::empty_updates_is_identity(
+        "      - uses: actions/checkout@v4\n",
+        &[],
+        "      - uses: actions/checkout@v4\n"
+    )]
+    // Single happy-path update.
+    #[case::single_update(
+        "      - uses: actions/checkout@v4\n",
+        &[("actions/checkout", "v4", "v5")],
+        "      - uses: actions/checkout@v5\n"
+    )]
+    // Trailing `# pinned` comment must survive untouched.
+    #[case::preserves_comment(
+        "      - uses: actions/checkout@v4  # pinned\n",
+        &[("actions/checkout", "v4", "v5")],
+        "      - uses: actions/checkout@v5  # pinned\n"
+    )]
+    // Surrounding single quotes must survive untouched.
+    #[case::preserves_quotes(
+        "      - uses: 'actions/checkout@v4'\n",
+        &[("actions/checkout", "v4", "v5")],
+        "      - uses: 'actions/checkout@v5'\n"
+    )]
+    // Unrelated `@main` ref next to the updated one must be left alone.
+    #[case::leaves_branch_refs_alone(
+        concat!(
             "      - uses: actions/checkout@v4\n",
             "      - uses: changepacks/action@main\n",
-        );
-        let expected = concat!(
+        ),
+        &[("actions/checkout", "v4", "v5")],
+        concat!(
             "      - uses: actions/checkout@v5\n",
             "      - uses: changepacks/action@main\n",
-        );
-        let result = WorkflowPatcher::apply(text, &[upd("actions/checkout", "v4", "v5")]).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_apply_multiple_updates() {
-        let text = concat!(
+        )
+    )]
+    // Two independent updates on separate lines.
+    #[case::multiple_updates(
+        concat!(
             "      - uses: actions/checkout@v4\n",
             "      - uses: actions/setup-node@v3\n",
-        );
-        let expected = concat!(
+        ),
+        &[
+            ("actions/checkout", "v4", "v5"),
+            ("actions/setup-node", "v3", "v4"),
+        ],
+        concat!(
             "      - uses: actions/checkout@v5\n",
             "      - uses: actions/setup-node@v4\n",
-        );
-        let updates = vec![
-            upd("actions/checkout", "v4", "v5"),
-            upd("actions/setup-node", "v3", "v4"),
-        ];
-        let result = WorkflowPatcher::apply(text, &updates).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_apply_handles_ref_length_change() {
-        // v4 -> v10.0.0 (length changes from 2 to 7 bytes)
-        let text = "      - uses: actions/checkout@v4\n";
-        let expected = "      - uses: actions/checkout@v10.0.0\n";
-        let result =
-            WorkflowPatcher::apply(text, &[upd("actions/checkout", "v4", "v10.0.0")]).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_apply_unmatched_update_silently_skipped() {
-        // `from` doesn't match what's in the text → no replacement, no error.
-        let text = "      - uses: actions/checkout@v4\n";
-        let result = WorkflowPatcher::apply(text, &[upd("actions/checkout", "v3", "v5")]).unwrap();
-        assert_eq!(result, text);
-    }
-
-    #[test]
-    fn test_apply_duplicate_dep_each_gets_own_patch() {
-        // Same action appearing twice with different refs — each instance is
-        // updated independently using its own `from` as the key.
-        let text = concat!(
+        )
+    )]
+    // v4 → v10.0.0 changes ref length from 2 to 7 bytes.
+    #[case::handles_ref_length_change(
+        "      - uses: actions/checkout@v4\n",
+        &[("actions/checkout", "v4", "v10.0.0")],
+        "      - uses: actions/checkout@v10.0.0\n"
+    )]
+    // `from` doesn't match what's in the text → no replacement, no error.
+    #[case::unmatched_update_silently_skipped(
+        "      - uses: actions/checkout@v4\n",
+        &[("actions/checkout", "v3", "v5")],
+        "      - uses: actions/checkout@v4\n"
+    )]
+    // Same action twice with different refs — each instance updates using
+    // its own `from` as the join key.
+    #[case::duplicate_dep_each_gets_own_patch(
+        concat!(
             "      - uses: actions/checkout@v3\n",
             "      - uses: actions/checkout@v4\n",
-        );
-        let expected = concat!(
+        ),
+        &[
+            ("actions/checkout", "v3", "v4"),
+            ("actions/checkout", "v4", "v5"),
+        ],
+        concat!(
             "      - uses: actions/checkout@v4\n",
             "      - uses: actions/checkout@v5\n",
-        );
-        let updates = vec![
-            upd("actions/checkout", "v3", "v4"),
-            upd("actions/checkout", "v4", "v5"),
-        ];
-        let result = WorkflowPatcher::apply(text, &updates).unwrap();
+        )
+    )]
+    // End-to-end patching of v-less refs (some action tags publish bare semver).
+    #[case::bare_semver_no_v_prefix(
+        "      - uses: actions/checkout@1.2.3\n",
+        &[("actions/checkout", "1.2.3", "4.5.6")],
+        "      - uses: actions/checkout@4.5.6\n"
+    )]
+    fn workflow_patcher_apply_cases(
+        #[case] text: &str,
+        #[case] updates: &[(&str, &str, &str)],
+        #[case] expected: &str,
+    ) {
+        let result = WorkflowPatcher::apply(text, &make_updates(updates)).unwrap();
         assert_eq!(result, expected);
     }
 
     #[test]
-    fn test_overlapping_patches_error() {
+    fn overlapping_patches_error() {
+        // Sentinel for parser bugs: two patches whose byte ranges overlap
+        // must surface as an error instead of silently corrupting the output.
         let patches = vec![
             Patch {
                 start: 0,
@@ -234,15 +235,5 @@ mod tests {
         ];
         let result = apply_patches("abcdefghijk", &patches);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_apply_bare_semver_no_v_prefix() {
-        // Validate end-to-end patching of v-less refs.
-        let text = "      - uses: actions/checkout@1.2.3\n";
-        let expected = "      - uses: actions/checkout@4.5.6\n";
-        let result =
-            WorkflowPatcher::apply(text, &[upd("actions/checkout", "1.2.3", "4.5.6")]).unwrap();
-        assert_eq!(result, expected);
     }
 }

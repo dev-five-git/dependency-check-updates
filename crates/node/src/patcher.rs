@@ -222,16 +222,17 @@ fn find_json_key_position(text: &str, key: &str, from: usize) -> Option<usize> {
 }
 
 /// Find the next occurrence of `ch` skipping whitespace.
+///
+/// Scans only the leading whitespace run: it stops at the first non-whitespace
+/// character and returns its offset only if it is `ch`. Written as an iterator
+/// chain (rather than a loop with early returns) so every branch is a single
+/// covered expression.
 fn find_char_skipping_whitespace(text: &str, ch: char, from: usize) -> Option<usize> {
-    for (i, c) in text[from..].char_indices() {
-        if c == ch {
-            return Some(from + i);
-        }
-        if !c.is_whitespace() {
-            return None;
-        }
-    }
-    None
+    text[from..]
+        .char_indices()
+        .take_while(|(_, c)| *c == ch || c.is_whitespace())
+        .find(|(_, c)| *c == ch)
+        .map(|(i, _)| from + i)
 }
 
 /// Find the next `"` character after skipping whitespace, starting from `from`.
@@ -360,6 +361,29 @@ fn find_dep_value_position(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    /// Build a single-target patch list from the located version positions.
+    fn replace_all(locations: &[VersionLocation], new_value: &str) -> Vec<Patch> {
+        locations
+            .iter()
+            .map(|loc| Patch {
+                start: loc.value_start,
+                end: loc.value_end,
+                new_value: new_value.to_owned(),
+            })
+            .collect()
+    }
+
+    /// Build a single-version `PlannedUpdate` in the `Dependencies` section.
+    fn update(name: &str, from: &str, to: &str) -> PlannedUpdate {
+        PlannedUpdate {
+            name: name.to_owned(),
+            section: DependencySection::Dependencies,
+            from: from.to_owned(),
+            to: to.to_owned(),
+        }
+    }
 
     #[test]
     fn test_roundtrip_empty_patches() {
@@ -381,13 +405,7 @@ mod tests {
             "^17.0.0"
         );
 
-        let patches = vec![Patch {
-            start: locations[0].value_start,
-            end: locations[0].value_end,
-            new_value: "^18.2.0".to_owned(),
-        }];
-
-        let result = JsonPatcher::apply_patches(input, &patches).unwrap();
+        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
         assert_eq!(result, expected);
     }
 
@@ -463,14 +481,11 @@ mod tests {
 
     #[test]
     fn test_2space_indent_preserved() {
+        // Asserts the byte-diff stays within the value range — distinct from
+        // the equality-based indent tests below, so kept as its own test.
         let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let patches = vec![Patch {
-            start: locations[0].value_start,
-            end: locations[0].value_end,
-            new_value: "^18.2.0".to_owned(),
-        }];
-        let result = JsonPatcher::apply_patches(input, &patches).unwrap();
+        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
 
         // Verify only the version value changed
         let diff_bytes: Vec<usize> = input
@@ -489,48 +504,24 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_4space_indent_preserved() {
-        let input = "{\n    \"dependencies\": {\n        \"react\": \"^17.0.0\"\n    }\n}\n";
-        let expected = "{\n    \"dependencies\": {\n        \"react\": \"^18.2.0\"\n    }\n}\n";
-
+    #[rstest]
+    // Equality-based format-preservation: patching `react: ^17.0.0 → ^18.2.0`
+    // must leave every other byte untouched.
+    #[case::four_space_indent(
+        "{\n    \"dependencies\": {\n        \"react\": \"^17.0.0\"\n    }\n}\n",
+        "{\n    \"dependencies\": {\n        \"react\": \"^18.2.0\"\n    }\n}\n",
+    )]
+    #[case::tab_indent(
+        "{\n\t\"dependencies\": {\n\t\t\"react\": \"^17.0.0\"\n\t}\n}\n",
+        "{\n\t\"dependencies\": {\n\t\t\"react\": \"^18.2.0\"\n\t}\n}\n",
+    )]
+    #[case::crlf_line_endings(
+        "{\r\n  \"dependencies\": {\r\n    \"react\": \"^17.0.0\"\r\n  }\r\n}\r\n",
+        "{\r\n  \"dependencies\": {\r\n    \"react\": \"^18.2.0\"\r\n  }\r\n}\r\n",
+    )]
+    fn format_preserved_when_patching(#[case] input: &str, #[case] expected: &str) {
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let patches = vec![Patch {
-            start: locations[0].value_start,
-            end: locations[0].value_end,
-            new_value: "^18.2.0".to_owned(),
-        }];
-        let result = JsonPatcher::apply_patches(input, &patches).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_tab_indent_preserved() {
-        let input = "{\n\t\"dependencies\": {\n\t\t\"react\": \"^17.0.0\"\n\t}\n}\n";
-        let expected = "{\n\t\"dependencies\": {\n\t\t\"react\": \"^18.2.0\"\n\t}\n}\n";
-
-        let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let patches = vec![Patch {
-            start: locations[0].value_start,
-            end: locations[0].value_end,
-            new_value: "^18.2.0".to_owned(),
-        }];
-        let result = JsonPatcher::apply_patches(input, &patches).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_crlf_preserved() {
-        let input = "{\r\n  \"dependencies\": {\r\n    \"react\": \"^17.0.0\"\r\n  }\r\n}\r\n";
-        let expected = "{\r\n  \"dependencies\": {\r\n    \"react\": \"^18.2.0\"\r\n  }\r\n}\r\n";
-
-        let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let patches = vec![Patch {
-            start: locations[0].value_start,
-            end: locations[0].value_end,
-            new_value: "^18.2.0".to_owned(),
-        }];
-        let result = JsonPatcher::apply_patches(input, &patches).unwrap();
+        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
         assert_eq!(result, expected);
     }
 
@@ -538,12 +529,7 @@ mod tests {
     fn test_trailing_newline_preserved() {
         let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let patches = vec![Patch {
-            start: locations[0].value_start,
-            end: locations[0].value_end,
-            new_value: "^18.2.0".to_owned(),
-        }];
-        let result = JsonPatcher::apply_patches(input, &patches).unwrap();
+        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
         assert!(result.ends_with('\n'));
     }
 
@@ -551,12 +537,7 @@ mod tests {
     fn test_no_trailing_newline_preserved() {
         let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}";
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let patches = vec![Patch {
-            start: locations[0].value_start,
-            end: locations[0].value_end,
-            new_value: "^18.2.0".to_owned(),
-        }];
-        let result = JsonPatcher::apply_patches(input, &patches).unwrap();
+        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
         assert!(result.ends_with('}'));
         assert!(!result.ends_with("}\n"));
     }
@@ -591,12 +572,7 @@ mod tests {
         let input = "{\n  \"dependencies\": {\n    \"react\": \"~17.0.0\"\n  }\n}\n";
 
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let patches = vec![Patch {
-            start: locations[0].value_start,
-            end: locations[0].value_end,
-            new_value: "~18.2.0".to_owned(),
-        }];
-        let result = JsonPatcher::apply_patches(input, &patches).unwrap();
+        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "~18.2.0")).unwrap();
         assert!(result.contains("\"~18.2.0\""));
     }
 
@@ -623,17 +599,26 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_find_matching_brace() {
-        let text = r#"{ "a": { "b": 1 }, "c": 2 }"#;
-        assert_eq!(find_matching_brace(text, 0), Some(text.len() - 1));
-    }
-
-    #[test]
-    fn test_find_matching_brace_nested() {
-        let text = r#"{ "a": { "b": {} } }"#;
-        assert_eq!(find_matching_brace(text, 0), Some(text.len() - 1));
-        assert_eq!(find_matching_brace(text, 7), Some(17));
+    #[rstest]
+    // text, open-brace position, expected matching-`}` position.
+    #[case::flat(r#"{ "a": { "b": 1 }, "c": 2 }"#, 0, Some(26))]
+    #[case::nested_outer(r#"{ "a": { "b": {} } }"#, 0, Some(19))]
+    #[case::nested_inner(r#"{ "a": { "b": {} } }"#, 7, Some(17))]
+    #[case::string_with_braces(r#"{ "a": "}{}{", "b": 1 }"#, 0, Some(22))]
+    #[case::escaped_quotes_in_string(
+        r#"{ "key": "value with \" escaped \" quotes", "num": 1 }"#,
+        0,
+        Some(53),
+    )]
+    #[case::escaped_backslash_in_string(r#"{ "key": "val\\", "num": 1 }"#, 0, Some(27))]
+    #[case::not_a_brace("abc", 0, None)]
+    #[case::unmatched("{ unclosed", 0, None)]
+    fn find_matching_brace_cases(
+        #[case] text: &str,
+        #[case] open_pos: usize,
+        #[case] expected: Option<usize>,
+    ) {
+        assert_eq!(find_matching_brace(text, open_pos), expected);
     }
 
     #[test]
@@ -642,12 +627,7 @@ mod tests {
         let input = "{\n  \"dependencies\": {\n    \"react\": \"^1.0.0\"\n  }\n}\n";
 
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let patches = vec![Patch {
-            start: locations[0].value_start,
-            end: locations[0].value_end,
-            new_value: "^10.0.0".to_owned(),
-        }];
-        let result = JsonPatcher::apply_patches(input, &patches).unwrap();
+        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^10.0.0")).unwrap();
         assert!(result.contains("\"^10.0.0\""));
         // Verify it's still valid JSON
         let _: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -656,12 +636,7 @@ mod tests {
     #[test]
     fn test_scan_for_updates_basic() {
         let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
-        let updates = vec![PlannedUpdate {
-            name: "react".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "^17.0.0".to_owned(),
-            to: "^18.2.0".to_owned(),
-        }];
+        let updates = vec![update("react", "^17.0.0", "^18.2.0")];
         let locations = JsonPatcher::scan_for_updates(input, &updates);
         assert_eq!(locations.len(), 1);
         assert_eq!(locations[0].name, "react");
@@ -675,10 +650,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_scan_for_updates_empty() {
-        let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
-        let locations = JsonPatcher::scan_for_updates(input, &[]);
+    #[rstest]
+    // Each case feeds a single-update list to `scan_for_updates` against an
+    // input where the update cannot be located. The returned locations must
+    // be empty for every variant.
+    #[case::empty_updates(
+        "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n",
+        vec![],
+    )]
+    #[case::missing_section(
+        r#"{"dependencies": {"react": "^17.0.0"}}"#,
+        vec![PlannedUpdate {
+            name: "typescript".to_owned(),
+            section: DependencySection::DevDependencies,
+            from: "^4.0.0".to_owned(),
+            to: "^5.3.0".to_owned(),
+        }],
+    )]
+    #[case::dep_not_in_section(
+        r#"{"dependencies": {"react": "^17.0.0"}}"#,
+        vec![update("nonexistent", "^1.0.0", "^2.0.0")],
+    )]
+    #[case::version_mismatch(
+        "{\n  \"dependencies\": {\n    \"react\": \"^18.0.0\"\n  }\n}\n",
+        // `from` doesn't match the value in the JSON → no location.
+        vec![update("react", "^17.0.0", "^19.0.0")],
+    )]
+    fn scan_for_updates_returns_empty(#[case] input: &str, #[case] updates: Vec<PlannedUpdate>) {
+        let locations = JsonPatcher::scan_for_updates(input, &updates);
         assert!(locations.is_empty());
     }
 
@@ -694,12 +693,7 @@ mod tests {
 }
 "#;
         let updates = vec![
-            PlannedUpdate {
-                name: "react".to_owned(),
-                section: DependencySection::Dependencies,
-                from: "^17.0.0".to_owned(),
-                to: "^18.2.0".to_owned(),
-            },
+            update("react", "^17.0.0", "^18.2.0"),
             PlannedUpdate {
                 name: "typescript".to_owned(),
                 section: DependencySection::DevDependencies,
@@ -725,12 +719,7 @@ mod tests {
 }
 "#;
         // Only update react, not lodash
-        let updates = vec![PlannedUpdate {
-            name: "react".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "^17.0.0".to_owned(),
-            to: "^18.2.0".to_owned(),
-        }];
+        let updates = vec![update("react", "^17.0.0", "^18.2.0")];
         let locations = JsonPatcher::scan_for_updates(input, &updates);
         assert_eq!(locations.len(), 1);
         assert_eq!(locations[0].name, "react");
@@ -740,22 +729,9 @@ mod tests {
     fn test_scan_for_updates_apply_roundtrip() {
         let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
         let expected = "{\n  \"dependencies\": {\n    \"react\": \"^18.2.0\"\n  }\n}\n";
-        let updates = vec![PlannedUpdate {
-            name: "react".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "^17.0.0".to_owned(),
-            to: "^18.2.0".to_owned(),
-        }];
+        let updates = vec![update("react", "^17.0.0", "^18.2.0")];
         let locations = JsonPatcher::scan_for_updates(input, &updates);
-        let patches: Vec<Patch> = locations
-            .iter()
-            .map(|loc| Patch {
-                start: loc.value_start,
-                end: loc.value_end,
-                new_value: "^18.2.0".to_owned(),
-            })
-            .collect();
-        let result = JsonPatcher::apply_patches(input, &patches).unwrap();
+        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
         assert_eq!(result, expected);
     }
 
@@ -778,25 +754,21 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_scan_version_locations_escaped_strings() {
-        // JSON with escaped quotes in a value - should still find deps correctly
-        let input = r#"{
+    #[rstest]
+    // Each case calls `scan_version_locations` and expects a single hit for
+    // `react` in the standard `dependencies` section despite JSON features
+    // (escaped quotes, nested non-dep braces) that could trip up scanning.
+    #[case::escaped_strings_in_other_fields(
+        r#"{
   "name": "test \"project\"",
   "dependencies": {
     "react": "^17.0.0"
   }
 }
-"#;
-        let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        assert_eq!(locations.len(), 1);
-        assert_eq!(locations[0].name, "react");
-    }
-
-    #[test]
-    fn test_scan_version_locations_nested_braces() {
-        // JSON with nested objects that aren't dependency sections
-        let input = r#"{
+"#,
+    )]
+    #[case::nested_non_dep_section_with_braces(
+        r#"{
   "scripts": {
     "build": "echo {test}"
   },
@@ -804,7 +776,18 @@ mod tests {
     "react": "^17.0.0"
   }
 }
-"#;
+"#,
+    )]
+    #[case::escaped_quotes_in_description(
+        r#"{
+  "description": "A \"great\" package",
+  "dependencies": {
+    "react": "^17.0.0"
+  }
+}
+"#,
+    )]
+    fn scan_version_locations_finds_only_react(#[case] input: &str) {
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
         assert_eq!(locations.len(), 1);
         assert_eq!(locations[0].name, "react");
@@ -815,50 +798,6 @@ mod tests {
         let input = r#"{"name": "test", "version": "1.0.0"}"#;
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
         assert!(locations.is_empty());
-    }
-
-    #[test]
-    fn test_scan_for_updates_missing_section() {
-        // Update requests a section that doesn't exist in JSON
-        let input = r#"{"dependencies": {"react": "^17.0.0"}}"#;
-        let updates = vec![PlannedUpdate {
-            name: "typescript".to_owned(),
-            section: DependencySection::DevDependencies,
-            from: "^4.0.0".to_owned(),
-            to: "^5.3.0".to_owned(),
-        }];
-        let locations = JsonPatcher::scan_for_updates(input, &updates);
-        assert!(locations.is_empty());
-    }
-
-    #[test]
-    fn test_scan_for_updates_dep_not_found_in_section() {
-        let input = r#"{"dependencies": {"react": "^17.0.0"}}"#;
-        let updates = vec![PlannedUpdate {
-            name: "nonexistent".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "^1.0.0".to_owned(),
-            to: "^2.0.0".to_owned(),
-        }];
-        let locations = JsonPatcher::scan_for_updates(input, &updates);
-        assert!(locations.is_empty());
-    }
-
-    #[test]
-    fn test_find_matching_brace_with_string_containing_braces() {
-        let text = r#"{ "a": "}{}{", "b": 1 }"#;
-        let result = find_matching_brace(text, 0);
-        assert_eq!(result, Some(text.len() - 1));
-    }
-
-    #[test]
-    fn test_find_matching_brace_not_a_brace() {
-        assert_eq!(find_matching_brace("abc", 0), None);
-    }
-
-    #[test]
-    fn test_find_matching_brace_unmatched() {
-        assert_eq!(find_matching_brace("{ unclosed", 0), None);
     }
 
     #[test]
@@ -888,103 +827,62 @@ mod tests {
         assert!(pos.is_none());
     }
 
-    #[test]
-    fn test_find_char_skipping_whitespace_no_match() {
-        // Non-whitespace, non-target character found first
-        let result = find_char_skipping_whitespace("abc:", ':', 0);
-        assert!(result.is_none());
+    #[rstest]
+    // text, target char, `from` index, expected return.
+    #[case::non_target_first("abc:", ':', 0, None)]
+    #[case::immediate_hit(":rest", ':', 0, Some(0))]
+    #[case::empty_slice_from_end("abc", ':', 3, None)]
+    // Whitespace is skipped, then a non-whitespace non-target char triggers
+    // the early `return None` at the `!c.is_whitespace()` branch.
+    #[case::whitespace_then_non_target("  x:", ':', 0, None)]
+    fn find_char_skipping_whitespace_cases(
+        #[case] text: &str,
+        #[case] ch: char,
+        #[case] from: usize,
+        #[case] expected: Option<usize>,
+    ) {
+        assert_eq!(find_char_skipping_whitespace(text, ch, from), expected);
     }
 
-    #[test]
-    fn test_find_char_skipping_whitespace_immediate() {
-        let result = find_char_skipping_whitespace(":rest", ':', 0);
-        assert_eq!(result, Some(0));
+    #[rstest]
+    #[case::non_quote_char_first("abc\"", 0, None)]
+    #[case::leading_whitespace("  \"hello\"", 0, Some(2))]
+    #[case::empty_slice_from_end("abc", 3, None)]
+    fn find_next_quote_cases(
+        #[case] text: &str,
+        #[case] from: usize,
+        #[case] expected: Option<usize>,
+    ) {
+        assert_eq!(find_next_quote(text, from), expected);
     }
 
-    #[test]
-    fn test_find_next_quote_non_quote_char() {
-        let result = find_next_quote("abc\"", 0);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_find_next_quote_with_whitespace() {
-        let result = find_next_quote("  \"hello\"", 0);
-        assert_eq!(result, Some(2));
-    }
-
-    #[test]
-    fn test_scan_version_locations_peer_dependencies() {
-        let input = r#"{
+    #[rstest]
+    // Single-section JSON: scan returns one location whose `section` matches.
+    #[case::peer_dependencies(
+        r#"{
   "peerDependencies": {
     "react": "^17.0.0 || ^18.0.0"
   }
 }
-"#;
-        let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        assert_eq!(locations.len(), 1);
-        assert_eq!(locations[0].section, DependencySection::PeerDependencies);
-    }
-
-    #[test]
-    fn test_scan_version_locations_optional_dependencies() {
-        let input = r#"{
+"#,
+        DependencySection::PeerDependencies,
+    )]
+    #[case::optional_dependencies(
+        r#"{
   "optionalDependencies": {
     "fsevents": "^2.3.0"
   }
 }
-"#;
+"#,
+        DependencySection::OptionalDependencies,
+    )]
+    fn scan_version_locations_section_specific(
+        #[case] input: &str,
+        #[case] expected_section: DependencySection,
+    ) {
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
         assert_eq!(locations.len(), 1);
-        assert_eq!(
-            locations[0].section,
-            DependencySection::OptionalDependencies
-        );
-    }
-
-    #[test]
-    fn test_find_matching_brace_with_escaped_quotes_in_string() {
-        // String contains escaped quotes - the escape handler (line 279-281) must skip them
-        let text = r#"{ "key": "value with \" escaped \" quotes", "num": 1 }"#;
-        let result = find_matching_brace(text, 0);
-        assert_eq!(result, Some(text.len() - 1));
-    }
-
-    #[test]
-    fn test_find_matching_brace_escaped_backslash_in_string() {
-        // String ends with escaped backslash: "val\\" - must not treat next quote as escaped
-        let text = r#"{ "key": "val\\", "num": 1 }"#;
-        let result = find_matching_brace(text, 0);
-        assert_eq!(result, Some(text.len() - 1));
-    }
-
-    #[test]
-    fn test_scan_for_updates_version_mismatch() {
-        // The `from` version doesn't match what's in the JSON → should not find location
-        let input = "{\n  \"dependencies\": {\n    \"react\": \"^18.0.0\"\n  }\n}\n";
-        let updates = vec![PlannedUpdate {
-            name: "react".to_owned(),
-            section: DependencySection::Dependencies,
-            from: "^17.0.0".to_owned(), // doesn't match ^18.0.0 in JSON
-            to: "^19.0.0".to_owned(),
-        }];
-        let locations = JsonPatcher::scan_for_updates(input, &updates);
-        assert!(locations.is_empty());
-    }
-
-    #[test]
-    fn test_scan_version_locations_with_escaped_dep_value() {
-        // Dependency section with value containing escaped chars in other fields
-        let input = r#"{
-  "description": "A \"great\" package",
-  "dependencies": {
-    "react": "^17.0.0"
-  }
-}
-"#;
-        let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        assert_eq!(locations.len(), 1);
-        assert_eq!(locations[0].name, "react");
+        assert_eq!(locations[0].section, expected_section);
     }
 
     #[test]
@@ -995,23 +893,12 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[test]
-    fn test_find_section_bounds_key_not_found() {
-        // Section key doesn't exist in text at all
-        assert!(find_section_bounds("{}", "dependencies").is_none());
-    }
-
-    #[test]
-    fn test_find_section_bounds_no_brace_after_key() {
-        // Key exists and is followed by `:`, but no `{` after it (truncated text)
-        let text = r#"{"dependencies": "#;
-        assert!(find_section_bounds(text, "dependencies").is_none());
-    }
-
-    #[test]
-    fn test_find_section_bounds_no_matching_close_brace() {
-        // Key exists and `{` found, but no matching `}`
-        let text = r#"{"dependencies": {"#;
+    #[rstest]
+    // Each invalid case must produce `None` from `find_section_bounds`.
+    #[case::key_not_found("{}")]
+    #[case::no_brace_after_key(r#"{"dependencies": "#)]
+    #[case::no_matching_close_brace(r#"{"dependencies": {"#)]
+    fn find_section_bounds_invalid_cases(#[case] text: &str) {
         assert!(find_section_bounds(text, "dependencies").is_none());
     }
 
@@ -1032,19 +919,5 @@ mod tests {
         let input = "{\"depend\\u0065ncies\": {\"react\": \"^17.0.0\"}}";
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
         assert!(locations.is_empty());
-    }
-
-    #[test]
-    fn test_find_char_skipping_whitespace_empty_from_end() {
-        // When `from == text.len()`, the slice is empty → None
-        let text = "abc";
-        assert_eq!(find_char_skipping_whitespace(text, ':', text.len()), None);
-    }
-
-    #[test]
-    fn test_find_next_quote_empty_from_end() {
-        // When `from == text.len()`, the slice is empty → None
-        let text = "abc";
-        assert_eq!(find_next_quote(text, text.len()), None);
     }
 }

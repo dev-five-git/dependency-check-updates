@@ -116,43 +116,38 @@ pub fn select_version<V: SelectableVersion>(
         })
     };
 
+    // `match` is kept (for variant-exhaustiveness) but every arm body is an
+    // expression that begins on the arm line, so each branch is a single
+    // covered region.
     match target {
-        TargetLevel::Latest => {
-            if current_is_prerelease {
-                all_versions.iter().rev().find(accept).map(ToString::to_string)
-            } else {
-                latest_for_stable
-            }
+        TargetLevel::Latest if current_is_prerelease => {
+            all_versions.iter().rev().find(accept).map(ToString::to_string)
         }
-        TargetLevel::Greatest | TargetLevel::Newest => {
-            all_versions.last().map(ToString::to_string)
-        }
-        TargetLevel::Minor => {
-            let Some(cur) = current else {
-                return unparseable_minor_patch;
-            };
-            all_versions
+        TargetLevel::Latest => latest_for_stable,
+        TargetLevel::Greatest | TargetLevel::Newest => all_versions.last().map(ToString::to_string),
+        TargetLevel::Minor => match current {
+            None => unparseable_minor_patch,
+            Some(cur) => all_versions
                 .iter()
                 .rev()
                 .find(|v| v.major() == cur.major() && accept(v))
-                .map(ToString::to_string)
-        }
-        TargetLevel::Patch => {
-            let Some(cur) = current else {
-                return unparseable_minor_patch;
-            };
-            all_versions
+                .map(ToString::to_string),
+        },
+        TargetLevel::Patch => match current {
+            None => unparseable_minor_patch,
+            Some(cur) => all_versions
                 .iter()
                 .rev()
                 .find(|v| v.major() == cur.major() && v.minor() == cur.minor() && accept(v))
-                .map(ToString::to_string)
-        }
+                .map(ToString::to_string),
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn vers(specs: &[&str]) -> Vec<semver::Version> {
         let mut v: Vec<_> = specs
@@ -167,101 +162,120 @@ mod tests {
         semver::Version::parse(s).ok()
     }
 
-    #[test]
-    fn test_empty_returns_latest_for_stable() {
-        let selected = select_version::<semver::Version>(
-            None,
-            &[],
-            TargetLevel::Greatest,
-            Some("1.0.0".to_owned()),
-            None,
-        );
-        assert_eq!(selected, Some("1.0.0".to_owned()));
-    }
-
-    #[test]
-    fn test_latest_stable_returns_fallback() {
-        let v = vers(&["1.0.0", "1.5.0", "2.0.0"]);
-        let cur = parse("1.0.0");
+    /// Whole-algorithm coverage for [`select_version`] against
+    /// `semver::Version`. Every case captures the unique combination of
+    /// `(current, candidates, target, latest_for_stable, unparseable_minor_patch)`
+    /// → expected output that the three registry clients depend on.
+    ///
+    /// `current_str = None` simulates an unparseable current pin; the
+    /// `unparseable_*` case proves the dedicated fallback wins over
+    /// `latest_for_stable` for `Minor`/`Patch`.
+    #[rstest]
+    #[case::empty_returns_latest_for_stable(
+        None,
+        &[],
+        TargetLevel::Greatest,
+        Some("1.0.0"),
+        None,
+        Some("1.0.0"),
+    )]
+    #[case::latest_stable_returns_fallback(
+        Some("1.0.0"),
+        &["1.0.0", "1.5.0", "2.0.0"],
+        TargetLevel::Latest,
+        Some("2.0.0"),
+        None,
+        Some("2.0.0"),
+    )]
+    #[case::minor_stays_on_major(
+        Some("1.0.0"),
+        &["1.0.0", "1.5.0", "2.0.0"],
+        TargetLevel::Minor,
+        None,
+        None,
+        Some("1.5.0"),
+    )]
+    #[case::patch_stays_on_minor(
+        Some("1.0.0"),
+        &["1.0.0", "1.0.5", "1.1.0", "2.0.0"],
+        TargetLevel::Patch,
+        None,
+        None,
+        Some("1.0.5"),
+    )]
+    #[case::greatest_includes_prerelease(
+        Some("1.0.0"),
+        &["1.0.0", "2.0.0-rc.1"],
+        TargetLevel::Greatest,
+        None,
+        None,
+        Some("2.0.0-rc.1"),
+    )]
+    // Stable current + Latest → returns latest_for_stable, never a prerelease.
+    #[case::latest_stable_excludes_prerelease_via_fallback(
+        Some("1.0.0"),
+        &["1.0.0", "2.0.0-rc.1"],
+        TargetLevel::Latest,
+        Some("1.0.0"),
+        None,
+        Some("1.0.0"),
+    )]
+    // Current on 2.0.0-rc.1 → Latest may climb the same train.
+    #[case::prerelease_tail_same_train(
+        Some("2.0.0-rc.1"),
+        &["1.1.0", "2.0.0-rc.1", "2.0.0-rc.2"],
+        TargetLevel::Latest,
+        Some("1.1.0"),
+        None,
+        Some("2.0.0-rc.2"),
+    )]
+    // current None (unparseable) → returns the unparseable fallback, not latest_for_stable.
+    #[case::unparseable_minor_uses_dedicated_fallback(
+        None,
+        &["1.0.0", "2.0.0"],
+        TargetLevel::Minor,
+        Some("2.0.0"),
+        None,
+        None,
+    )]
+    // Patch with current None (unparseable) → returns the unparseable fallback.
+    // Exercises the early-return arm in `TargetLevel::Patch` (line 142).
+    #[case::unparseable_patch_uses_dedicated_fallback(
+        None,
+        &["1.0.0", "1.0.1", "2.0.0"],
+        TargetLevel::Patch,
+        Some("2.0.0"),
+        None,
+        None,
+    )]
+    // `Newest` is the second arm under `Greatest | Newest` (line 127); proves
+    // it picks the last entry just like `Greatest`.
+    #[case::newest_returns_last_candidate(
+        Some("1.0.0"),
+        &["1.0.0", "1.5.0", "2.0.0"],
+        TargetLevel::Newest,
+        None,
+        None,
+        Some("2.0.0"),
+    )]
+    fn select_version_cases(
+        #[case] current_str: Option<&str>,
+        #[case] version_strs: &[&str],
+        #[case] target: TargetLevel,
+        #[case] latest_for_stable: Option<&str>,
+        #[case] unparseable_minor_patch: Option<&str>,
+        #[case] expected: Option<&str>,
+    ) {
+        let cur = current_str.and_then(parse);
+        let candidates = vers(version_strs);
         let selected = select_version(
             cur.as_ref(),
-            &v,
-            TargetLevel::Latest,
-            Some("2.0.0".to_owned()),
-            None,
+            &candidates,
+            target,
+            latest_for_stable.map(ToOwned::to_owned),
+            unparseable_minor_patch.map(ToOwned::to_owned),
         );
-        assert_eq!(selected, Some("2.0.0".to_owned()));
-    }
-
-    #[test]
-    fn test_minor_stays_on_major() {
-        let v = vers(&["1.0.0", "1.5.0", "2.0.0"]);
-        let cur = parse("1.0.0");
-        let selected =
-            select_version(cur.as_ref(), &v, TargetLevel::Minor, None, None);
-        assert_eq!(selected, Some("1.5.0".to_owned()));
-    }
-
-    #[test]
-    fn test_patch_stays_on_minor() {
-        let v = vers(&["1.0.0", "1.0.5", "1.1.0", "2.0.0"]);
-        let cur = parse("1.0.0");
-        let selected =
-            select_version(cur.as_ref(), &v, TargetLevel::Patch, None, None);
-        assert_eq!(selected, Some("1.0.5".to_owned()));
-    }
-
-    #[test]
-    fn test_greatest_includes_prerelease() {
-        let v = vers(&["1.0.0", "2.0.0-rc.1"]);
-        let cur = parse("1.0.0");
-        let selected =
-            select_version(cur.as_ref(), &v, TargetLevel::Greatest, None, None);
-        assert_eq!(selected, Some("2.0.0-rc.1".to_owned()));
-    }
-
-    #[test]
-    fn test_latest_stable_excludes_prerelease_via_fallback() {
-        // Stable current + Latest → returns latest_for_stable, never a prerelease.
-        let v = vers(&["1.0.0", "2.0.0-rc.1"]);
-        let cur = parse("1.0.0");
-        let selected = select_version(
-            cur.as_ref(),
-            &v,
-            TargetLevel::Latest,
-            Some("1.0.0".to_owned()),
-            None,
-        );
-        assert_eq!(selected, Some("1.0.0".to_owned()));
-    }
-
-    #[test]
-    fn test_prerelease_tail_same_train() {
-        // Current on 2.0.0-rc.1 → Latest may climb the same train.
-        let v = vers(&["1.1.0", "2.0.0-rc.1", "2.0.0-rc.2"]);
-        let cur = parse("2.0.0-rc.1");
-        let selected = select_version(
-            cur.as_ref(),
-            &v,
-            TargetLevel::Latest,
-            Some("1.1.0".to_owned()),
-            None,
-        );
-        assert_eq!(selected, Some("2.0.0-rc.2".to_owned()));
-    }
-
-    #[test]
-    fn test_unparseable_minor_uses_dedicated_fallback() {
-        let v = vers(&["1.0.0", "2.0.0"]);
-        // current None (unparseable) → returns the unparseable fallback, not latest_for_stable.
-        let selected = select_version::<semver::Version>(
-            None,
-            &v,
-            TargetLevel::Minor,
-            Some("2.0.0".to_owned()),
-            None,
-        );
-        assert_eq!(selected, None);
+        assert_eq!(selected, expected.map(ToOwned::to_owned));
     }
 
     #[test]

@@ -132,181 +132,258 @@ pub(crate) fn cleanup_and_render(job: &ManifestJob, cli: &Cli) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     // -------- Cleanup helpers --------
 
-    #[test]
-    fn test_lockfiles_for_each_kind() {
-        // PackageJson covers every major Node lockfile variant.
-        let node = lockfiles_for(ManifestKind::PackageJson);
-        assert!(node.contains(&"bun.lock"));
-        assert!(node.contains(&"bun.lockb"));
-        assert!(node.contains(&"package-lock.json"));
-        assert!(node.contains(&"pnpm-lock.yaml"));
-        assert!(node.contains(&"yarn.lock"));
-
-        assert_eq!(lockfiles_for(ManifestKind::CargoToml), &["Cargo.lock"]);
-
-        let py = lockfiles_for(ManifestKind::PyProjectToml);
-        assert!(py.contains(&"uv.lock"));
-        assert!(py.contains(&"poetry.lock"));
-        assert!(py.contains(&"Pipfile.lock"));
-
-        assert!(lockfiles_for(ManifestKind::GitHubWorkflow).is_empty());
+    #[rstest]
+    // (kind, every entry that MUST appear in the returned slice)
+    #[case::package_json(
+        ManifestKind::PackageJson,
+        &["bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"],
+    )]
+    #[case::cargo_toml(ManifestKind::CargoToml, &["Cargo.lock"])]
+    #[case::pyproject_toml(
+        ManifestKind::PyProjectToml,
+        &["uv.lock", "poetry.lock", "Pipfile.lock"],
+    )]
+    #[case::github_workflow(ManifestKind::GitHubWorkflow, &[])]
+    fn lockfiles_for_cases(#[case] kind: ManifestKind, #[case] expected: &[&str]) {
+        let got = lockfiles_for(kind);
+        for needle in expected {
+            assert!(
+                got.contains(needle),
+                "{got:?} should contain {needle:?} for {kind:?}"
+            );
+        }
+        if expected.is_empty() {
+            assert!(got.is_empty(), "{got:?} should be empty for {kind:?}");
+        }
     }
 
-    #[test]
-    fn test_installed_dirs_for_each_kind() {
+    #[rstest]
+    #[case::package_json(ManifestKind::PackageJson, &["node_modules"])]
+    #[case::cargo_toml(ManifestKind::CargoToml, &["target"])]
+    #[case::pyproject_toml(ManifestKind::PyProjectToml, &[".venv", "venv"])]
+    #[case::github_workflow(ManifestKind::GitHubWorkflow, &[])]
+    fn installed_dirs_for_cases(#[case] kind: ManifestKind, #[case] expected: &[&str]) {
+        let got = installed_dirs_for(kind);
+        for needle in expected {
+            assert!(
+                got.contains(needle),
+                "{got:?} should contain {needle:?} for {kind:?}"
+            );
+        }
+        if expected.is_empty() {
+            assert!(got.is_empty(), "{got:?} should be empty for {kind:?}");
+        }
+    }
+
+    #[rstest]
+    // (entries handed to `render_removed`, exact expected output)
+    #[case::empty_returns_empty_string(&[], "")]
+    #[case::formats_each_entry_on_its_own_line(
+        &["Cargo.lock", "target/"],
+        " Removed Cargo.lock\n Removed target/\n",
+    )]
+    fn render_removed_cases(#[case] entries: &[&str], #[case] expected: &str) {
+        let owned: Vec<String> = entries.iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(render_removed(&owned), expected);
+    }
+
+    // -------- cleanup_manifest_siblings scenarios --------
+
+    /// `(remove_lockfile, remove_installed)` flag pair handed to
+    /// [`cleanup_manifest_siblings`]. Bundled as a tuple alias so the
+    /// parametrized test stays under `clippy::too_many_arguments`'s threshold
+    /// (7) while keeping the individual case rows readable.
+    type CleanupFlags = (bool, bool);
+
+    #[rstest]
+    // Cargo manifest, both flags off → nothing touched, Cargo.lock survives.
+    #[case::cargo_both_flags_off_is_noop(
+        ManifestKind::CargoToml, "Cargo.toml",
+        &["Cargo.lock"], &[],
+        (false, false),
+        &[], &["Cargo.lock"],
+    )]
+    // Cargo manifest, lockfile flag on → Cargo.lock removed.
+    #[case::cargo_removes_existing_lockfile(
+        ManifestKind::CargoToml, "Cargo.toml",
+        &["Cargo.lock"], &[],
+        (true, false),
+        &["Cargo.lock"], &[],
+    )]
+    // No lockfile present → silently skipped, no removals reported.
+    #[case::cargo_silently_skips_missing_lockfile(
+        ManifestKind::CargoToml, "Cargo.toml",
+        &[], &[],
+        (true, true),
+        &[], &[],
+    )]
+    // Node manifest, installed flag on → node_modules/ removed recursively.
+    #[case::node_removes_node_modules(
+        ManifestKind::PackageJson, "package.json",
+        &[], &["node_modules"],
+        (false, true),
+        &["node_modules/"], &[],
+    )]
+    // Both flags on: lockfiles first (in declared order), then installed dirs.
+    // Exact-equality assertion on `expected_removed` verifies the ordering.
+    #[case::node_removes_lockfile_and_installed_together(
+        ManifestKind::PackageJson, "package.json",
+        &["bun.lock", "yarn.lock"], &["node_modules"],
+        (true, true),
+        &["bun.lock", "yarn.lock", "node_modules/"], &[],
+    )]
+    // Cargo cleanup must NEVER delete foreign (node) lockfiles or dirs.
+    #[case::cargo_does_not_touch_unrelated_lockfiles(
+        ManifestKind::CargoToml, "Cargo.toml",
+        &["Cargo.lock", "bun.lock"], &["node_modules"],
+        (true, true),
+        &["Cargo.lock"], &["bun.lock", "node_modules"],
+    )]
+    // GitHub workflows have no companion lockfile/dir — both flags are a noop.
+    #[case::github_workflow_is_noop(
+        ManifestKind::GitHubWorkflow, ".github/workflows/CI.yml",
+        &["bun.lock"], &[],
+        (true, true),
+        &[], &["bun.lock"],
+    )]
+    fn cleanup_manifest_siblings_cases(
+        #[case] kind: ManifestKind,
+        #[case] manifest_rel: &str,
+        #[case] seed_lockfiles: &[&str],
+        #[case] seed_install_dirs: &[&str],
+        #[case] flags: CleanupFlags,
+        #[case] expected_removed: &[&str],
+        #[case] expected_surviving: &[&str],
+    ) {
+        let (remove_lockfile, remove_installed) = flags;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = tmp.path().join(manifest_rel);
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, "").unwrap();
+        let parent = manifest.parent().unwrap();
+
+        for name in seed_lockfiles {
+            std::fs::write(parent.join(name), "").unwrap();
+        }
+        for name in seed_install_dirs {
+            // Seed a child file inside so the recursive-remove path is exercised.
+            let dir = parent.join(name);
+            std::fs::create_dir_all(dir.join("child")).unwrap();
+            std::fs::write(dir.join("child").join("file"), "").unwrap();
+        }
+
+        let removed =
+            cleanup_manifest_siblings(&manifest, kind, remove_lockfile, remove_installed);
+
+        let expected_vec: Vec<String> =
+            expected_removed.iter().map(|s| (*s).to_owned()).collect();
         assert_eq!(
-            installed_dirs_for(ManifestKind::PackageJson),
-            &["node_modules"]
+            removed, expected_vec,
+            "removed list mismatch (order matters)"
         );
-        assert_eq!(installed_dirs_for(ManifestKind::CargoToml), &["target"]);
 
-        let py = installed_dirs_for(ManifestKind::PyProjectToml);
-        assert!(py.contains(&".venv"));
-        assert!(py.contains(&"venv"));
-
-        assert!(installed_dirs_for(ManifestKind::GitHubWorkflow).is_empty());
+        for name in expected_surviving {
+            assert!(
+                parent.join(name).exists(),
+                "{name} must survive cleanup but is gone"
+            );
+        }
+        for name in expected_removed {
+            // `node_modules/` display name maps back to `node_modules` on disk.
+            let bare = name.trim_end_matches('/');
+            assert!(
+                !parent.join(bare).exists(),
+                "{bare} should have been removed"
+            );
+        }
     }
 
+    // -------- Early-return + warn-arm error paths --------
+
+    /// Covers the `manifest_path.parent() == None` early-return branch:
+    /// `Path::new("").parent()` is `None`, so the function returns an empty
+    /// Vec without touching the filesystem.
     #[test]
-    fn test_render_removed_empty_returns_empty_string() {
-        // No removals → no output (caller prints unconditionally).
-        assert_eq!(render_removed(&[]), "");
-    }
-
-    #[test]
-    fn test_render_removed_formats_each_entry_on_its_own_line() {
-        let lines = render_removed(&["Cargo.lock".to_owned(), "target/".to_owned()]);
-        assert_eq!(lines, " Removed Cargo.lock\n Removed target/\n");
-    }
-
-    #[test]
-    fn test_cleanup_manifest_siblings_both_flags_off_is_noop() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("Cargo.toml");
-        std::fs::write(&manifest, "").unwrap();
-        let lock = dir.path().join("Cargo.lock");
-        std::fs::write(&lock, "").unwrap();
-
-        let removed =
-            cleanup_manifest_siblings(&manifest, ManifestKind::CargoToml, false, false);
-
-        assert!(removed.is_empty());
-        assert!(lock.exists(), "Cargo.lock must be untouched when both flags are off");
-    }
-
-    #[test]
-    fn test_cleanup_manifest_siblings_removes_existing_lockfile() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("Cargo.toml");
-        std::fs::write(&manifest, "").unwrap();
-        let lock = dir.path().join("Cargo.lock");
-        std::fs::write(&lock, "# whatever").unwrap();
-
-        let removed = cleanup_manifest_siblings(&manifest, ManifestKind::CargoToml, true, false);
-
-        assert_eq!(removed, vec!["Cargo.lock".to_owned()]);
-        assert!(!lock.exists());
-    }
-
-    #[test]
-    fn test_cleanup_manifest_siblings_silently_skips_missing_lockfile() {
-        // No Cargo.lock present — must succeed and report nothing removed.
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("Cargo.toml");
-        std::fs::write(&manifest, "").unwrap();
-
-        let removed = cleanup_manifest_siblings(&manifest, ManifestKind::CargoToml, true, true);
-
-        assert!(removed.is_empty());
-    }
-
-    #[test]
-    fn test_cleanup_manifest_siblings_removes_node_modules() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("package.json");
-        std::fs::write(&manifest, "{}").unwrap();
-        let nm = dir.path().join("node_modules");
-        std::fs::create_dir_all(nm.join("react")).unwrap();
-        std::fs::write(nm.join("react").join("index.js"), "").unwrap();
-
-        let removed =
-            cleanup_manifest_siblings(&manifest, ManifestKind::PackageJson, false, true);
-
-        assert_eq!(removed, vec!["node_modules/".to_owned()]);
-        assert!(!nm.exists(), "node_modules must be removed recursively");
-    }
-
-    #[test]
-    fn test_cleanup_manifest_siblings_removes_lockfile_and_installed_together() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("package.json");
-        std::fs::write(&manifest, "{}").unwrap();
-        std::fs::write(dir.path().join("bun.lock"), "").unwrap();
-        std::fs::write(dir.path().join("yarn.lock"), "").unwrap();
-        std::fs::create_dir_all(dir.path().join("node_modules")).unwrap();
-
-        let removed =
-            cleanup_manifest_siblings(&manifest, ManifestKind::PackageJson, true, true);
-
-        // Lockfiles come first (in their declared order), then installed dirs.
-        assert!(removed.contains(&"bun.lock".to_owned()));
-        assert!(removed.contains(&"yarn.lock".to_owned()));
-        assert!(removed.contains(&"node_modules/".to_owned()));
-        // Lockfiles must appear before installed dirs.
-        let lock_idx = removed.iter().position(|n| n == "bun.lock").unwrap();
-        let nm_idx = removed.iter().position(|n| n == "node_modules/").unwrap();
-        assert!(lock_idx < nm_idx, "lockfiles should be listed before installed dirs");
-
-        assert!(!dir.path().join("bun.lock").exists());
-        assert!(!dir.path().join("yarn.lock").exists());
-        assert!(!dir.path().join("node_modules").exists());
-    }
-
-    #[test]
-    fn test_cleanup_manifest_siblings_does_not_touch_unrelated_lockfiles() {
-        // A Cargo manifest must NEVER delete bun.lock or pnpm-lock.yaml, even
-        // when both --remove-lockfile and --remove-installed are set.
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("Cargo.toml");
-        std::fs::write(&manifest, "").unwrap();
-        std::fs::write(dir.path().join("Cargo.lock"), "").unwrap();
-        let foreign_lock = dir.path().join("bun.lock");
-        std::fs::write(&foreign_lock, "").unwrap();
-        let foreign_dir = dir.path().join("node_modules");
-        std::fs::create_dir_all(&foreign_dir).unwrap();
-
-        let removed = cleanup_manifest_siblings(&manifest, ManifestKind::CargoToml, true, true);
-
-        assert!(removed.contains(&"Cargo.lock".to_owned()));
+    fn cleanup_returns_empty_when_manifest_has_no_parent() {
+        let removed = cleanup_manifest_siblings(
+            Path::new(""),
+            ManifestKind::CargoToml,
+            true,
+            true,
+        );
         assert!(
-            !removed.iter().any(|n| n == "bun.lock"),
-            "Cargo cleanup must not touch bun.lock"
+            removed.is_empty(),
+            "expected empty removal list for parent-less path, got {removed:?}"
         );
-        assert!(foreign_lock.exists(), "bun.lock must survive Cargo cleanup");
-        assert!(foreign_dir.exists(), "node_modules must survive Cargo cleanup");
     }
 
+    /// Covers the `Err(e) => warn!(...)` arm of `remove_file` for a
+    /// non-`NotFound` error: a *directory* named `Cargo.lock` sits where a
+    /// lockfile would. `std::fs::remove_file` refuses to delete a directory,
+    /// returning an error whose kind is not `NotFound`, so the warn arm
+    /// fires. The directory must survive and must NOT appear in `removed`.
     #[test]
-    fn test_cleanup_manifest_siblings_github_workflow_is_noop() {
-        // Workflows have no companion lockfile or installed dir — both flags
-        // must produce zero removals and zero side effects.
-        let dir = tempfile::tempdir().unwrap();
-        let workflows = dir.path().join(".github").join("workflows");
-        std::fs::create_dir_all(&workflows).unwrap();
-        let manifest = workflows.join("CI.yml");
-        std::fs::write(&manifest, "name: CI\n").unwrap();
-        // A stray bun.lock next to the workflow must not be touched.
-        let stray = workflows.join("bun.lock");
-        std::fs::write(&stray, "").unwrap();
+    fn cleanup_lockfile_warns_when_remove_file_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = tmp.path().join("Cargo.toml");
+        std::fs::write(&manifest, "").unwrap();
 
-        let removed =
-            cleanup_manifest_siblings(&manifest, ManifestKind::GitHubWorkflow, true, true);
+        // Lockfile slot occupied by a *directory* — remove_file will fail.
+        let lock_as_dir = tmp.path().join("Cargo.lock");
+        std::fs::create_dir(&lock_as_dir).unwrap();
 
-        assert!(removed.is_empty());
-        assert!(stray.exists());
+        let removed = cleanup_manifest_siblings(
+            &manifest,
+            ManifestKind::CargoToml,
+            true,
+            false,
+        );
+
+        assert!(
+            removed.is_empty(),
+            "remove_file failure must not push to removed, got {removed:?}"
+        );
+        assert!(
+            lock_as_dir.exists() && lock_as_dir.is_dir(),
+            "Cargo.lock directory must survive the failed remove_file"
+        );
     }
 
+    /// Covers the `Err(e) => warn!(...)` arm of `remove_dir_all` for a
+    /// non-`NotFound` error: a regular *file* named `target` sits where the
+    /// installed-deps directory would. `std::fs::remove_dir_all` cannot
+    /// recurse into a non-directory and returns a non-`NotFound` error, so
+    /// the warn arm fires. The file must survive and must NOT appear in
+    /// `removed`.
+    #[test]
+    fn cleanup_installed_warns_when_remove_dir_all_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = tmp.path().join("Cargo.toml");
+        std::fs::write(&manifest, "").unwrap();
+
+        // Installed-dir slot occupied by a regular *file* — remove_dir_all fails.
+        let target_as_file = tmp.path().join("target");
+        std::fs::write(&target_as_file, "not a directory").unwrap();
+
+        let removed = cleanup_manifest_siblings(
+            &manifest,
+            ManifestKind::CargoToml,
+            false,
+            true,
+        );
+
+        assert!(
+            removed.is_empty(),
+            "remove_dir_all failure must not push to removed, got {removed:?}"
+        );
+        assert!(
+            target_as_file.exists() && target_as_file.is_file(),
+            "`target` file must survive the failed remove_dir_all"
+        );
+    }
 }

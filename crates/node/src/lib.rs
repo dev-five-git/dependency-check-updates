@@ -68,6 +68,7 @@ mod tests {
     use super::*;
     use dependency_check_updates_core::manifest::ManifestHandler;
     use dependency_check_updates_core::{DependencySection, DependencySpec, PlannedUpdate};
+    use rstest::rstest;
     use std::path::Path;
 
     /// Test-only helper: true when the section belongs to the Node ecosystem.
@@ -81,32 +82,29 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_node_handler_parse() {
+    #[rstest]
+    // raw JSON, expected dependency count (None ⇒ parse must error).
+    #[case::with_deps(
+        r#"{"dependencies": {"react": "^18.0.0", "lodash": "^4.17.0"}}"#,
+        Some(2),
+    )]
+    #[case::empty_object(r#"{"name": "test"}"#, Some(0))]
+    #[case::invalid_json("not json", None)]
+    fn node_handler_parse_cases(#[case] text: &str, #[case] expected_count: Option<usize>) {
         let handler = NodeHandler;
-        let text = r#"{"dependencies": {"react": "^18.0.0", "lodash": "^4.17.0"}}"#;
-        let result = handler.parse(text, Path::new("package.json")).unwrap();
-        assert_eq!(result.dependencies.len(), 2);
-        assert_eq!(result.manifest_ref.kind, ManifestKind::PackageJson);
+        let result = handler.parse(text, Path::new("package.json"));
+        match expected_count {
+            Some(n) => {
+                let parsed = result.unwrap();
+                assert_eq!(parsed.dependencies.len(), n);
+                assert_eq!(parsed.manifest_ref.kind, ManifestKind::PackageJson);
+            }
+            None => assert!(result.is_err()),
+        }
     }
 
     #[test]
-    fn test_node_handler_parse_empty() {
-        let handler = NodeHandler;
-        let text = r#"{"name": "test"}"#;
-        let result = handler.parse(text, Path::new("package.json")).unwrap();
-        assert!(result.dependencies.is_empty());
-    }
-
-    #[test]
-    fn test_node_handler_parse_invalid_json() {
-        let handler = NodeHandler;
-        let result = handler.parse("not json", Path::new("package.json"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_node_handler_apply_updates() {
+    fn node_handler_apply_updates_single() {
         let handler = NodeHandler;
         let text = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
         let updates = vec![PlannedUpdate {
@@ -121,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn test_node_handler_apply_updates_multiple() {
+    fn node_handler_apply_updates_multiple() {
         let handler = NodeHandler;
         let text = r#"{
   "dependencies": {
@@ -152,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn test_node_handler_apply_updates_empty() {
+    fn node_handler_apply_updates_empty() {
         let handler = NodeHandler;
         let text = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
         let result = handler.apply_updates(text, &[]).unwrap();
@@ -160,19 +158,38 @@ mod tests {
     }
 
     #[test]
-    fn test_is_node_ecosystem() {
-        let dep = DependencySpec {
+    fn node_handler_apply_updates_patch_failed_validation() {
+        // `to` contains a raw `"` which, after byte-range substitution into
+        // the JSON, breaks the document. `apply_patches` then fails its
+        // `serde_json` re-validation and returns `ValidationFailed`, which
+        // `apply_updates` maps to `DcuError::PatchFailed` — covering the
+        // `.map_err(DcuError::PatchFailed)` arm.
+        let handler = NodeHandler;
+        let text = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
+        let updates = vec![PlannedUpdate {
             name: "react".to_owned(),
-            current_req: "^18.0.0".to_owned(),
             section: DependencySection::Dependencies,
-        };
-        assert!(is_node_ecosystem(&dep));
+            from: "^17.0.0".to_owned(),
+            to: "\"".to_owned(),
+        }];
+        let result = handler.apply_updates(text, &updates);
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("package.json"),
+            "expected PatchFailed with package.json path, got: {err_str}"
+        );
+    }
 
+    #[rstest]
+    #[case::node_dependencies(DependencySection::Dependencies, true)]
+    #[case::non_node_build_dependencies(DependencySection::BuildDependencies, false)]
+    fn is_node_ecosystem_cases(#[case] section: DependencySection, #[case] expected: bool) {
         let dep = DependencySpec {
             name: "pkg".to_owned(),
-            current_req: "^1.0".to_owned(),
-            section: DependencySection::BuildDependencies,
+            current_req: "^1.0.0".to_owned(),
+            section,
         };
-        assert!(!is_node_ecosystem(&dep));
+        assert_eq!(is_node_ecosystem(&dep), expected);
     }
 }

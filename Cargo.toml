@@ -64,6 +64,7 @@ owo-colors = "4.3"
 insta = "1.47"
 tempfile = "3.27"
 wiremock = "0.6"
+rstest = "0.26"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

@@ -44,16 +44,18 @@ pub async fn collect_task_results<T>(handles: Vec<tokio::task::JoinHandle<T>>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn test_strip_range_prefix() {
-        assert_eq!(strip_range_prefix("^1.2.3"), "1.2.3");
-        assert_eq!(strip_range_prefix("~1.0"), "1.0");
-        assert_eq!(strip_range_prefix(">=2.0.0"), "2.0.0");
-        assert_eq!(strip_range_prefix("=1.0.0"), "1.0.0");
-        assert_eq!(strip_range_prefix("1.0.0"), "1.0.0");
-        assert_eq!(strip_range_prefix("*"), "");
-        assert_eq!(strip_range_prefix(""), "");
+    #[rstest]
+    #[case::caret("^1.2.3", "1.2.3")]
+    #[case::tilde("~1.0", "1.0")]
+    #[case::gte(">=2.0.0", "2.0.0")]
+    #[case::exact("=1.0.0", "1.0.0")]
+    #[case::plain("1.0.0", "1.0.0")]
+    #[case::star_yields_empty("*", "")]
+    #[case::empty_input("", "")]
+    fn strip_range_prefix_cases(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(strip_range_prefix(input), expected);
     }
 
     #[tokio::test]

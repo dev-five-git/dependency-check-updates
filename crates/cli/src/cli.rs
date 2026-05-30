@@ -132,22 +132,24 @@ pub fn parse_args() -> Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn test_parse_target_level_valid() {
-        assert_eq!(parse_target_level("latest").unwrap(), TargetLevel::Latest);
-        assert_eq!(parse_target_level("minor").unwrap(), TargetLevel::Minor);
-        assert_eq!(parse_target_level("patch").unwrap(), TargetLevel::Patch);
-        assert_eq!(parse_target_level("newest").unwrap(), TargetLevel::Newest);
-        assert_eq!(
-            parse_target_level("greatest").unwrap(),
-            TargetLevel::Greatest
-        );
-    }
+    /// Expected state of the four removal-related booleans on a parsed `Cli`:
+    /// `(rm, remove_lockfile, remove_installed, lockfile_requested, installed_requested)`.
+    type RemovalFlags = (bool, bool, bool, bool, bool);
 
-    #[test]
-    fn test_parse_target_level_invalid() {
-        assert!(parse_target_level("invalid").is_err());
+    #[rstest]
+    #[case::latest("latest", Some(TargetLevel::Latest))]
+    #[case::minor("minor", Some(TargetLevel::Minor))]
+    #[case::patch("patch", Some(TargetLevel::Patch))]
+    #[case::newest("newest", Some(TargetLevel::Newest))]
+    #[case::greatest("greatest", Some(TargetLevel::Greatest))]
+    #[case::invalid("invalid", None)]
+    fn parse_target_level_cases(#[case] input: &str, #[case] expected: Option<TargetLevel>) {
+        match expected {
+            Some(level) => assert_eq!(parse_target_level(input).unwrap(), level),
+            None => assert!(parse_target_level(input).is_err()),
+        }
     }
 
     #[test]
@@ -159,58 +161,42 @@ mod tests {
 
     // -------- --rm shortcut + effective-flag accessors --------
 
-    #[test]
-    fn test_cli_no_removal_flags_default_to_false() {
-        let cli = Cli::parse_from(["dcu"]);
-        assert!(!cli.rm);
-        assert!(!cli.remove_lockfile);
-        assert!(!cli.remove_installed);
-        assert!(!cli.remove_lockfile_requested());
-        assert!(!cli.remove_installed_requested());
-    }
-
-    #[test]
-    fn test_cli_rm_alone_implies_both_removals() {
-        let cli = Cli::parse_from(["dcu", "--rm"]);
-        assert!(cli.rm);
-        // Granular flags remain false — `--rm` does not back-fill them.
-        assert!(!cli.remove_lockfile);
-        assert!(!cli.remove_installed);
-        // …but the effective accessors must report true.
-        assert!(cli.remove_lockfile_requested());
-        assert!(cli.remove_installed_requested());
-    }
-
-    #[test]
-    fn test_cli_granular_lockfile_alone_does_not_imply_installed() {
-        let cli = Cli::parse_from(["dcu", "--remove-lockfile"]);
-        assert!(!cli.rm);
-        assert!(cli.remove_lockfile_requested());
-        assert!(
-            !cli.remove_installed_requested(),
-            "granular --remove-lockfile must NOT enable installed-dir removal"
+    #[rstest]
+    // (args, (rm, remove_lockfile, remove_installed, lockfile_requested, installed_requested))
+    #[case::no_flags_default_to_false(&["dcu"], (false, false, false, false, false))]
+    // `--rm` alone: granular flags stay false, but both effective accessors report true.
+    #[case::rm_alone_implies_both_removals(&["dcu", "--rm"], (true, false, false, true, true))]
+    // Granular `--remove-lockfile` must NOT enable installed-dir removal.
+    #[case::granular_lockfile_alone(&["dcu", "--remove-lockfile"], (false, true, false, true, false))]
+    // Granular `--remove-installed` must NOT enable lockfile removal.
+    #[case::granular_installed_alone(&["dcu", "--remove-installed"], (false, false, true, false, true))]
+    // `--rm` combined with a granular flag is harmless; effective flags match `--rm`-only semantics.
+    #[case::rm_combined_with_granular_is_idempotent(
+        &["dcu", "--rm", "--remove-lockfile"],
+        (true, true, false, true, true)
+    )]
+    fn cli_removal_flag_matrix(#[case] args: &[&str], #[case] expected: RemovalFlags) {
+        let (rm, remove_lockfile, remove_installed, lockfile_requested, installed_requested) =
+            expected;
+        let cli = Cli::parse_from(args);
+        assert_eq!(cli.rm, rm, "rm flag mismatch");
+        assert_eq!(
+            cli.remove_lockfile, remove_lockfile,
+            "remove_lockfile flag mismatch"
         );
-    }
-
-    #[test]
-    fn test_cli_granular_installed_alone_does_not_imply_lockfile() {
-        let cli = Cli::parse_from(["dcu", "--remove-installed"]);
-        assert!(!cli.rm);
-        assert!(cli.remove_installed_requested());
-        assert!(
-            !cli.remove_lockfile_requested(),
-            "granular --remove-installed must NOT enable lockfile removal"
+        assert_eq!(
+            cli.remove_installed, remove_installed,
+            "remove_installed flag mismatch"
         );
-    }
-
-    #[test]
-    fn test_cli_rm_combined_with_granular_is_idempotent() {
-        // --rm alongside --remove-lockfile is harmless; both effective flags
-        // stay true, matching --rm-only semantics.
-        let cli = Cli::parse_from(["dcu", "--rm", "--remove-lockfile"]);
-        assert!(cli.rm);
-        assert!(cli.remove_lockfile);
-        assert!(cli.remove_lockfile_requested());
-        assert!(cli.remove_installed_requested());
+        assert_eq!(
+            cli.remove_lockfile_requested(),
+            lockfile_requested,
+            "remove_lockfile_requested() mismatch"
+        );
+        assert_eq!(
+            cli.remove_installed_requested(),
+            installed_requested,
+            "remove_installed_requested() mismatch"
+        );
     }
 }

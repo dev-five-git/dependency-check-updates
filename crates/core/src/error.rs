@@ -88,64 +88,74 @@ pub enum DcuError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn test_dcu_error_io() {
-        let path = PathBuf::from("test.json");
-        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let err = DcuError::Io {
-            path: path.clone(),
-            source: io_err,
-        };
-        assert_eq!(
-            err.to_string(),
-            format!("failed to read manifest at {}", path.display())
-        );
+    /// Build an [`DcuError::Io`] case. Constructed via a helper because
+    /// `std::io::Error` is not `Clone`, so it cannot live directly in an
+    /// `#[rstest]` case literal that is materialised once per generated test.
+    fn io_err() -> DcuError {
+        DcuError::Io {
+            path: PathBuf::from("test.json"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"),
+        }
     }
 
-    #[test]
-    fn test_dcu_error_manifest_parse() {
-        let path = PathBuf::from("package.json");
-        let err = DcuError::ManifestParse {
-            path: path.clone(),
-            detail: "unexpected token".to_string(),
-        };
-        assert_eq!(
-            err.to_string(),
-            format!("failed to parse manifest at {}", path.display())
-        );
+    fn manifest_parse_err() -> DcuError {
+        DcuError::ManifestParse {
+            path: PathBuf::from("package.json"),
+            detail: "unexpected token".to_owned(),
+        }
     }
 
-    #[test]
-    fn test_dcu_error_no_manifest() {
-        let path = PathBuf::from("/some/dir");
-        let err = DcuError::NoManifest { path: path.clone() };
-        assert_eq!(
-            err.to_string(),
-            format!("no manifest found in {}", path.display())
-        );
+    fn no_manifest_err() -> DcuError {
+        DcuError::NoManifest {
+            path: PathBuf::from("/some/dir"),
+        }
     }
 
-    #[test]
-    fn test_dcu_error_registry_lookup() {
-        let err = DcuError::RegistryLookup {
-            package: "lodash".to_string(),
-            detail: "connection timeout".to_string(),
-        };
-        // Display now surfaces `detail` — without it, users hit a dead-end
-        // when GitHub Tags API rate-limits them (no hint to set GITHUB_TOKEN).
-        assert_eq!(
-            err.to_string(),
-            "registry lookup failed for package `lodash`: connection timeout"
-        );
+    fn registry_lookup_err() -> DcuError {
+        DcuError::RegistryLookup {
+            package: "lodash".to_owned(),
+            detail: "connection timeout".to_owned(),
+        }
     }
 
-    #[test]
-    fn test_dcu_error_semver_parse() {
-        let err = DcuError::SemverParse {
-            input: "not.a.version".to_string(),
-            detail: "invalid semver format".to_string(),
-        };
-        assert_eq!(err.to_string(), "invalid semver: not.a.version");
+    fn semver_parse_err() -> DcuError {
+        DcuError::SemverParse {
+            input: "not.a.version".to_owned(),
+            detail: "invalid semver format".to_owned(),
+        }
+    }
+
+    /// Verifies the [`std::fmt::Display`] output for every variant. Variants
+    /// whose message embeds a path use `Path::display()` so the expected
+    /// string is computed at case time to stay correct on every platform.
+    ///
+    /// The `RegistryLookup` case in particular asserts that `detail` is
+    /// surfaced — without it, users hit a dead-end when GitHub Tags API
+    /// rate-limits them (no hint to set `GITHUB_TOKEN`).
+    #[rstest]
+    #[case::io(
+        io_err(),
+        format!("failed to read manifest at {}", PathBuf::from("test.json").display())
+    )]
+    #[case::manifest_parse(
+        manifest_parse_err(),
+        format!("failed to parse manifest at {}", PathBuf::from("package.json").display())
+    )]
+    #[case::no_manifest(
+        no_manifest_err(),
+        format!("no manifest found in {}", PathBuf::from("/some/dir").display())
+    )]
+    #[case::registry_lookup(
+        registry_lookup_err(),
+        "registry lookup failed for package `lodash`: connection timeout".to_owned()
+    )]
+    #[case::semver_parse(
+        semver_parse_err(),
+        "invalid semver: not.a.version".to_owned()
+    )]
+    fn dcu_error_display(#[case] err: DcuError, #[case] expected: String) {
+        assert_eq!(err.to_string(), expected);
     }
 }

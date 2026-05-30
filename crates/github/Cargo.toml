@@ -28,6 +28,7 @@ tracing.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
+rstest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 wiremock.workspace = true
 rustls.workspace = true
