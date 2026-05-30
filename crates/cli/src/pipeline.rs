@@ -278,11 +278,26 @@ mod tests {
     #[case::major_only_bumps_major("1", "2.5.0", "2.5.0", Some("2"))]
     #[case::major_only_stays_same("1", "1.5.0", "1.5.0", None)]
     #[case::full_precision_uses_full_version("1.0.0", "1.0.228", "1.0.228", Some("1.0.228"))]
-    #[case::strips_build_metadata("0.25.10", "0.25.11+spec-1.1.0", "0.25.11+spec-1.1.0", Some("0.25.11"))]
+    #[case::strips_build_metadata(
+        "0.25.10",
+        "0.25.11+spec-1.1.0",
+        "0.25.11+spec-1.1.0",
+        Some("0.25.11")
+    )]
     #[case::blocks_downgrade_prerelease_to_stable("2.0.0-rc.37", "1.1.20", "1.1.20", None)]
     #[case::blocks_downgrade_same_major("2.5.0", "2.4.0", "2.4.0", None)]
-    #[case::allows_prerelease_to_prerelease("2.0.0-rc.37", "2.0.0-rc.40", "2.0.0-rc.40", Some("2.0.0-rc.40"))]
-    #[case::allows_beta_to_newer_beta("4.0.0-beta.0", "4.0.0-beta.2", "4.0.0-beta.2", Some("4.0.0-beta.2"))]
+    #[case::allows_prerelease_to_prerelease(
+        "2.0.0-rc.37",
+        "2.0.0-rc.40",
+        "2.0.0-rc.40",
+        Some("2.0.0-rc.40")
+    )]
+    #[case::allows_beta_to_newer_beta(
+        "4.0.0-beta.0",
+        "4.0.0-beta.2",
+        "4.0.0-beta.2",
+        Some("4.0.0-beta.2")
+    )]
     #[case::allows_prerelease_to_stable("2.0.0-rc.37", "2.0.0", "2.0.0", Some("2.0.0"))]
     #[case::equal_semver_skipped("1.2.3", "1.2.3", "1.2.3", None)]
     fn compute_updates_single(

@@ -702,10 +702,7 @@ mod tests {
     #[case::leading_slash("/foo", None)]
     #[case::just_slash("/", None)]
     fn repo_key_cases(#[case] input: &str, #[case] expected: Option<&str>) {
-        assert_eq!(
-            GitHubActionsRegistry::repo_key(input).as_deref(),
-            expected
-        );
+        assert_eq!(GitHubActionsRegistry::repo_key(input).as_deref(), expected);
     }
 
     #[rstest]

@@ -277,11 +277,9 @@ mod tests {
             std::fs::write(dir.join("child").join("file"), "").unwrap();
         }
 
-        let removed =
-            cleanup_manifest_siblings(&manifest, kind, remove_lockfile, remove_installed);
+        let removed = cleanup_manifest_siblings(&manifest, kind, remove_lockfile, remove_installed);
 
-        let expected_vec: Vec<String> =
-            expected_removed.iter().map(|s| (*s).to_owned()).collect();
+        let expected_vec: Vec<String> = expected_removed.iter().map(|s| (*s).to_owned()).collect();
         assert_eq!(
             removed, expected_vec,
             "removed list mismatch (order matters)"
@@ -310,12 +308,7 @@ mod tests {
     /// Vec without touching the filesystem.
     #[test]
     fn cleanup_returns_empty_when_manifest_has_no_parent() {
-        let removed = cleanup_manifest_siblings(
-            Path::new(""),
-            ManifestKind::CargoToml,
-            true,
-            true,
-        );
+        let removed = cleanup_manifest_siblings(Path::new(""), ManifestKind::CargoToml, true, true);
         assert!(
             removed.is_empty(),
             "expected empty removal list for parent-less path, got {removed:?}"
@@ -337,12 +330,7 @@ mod tests {
         let lock_as_dir = tmp.path().join("Cargo.lock");
         std::fs::create_dir(&lock_as_dir).unwrap();
 
-        let removed = cleanup_manifest_siblings(
-            &manifest,
-            ManifestKind::CargoToml,
-            true,
-            false,
-        );
+        let removed = cleanup_manifest_siblings(&manifest, ManifestKind::CargoToml, true, false);
 
         assert!(
             removed.is_empty(),
@@ -370,12 +358,7 @@ mod tests {
         let target_as_file = tmp.path().join("target");
         std::fs::write(&target_as_file, "not a directory").unwrap();
 
-        let removed = cleanup_manifest_siblings(
-            &manifest,
-            ManifestKind::CargoToml,
-            false,
-            true,
-        );
+        let removed = cleanup_manifest_siblings(&manifest, ManifestKind::CargoToml, false, true);
 
         assert!(
             removed.is_empty(),

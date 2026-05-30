@@ -59,7 +59,7 @@ mod tests {
     #[rstest]
     #[case::valid_pep621(
         "[project]\nname = \"test\"\ndependencies = [\"requests>=2.28.0\"]\n",
-        true,
+        true
     )]
     #[case::invalid_toml("invalid [[[toml", false)]
     fn python_handler_parse_cases(#[case] text: &str, #[case] should_succeed: bool) {

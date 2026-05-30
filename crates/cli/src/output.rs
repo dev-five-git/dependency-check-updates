@@ -191,11 +191,7 @@ mod tests {
     #[case::major("^1.0.0", "^2.0.0", BumpType::Major)]
     #[case::minor("^1.0.0", "^1.1.0", BumpType::Minor)]
     #[case::patch("^1.0.0", "^1.0.1", BumpType::Patch)]
-    fn detect_bump_type_cases(
-        #[case] from: &str,
-        #[case] to: &str,
-        #[case] expected: BumpType,
-    ) {
+    fn detect_bump_type_cases(#[case] from: &str, #[case] to: &str, #[case] expected: BumpType) {
         assert_eq!(detect_bump_type(from, to), expected);
     }
 
@@ -289,11 +285,7 @@ mod tests {
     #[rstest]
     #[case::checking("package.json", false, "Checking package.json\n")]
     #[case::upgrading("Cargo.toml", true, "Upgrading Cargo.toml\n")]
-    fn render_header_cases(
-        #[case] path: &str,
-        #[case] upgrading: bool,
-        #[case] expected: &str,
-    ) {
+    fn render_header_cases(#[case] path: &str, #[case] upgrading: bool, #[case] expected: &str) {
         assert_eq!(render_header(path, upgrading), expected);
     }
 

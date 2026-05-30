@@ -232,10 +232,7 @@ mod tests {
     #[case::nested_workflow("repo/.github/workflows/test.yml", Some(ManifestKind::GitHubWorkflow))]
     #[case::unknown_extension("unknown.txt", None)]
     #[case::unrelated_yml_ignored("docker-compose.yml", None)]
-    fn manifest_kind_from_path_cases(
-        #[case] path: &str,
-        #[case] expected: Option<ManifestKind>,
-    ) {
+    fn manifest_kind_from_path_cases(#[case] path: &str, #[case] expected: Option<ManifestKind>) {
         assert_eq!(
             ManifestKind::from_path(std::path::Path::new(path)),
             expected
@@ -301,10 +298,7 @@ mod tests {
     )]
     #[case::project_dependencies(DependencySection::ProjectDependencies, "project.dependencies")]
     #[case::github_actions(DependencySection::GitHubActions, "uses")]
-    fn dependency_section_label_cases(
-        #[case] section: DependencySection,
-        #[case] expected: &str,
-    ) {
+    fn dependency_section_label_cases(#[case] section: DependencySection, #[case] expected: &str) {
         assert_eq!(section.label(), expected);
     }
 

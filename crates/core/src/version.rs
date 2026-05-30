@@ -120,9 +120,11 @@ pub fn select_version<V: SelectableVersion>(
     // expression that begins on the arm line, so each branch is a single
     // covered region.
     match target {
-        TargetLevel::Latest if current_is_prerelease => {
-            all_versions.iter().rev().find(accept).map(ToString::to_string)
-        }
+        TargetLevel::Latest if current_is_prerelease => all_versions
+            .iter()
+            .rev()
+            .find(accept)
+            .map(ToString::to_string),
         TargetLevel::Latest => latest_for_stable,
         TargetLevel::Greatest | TargetLevel::Newest => all_versions.last().map(ToString::to_string),
         TargetLevel::Minor => match current {

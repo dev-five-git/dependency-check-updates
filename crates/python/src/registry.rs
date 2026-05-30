@@ -149,8 +149,7 @@ impl PyPiRegistry {
             .collect();
         candidates.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let versions: Vec<pep440_rs::Version> =
-            candidates.iter().map(|(v, _)| v.clone()).collect();
+        let versions: Vec<pep440_rs::Version> = candidates.iter().map(|(v, _)| v.clone()).collect();
 
         let selected = if target == TargetLevel::Newest {
             // Most recently uploaded by date (ISO-8601 sorts chronologically),
@@ -162,7 +161,13 @@ impl PyPiRegistry {
                 .or_else(|| versions.last().map(ToString::to_string))
         } else {
             let current = pep440_rs::Version::from_str(strip_range_prefix(&dep.current_req)).ok();
-            select_version(current.as_ref(), &versions, target, latest.clone(), latest.clone())
+            select_version(
+                current.as_ref(),
+                &versions,
+                target,
+                latest.clone(),
+                latest.clone(),
+            )
         };
 
         debug!(

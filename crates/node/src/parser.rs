@@ -114,7 +114,7 @@ mod tests {
         2,
         "react",
         "^18.2.0",
-        DependencySection::Dependencies,
+        DependencySection::Dependencies
     )]
     #[case::dev_dependencies(
         r#"{
@@ -126,7 +126,7 @@ mod tests {
         2,
         "typescript",
         "^5.0.0",
-        DependencySection::DevDependencies,
+        DependencySection::DevDependencies
     )]
     #[case::peer_dependencies(
         r#"{
@@ -137,7 +137,7 @@ mod tests {
         1,
         "react",
         "^17.0.0 || ^18.0.0",
-        DependencySection::PeerDependencies,
+        DependencySection::PeerDependencies
     )]
     #[case::optional_dependencies(
         r#"{
@@ -148,7 +148,7 @@ mod tests {
         1,
         "fsevents",
         "^2.3.0",
-        DependencySection::OptionalDependencies,
+        DependencySection::OptionalDependencies
     )]
     fn parses_single_section(
         #[case] json: &str,
@@ -217,7 +217,7 @@ mod tests {
     "react": "^18.0.0"
   }
 }"#,
-        "react",
+        "react"
     )]
     #[case::npm_alias(
         r#"{
@@ -226,7 +226,7 @@ mod tests {
     "lodash": "^4.17.0"
   }
 }"#,
-        "lodash",
+        "lodash"
     )]
     #[case::git_url(
         r#"{
@@ -236,7 +236,7 @@ mod tests {
     "react": "^18.0.0"
   }
 }"#,
-        "react",
+        "react"
     )]
     #[case::file_and_link(
         r#"{
@@ -246,7 +246,7 @@ mod tests {
     "react": "^18.0.0"
   }
 }"#,
-        "react",
+        "react"
     )]
     #[case::object_form(
         r#"{
@@ -255,7 +255,7 @@ mod tests {
     "react": "^18.0.0"
   }
 }"#,
-        "react",
+        "react"
     )]
     #[case::latest_and_wildcard(
         r#"{
@@ -267,7 +267,7 @@ mod tests {
     "react": "^18.0.0"
   }
 }"#,
-        "react",
+        "react"
     )]
     #[case::http_url(
         r#"{
@@ -277,7 +277,7 @@ mod tests {
     "react": "^18.0.0"
   }
 }"#,
-        "react",
+        "react"
     )]
     fn skips_unresolvable_specs(#[case] json: &str, #[case] survivor: &str) {
         let manifest = PackageJsonManifest::parse(json).unwrap();

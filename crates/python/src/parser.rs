@@ -349,11 +349,7 @@ mod tests {
     #[case::dash_underscore_equivalence("My-Package>=1.0", "my_package", true)]
     #[case::dot_dash_equivalence("my.package>=1.0", "my-package", true)]
     #[case::different_name("other>=1.0", "my-package", false)]
-    fn spec_str_matches_name_cases(
-        #[case] spec: &str,
-        #[case] name: &str,
-        #[case] expected: bool,
-    ) {
+    fn spec_str_matches_name_cases(#[case] spec: &str, #[case] name: &str, #[case] expected: bool) {
         assert_eq!(spec_str_matches_name(spec, name), expected);
     }
 
@@ -385,7 +381,11 @@ mod tests {
     /// Optional `(name, req, section)` triple to assert on a particular dep slot
     /// after parsing. Each field is `Option` so a case asserts only the
     /// originally-checked fields without strengthening the test.
-    type FieldsCheck = (Option<&'static str>, Option<&'static str>, Option<DependencySection>);
+    type FieldsCheck = (
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<DependencySection>,
+    );
 
     #[rstest]
     #[case::pep621_dependencies(
@@ -415,22 +415,18 @@ mod tests {
     #[case::dependency_groups(
         "\n[dependency-groups]\ntest = [\"pytest>=7.0\", \"coverage>=7.0\"]\n",
         2,
-        None,
+        None
     )]
     #[case::skip_bare_deps(
         "\n[project]\ndependencies = [\"requests\", \"flask>=2.0\"]\n",
         1,
         Some((Some("flask"), None, None)),
     )]
-    #[case::no_deps_empty(
-        "\n[project]\nname = \"empty\"\n",
-        0,
-        None,
-    )]
+    #[case::no_deps_empty("\n[project]\nname = \"empty\"\n", 0, None)]
     #[case::poetry_bool_value_skipped(
         "\n[tool.poetry.dependencies]\npython = \"^3.8\"\nmy-pkg = true\n",
         0,
-        None,
+        None
     )]
     fn collect_dependencies_cases(
         #[case] toml: &str,
@@ -457,12 +453,12 @@ mod tests {
     #[case::poetry_table_form(
         "\n[tool.poetry.dependencies]\npython = \"^3.8\"\n\n[tool.poetry.dependencies.sqlalchemy]\nversion = \"^2.0\"\nextras = [\"asyncio\"]\n",
         "sqlalchemy",
-        "^2.0",
+        "^2.0"
     )]
     #[case::poetry_inline_table(
         "\n[tool.poetry.dependencies]\npython = \"^3.8\"\nflask = {version = \"^2.0\", optional = true}\n",
         "flask",
-        "^2.0",
+        "^2.0"
     )]
     fn collect_dependencies_finds_named_dep(
         #[case] toml: &str,

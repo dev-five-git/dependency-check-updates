@@ -18,7 +18,6 @@ pub mod version;
 // Re-export commonly used types
 pub use error::DcuError;
 pub use http::{DEFAULT_MAX_CONCURRENT_REQUESTS, DEFAULT_REQUEST_TIMEOUT_SECS, build_client};
-pub use version::{SelectableVersion, select_version};
 pub use manifest::{ManifestHandler, ParsedManifest, RegistryClient, ScanResult, Scanner};
 pub use style::{FileStyle, IndentStyle, LineEnding};
 pub use types::{
@@ -26,3 +25,4 @@ pub use types::{
     ResolvedVersion, TargetLevel,
 };
 pub use util::{collect_task_results, strip_range_prefix};
+pub use version::{SelectableVersion, select_version};

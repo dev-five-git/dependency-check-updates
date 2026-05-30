@@ -405,7 +405,8 @@ mod tests {
             "^17.0.0"
         );
 
-        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
+        let result =
+            JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
         assert_eq!(result, expected);
     }
 
@@ -485,7 +486,8 @@ mod tests {
         // the equality-based indent tests below, so kept as its own test.
         let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
+        let result =
+            JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
 
         // Verify only the version value changed
         let diff_bytes: Vec<usize> = input
@@ -509,19 +511,20 @@ mod tests {
     // must leave every other byte untouched.
     #[case::four_space_indent(
         "{\n    \"dependencies\": {\n        \"react\": \"^17.0.0\"\n    }\n}\n",
-        "{\n    \"dependencies\": {\n        \"react\": \"^18.2.0\"\n    }\n}\n",
+        "{\n    \"dependencies\": {\n        \"react\": \"^18.2.0\"\n    }\n}\n"
     )]
     #[case::tab_indent(
         "{\n\t\"dependencies\": {\n\t\t\"react\": \"^17.0.0\"\n\t}\n}\n",
-        "{\n\t\"dependencies\": {\n\t\t\"react\": \"^18.2.0\"\n\t}\n}\n",
+        "{\n\t\"dependencies\": {\n\t\t\"react\": \"^18.2.0\"\n\t}\n}\n"
     )]
     #[case::crlf_line_endings(
         "{\r\n  \"dependencies\": {\r\n    \"react\": \"^17.0.0\"\r\n  }\r\n}\r\n",
-        "{\r\n  \"dependencies\": {\r\n    \"react\": \"^18.2.0\"\r\n  }\r\n}\r\n",
+        "{\r\n  \"dependencies\": {\r\n    \"react\": \"^18.2.0\"\r\n  }\r\n}\r\n"
     )]
     fn format_preserved_when_patching(#[case] input: &str, #[case] expected: &str) {
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
+        let result =
+            JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
         assert_eq!(result, expected);
     }
 
@@ -529,7 +532,8 @@ mod tests {
     fn test_trailing_newline_preserved() {
         let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
+        let result =
+            JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
         assert!(result.ends_with('\n'));
     }
 
@@ -537,7 +541,8 @@ mod tests {
     fn test_no_trailing_newline_preserved() {
         let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}";
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
+        let result =
+            JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
         assert!(result.ends_with('}'));
         assert!(!result.ends_with("}\n"));
     }
@@ -561,10 +566,7 @@ mod tests {
         );
 
         let babel = locations.iter().find(|l| l.name == "@babel/core").unwrap();
-        assert_eq!(
-            &input[babel.value_start..babel.value_end],
-            "^7.20.0"
-        );
+        assert_eq!(&input[babel.value_start..babel.value_end], "^7.20.0");
     }
 
     #[test]
@@ -572,7 +574,8 @@ mod tests {
         let input = "{\n  \"dependencies\": {\n    \"react\": \"~17.0.0\"\n  }\n}\n";
 
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "~18.2.0")).unwrap();
+        let result =
+            JsonPatcher::apply_patches(input, &replace_all(&locations, "~18.2.0")).unwrap();
         assert!(result.contains("\"~18.2.0\""));
     }
 
@@ -608,7 +611,7 @@ mod tests {
     #[case::escaped_quotes_in_string(
         r#"{ "key": "value with \" escaped \" quotes", "num": 1 }"#,
         0,
-        Some(53),
+        Some(53)
     )]
     #[case::escaped_backslash_in_string(r#"{ "key": "val\\", "num": 1 }"#, 0, Some(27))]
     #[case::not_a_brace("abc", 0, None)]
@@ -627,7 +630,8 @@ mod tests {
         let input = "{\n  \"dependencies\": {\n    \"react\": \"^1.0.0\"\n  }\n}\n";
 
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
-        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^10.0.0")).unwrap();
+        let result =
+            JsonPatcher::apply_patches(input, &replace_all(&locations, "^10.0.0")).unwrap();
         assert!(result.contains("\"^10.0.0\""));
         // Verify it's still valid JSON
         let _: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -731,7 +735,8 @@ mod tests {
         let expected = "{\n  \"dependencies\": {\n    \"react\": \"^18.2.0\"\n  }\n}\n";
         let updates = vec![update("react", "^17.0.0", "^18.2.0")];
         let locations = JsonPatcher::scan_for_updates(input, &updates);
-        let result = JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
+        let result =
+            JsonPatcher::apply_patches(input, &replace_all(&locations, "^18.2.0")).unwrap();
         assert_eq!(result, expected);
     }
 
@@ -765,7 +770,7 @@ mod tests {
     "react": "^17.0.0"
   }
 }
-"#,
+"#
     )]
     #[case::nested_non_dep_section_with_braces(
         r#"{
@@ -776,7 +781,7 @@ mod tests {
     "react": "^17.0.0"
   }
 }
-"#,
+"#
     )]
     #[case::escaped_quotes_in_description(
         r#"{
@@ -785,7 +790,7 @@ mod tests {
     "react": "^17.0.0"
   }
 }
-"#,
+"#
     )]
     fn scan_version_locations_finds_only_react(#[case] input: &str) {
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
@@ -865,7 +870,7 @@ mod tests {
   }
 }
 "#,
-        DependencySection::PeerDependencies,
+        DependencySection::PeerDependencies
     )]
     #[case::optional_dependencies(
         r#"{
@@ -874,7 +879,7 @@ mod tests {
   }
 }
 "#,
-        DependencySection::OptionalDependencies,
+        DependencySection::OptionalDependencies
     )]
     fn scan_version_locations_section_specific(
         #[case] input: &str,

@@ -243,41 +243,21 @@ mod tests {
         "actions/checkout",
         "v5"
     )]
-    #[case::single_quoted(
-        "      - uses: 'actions/checkout@v5'\n",
-        "actions/checkout",
-        "v5"
-    )]
-    #[case::double_quoted(
-        "      - uses: \"actions/checkout@v5\"\n",
-        "actions/checkout",
-        "v5"
-    )]
-    #[case::no_leading_dash(
-        "      uses: actions/checkout@v5\n",
-        "actions/checkout",
-        "v5"
-    )]
+    #[case::single_quoted("      - uses: 'actions/checkout@v5'\n", "actions/checkout", "v5")]
+    #[case::double_quoted("      - uses: \"actions/checkout@v5\"\n", "actions/checkout", "v5")]
+    #[case::no_leading_dash("      uses: actions/checkout@v5\n", "actions/checkout", "v5")]
     #[case::subdir_action(
         "      - uses: actions/checkout/sub/path@v5\n",
         "actions/checkout/sub/path",
         "v5"
     )]
-    #[case::crlf_line_ending(
-        "      - uses: actions/checkout@v5\r\n",
-        "actions/checkout",
-        "v5"
-    )]
+    #[case::crlf_line_ending("      - uses: actions/checkout@v5\r\n", "actions/checkout", "v5")]
     #[case::bare_semver_no_v_prefix(
         "      - uses: actions/checkout@1.2.3\n",
         "actions/checkout",
         "1.2.3"
     )]
-    #[case::bare_semver_major_only(
-        "      - uses: actions/checkout@5\n",
-        "actions/checkout",
-        "5"
-    )]
+    #[case::bare_semver_major_only("      - uses: actions/checkout@5\n", "actions/checkout", "5")]
     #[case::calendar_version_supported(
         "      - uses: cal/ver@2024.01.01\n",
         "cal/ver",

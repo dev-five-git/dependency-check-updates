@@ -375,10 +375,7 @@ mod tests {
     #[case::gte(">=1.0.0", Some((1, 0, 0)))]
     #[case::bare("1.2.3", Some((1, 2, 3)))]
     #[case::star("*", None)]
-    fn parse_base_version_cases(
-        #[case] input: &str,
-        #[case] expected: Option<(u64, u64, u64)>,
-    ) {
+    fn parse_base_version_cases(#[case] input: &str, #[case] expected: Option<(u64, u64, u64)>) {
         let result = parse_base_version(input);
         match expected {
             Some((major, minor, patch)) => {

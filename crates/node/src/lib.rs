@@ -86,7 +86,7 @@ mod tests {
     // raw JSON, expected dependency count (None ⇒ parse must error).
     #[case::with_deps(
         r#"{"dependencies": {"react": "^18.0.0", "lodash": "^4.17.0"}}"#,
-        Some(2),
+        Some(2)
     )]
     #[case::empty_object(r#"{"name": "test"}"#, Some(0))]
     #[case::invalid_json("not json", None)]

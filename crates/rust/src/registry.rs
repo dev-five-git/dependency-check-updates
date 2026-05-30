@@ -201,7 +201,11 @@ fn newest_by_date(crate_versions: &[CrateVersion]) -> Option<String> {
     crate_versions
         .iter()
         .filter(|v| !v.yanked && !v.created_at.is_empty())
-        .filter_map(|v| semver::Version::parse(&v.num).ok().map(|parsed| (&v.created_at, parsed)))
+        .filter_map(|v| {
+            semver::Version::parse(&v.num)
+                .ok()
+                .map(|parsed| (&v.created_at, parsed))
+        })
         .max_by(|a, b| a.0.cmp(b.0))
         .map(|(_, parsed)| parsed.to_string())
 }
