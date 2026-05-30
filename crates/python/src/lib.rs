@@ -3,15 +3,17 @@
 //! Handles `pyproject.toml` parsing via `toml_edit` (format-preserving),
 //! `PyPI` registry lookups, and PEP 440 version resolution.
 
-pub mod parser;
-pub mod registry;
+#![warn(missing_docs)]
+
+mod parser;
+mod registry;
 
 use std::path::Path;
 
 use dependency_check_updates_core::manifest::{ManifestHandler, ParsedManifest};
 use dependency_check_updates_core::{DcuError, ManifestKind, ManifestRef, PlannedUpdate};
 
-pub use parser::{PyProjectError, PyProjectManifest};
+use parser::PyProjectManifest;
 pub use registry::PyPiRegistry;
 
 /// Python manifest handler for `pyproject.toml` files.
@@ -40,12 +42,7 @@ impl ManifestHandler for PythonHandler {
             detail: e.to_string(),
         })?;
 
-        manifest
-            .apply_updates(updates)
-            .map_err(|e| DcuError::PatchFailed {
-                path: std::path::PathBuf::from("pyproject.toml"),
-                detail: e.to_string(),
-            })
+        Ok(manifest.apply_updates(updates))
     }
 }
 

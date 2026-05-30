@@ -19,8 +19,6 @@ pub struct VersionLocation {
     pub value_start: usize,
     /// Byte offset of the closing quote `"` (exclusive end of value content).
     pub value_end: usize,
-    /// The current version string (without quotes).
-    pub current_value: String,
 }
 
 /// A patch to apply: replace bytes `[start..end)` with `new_value`.
@@ -34,6 +32,10 @@ pub struct Patch {
 /// Errors from the patch engine.
 #[derive(Debug, thiserror::Error)]
 pub enum PatchError {
+    /// JSON failed to parse during a full-document scan. Only the test-only
+    /// [`JsonPatcher::scan_version_locations`] performs that parse; the
+    /// production path ([`JsonPatcher::scan_for_updates`]) is infallible.
+    #[cfg(test)]
     #[error("failed to scan JSON: {0}")]
     ScanFailed(String),
     #[error("overlapping patches detected")]
@@ -48,9 +50,14 @@ pub struct JsonPatcher;
 impl JsonPatcher {
     /// Scan the raw JSON text to find byte positions of all dependency version values.
     ///
+    /// Test-only: the production path uses [`JsonPatcher::scan_for_updates`],
+    /// which scans only the deps being updated. This full-document variant is
+    /// retained purely to exercise the byte-scanning helpers in isolation.
+    ///
     /// # Errors
     ///
     /// Returns an error if the JSON cannot be parsed or section positions cannot be found.
+    #[cfg(test)]
     pub fn scan_version_locations(text: &str) -> Result<Vec<VersionLocation>, PatchError> {
         let parsed: serde_json::Value =
             serde_json::from_str(text).map_err(|e| PatchError::ScanFailed(e.to_string()))?;
@@ -90,17 +97,14 @@ impl JsonPatcher {
     /// deps to look for. Scans only the relevant sections and deps, avoiding
     /// the cost of deserializing the entire JSON document.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if section positions cannot be found.
-    pub fn scan_for_updates(
-        text: &str,
-        updates: &[PlannedUpdate],
-    ) -> Result<Vec<VersionLocation>, PatchError> {
+    /// Infallible: deps whose section or value cannot be located are simply
+    /// omitted from the result.
+    #[must_use]
+    pub fn scan_for_updates(text: &str, updates: &[PlannedUpdate]) -> Vec<VersionLocation> {
         use std::collections::HashMap;
 
         if updates.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
         // Group updates by section for targeted scanning
@@ -135,7 +139,7 @@ impl JsonPatcher {
             }
         }
 
-        Ok(locations)
+        locations
     }
 
     /// Apply patches to the original text, replacing version strings.
@@ -347,7 +351,6 @@ fn find_dep_value_position(
             name: dep_name.to_owned(),
             value_start,
             value_end,
-            current_value: version_str.to_owned(),
         })
     } else {
         None
@@ -373,7 +376,10 @@ mod tests {
         let locations = JsonPatcher::scan_version_locations(input).unwrap();
         assert_eq!(locations.len(), 1);
         assert_eq!(locations[0].name, "react");
-        assert_eq!(locations[0].current_value, "^17.0.0");
+        assert_eq!(
+            &input[locations[0].value_start..locations[0].value_end],
+            "^17.0.0"
+        );
 
         let patches = vec![Patch {
             start: locations[0].value_start,
@@ -568,10 +574,16 @@ mod tests {
         assert_eq!(locations.len(), 2);
 
         let types_react = locations.iter().find(|l| l.name == "@types/react").unwrap();
-        assert_eq!(types_react.current_value, "^18.0.0");
+        assert_eq!(
+            &input[types_react.value_start..types_react.value_end],
+            "^18.0.0"
+        );
 
         let babel = locations.iter().find(|l| l.name == "@babel/core").unwrap();
-        assert_eq!(babel.current_value, "^7.20.0");
+        assert_eq!(
+            &input[babel.value_start..babel.value_end],
+            "^7.20.0"
+        );
     }
 
     #[test]
@@ -650,10 +662,13 @@ mod tests {
             from: "^17.0.0".to_owned(),
             to: "^18.2.0".to_owned(),
         }];
-        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        let locations = JsonPatcher::scan_for_updates(input, &updates);
         assert_eq!(locations.len(), 1);
         assert_eq!(locations[0].name, "react");
-        assert_eq!(locations[0].current_value, "^17.0.0");
+        assert_eq!(
+            &input[locations[0].value_start..locations[0].value_end],
+            "^17.0.0"
+        );
         assert_eq!(
             &input[locations[0].value_start..locations[0].value_end],
             "^17.0.0"
@@ -663,7 +678,7 @@ mod tests {
     #[test]
     fn test_scan_for_updates_empty() {
         let input = "{\n  \"dependencies\": {\n    \"react\": \"^17.0.0\"\n  }\n}\n";
-        let locations = JsonPatcher::scan_for_updates(input, &[]).unwrap();
+        let locations = JsonPatcher::scan_for_updates(input, &[]);
         assert!(locations.is_empty());
     }
 
@@ -692,7 +707,7 @@ mod tests {
                 to: "^5.3.0".to_owned(),
             },
         ];
-        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        let locations = JsonPatcher::scan_for_updates(input, &updates);
         assert_eq!(locations.len(), 2);
         let react = locations.iter().find(|l| l.name == "react").unwrap();
         let ts = locations.iter().find(|l| l.name == "typescript").unwrap();
@@ -716,7 +731,7 @@ mod tests {
             from: "^17.0.0".to_owned(),
             to: "^18.2.0".to_owned(),
         }];
-        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        let locations = JsonPatcher::scan_for_updates(input, &updates);
         assert_eq!(locations.len(), 1);
         assert_eq!(locations[0].name, "react");
     }
@@ -731,7 +746,7 @@ mod tests {
             from: "^17.0.0".to_owned(),
             to: "^18.2.0".to_owned(),
         }];
-        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        let locations = JsonPatcher::scan_for_updates(input, &updates);
         let patches: Vec<Patch> = locations
             .iter()
             .map(|loc| Patch {
@@ -812,7 +827,7 @@ mod tests {
             from: "^4.0.0".to_owned(),
             to: "^5.3.0".to_owned(),
         }];
-        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        let locations = JsonPatcher::scan_for_updates(input, &updates);
         assert!(locations.is_empty());
     }
 
@@ -825,7 +840,7 @@ mod tests {
             from: "^1.0.0".to_owned(),
             to: "^2.0.0".to_owned(),
         }];
-        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        let locations = JsonPatcher::scan_for_updates(input, &updates);
         assert!(locations.is_empty());
     }
 
@@ -953,7 +968,7 @@ mod tests {
             from: "^17.0.0".to_owned(), // doesn't match ^18.0.0 in JSON
             to: "^19.0.0".to_owned(),
         }];
-        let locations = JsonPatcher::scan_for_updates(input, &updates).unwrap();
+        let locations = JsonPatcher::scan_for_updates(input, &updates);
         assert!(locations.is_empty());
     }
 

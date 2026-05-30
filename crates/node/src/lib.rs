@@ -3,22 +3,20 @@
 //! Handles `package.json` parsing, npm registry lookups, and version resolution.
 //! Follows the changepacks pattern of one crate per language ecosystem.
 
-pub mod parser;
-pub mod patcher;
-pub mod registry;
-pub mod style;
+#![warn(missing_docs)]
+
+mod parser;
+mod patcher;
+mod registry;
 
 use std::path::Path;
 
 use dependency_check_updates_core::manifest::{ManifestHandler, ParsedManifest};
-use dependency_check_updates_core::{
-    DcuError, DependencySpec, ManifestKind, ManifestRef, PlannedUpdate,
-};
+use dependency_check_updates_core::{DcuError, ManifestKind, ManifestRef, PlannedUpdate};
 
-pub use parser::{PackageJsonError, PackageJsonManifest};
-pub use patcher::{JsonPatcher, Patch, PatchError, VersionLocation};
+use parser::PackageJsonManifest;
+use patcher::{JsonPatcher, Patch};
 pub use registry::NpmRegistry;
-pub use style::StyleDetector;
 
 /// Node.js manifest handler for `package.json` files.
 pub struct NodeHandler;
@@ -42,11 +40,7 @@ impl ManifestHandler for NodeHandler {
 
     fn apply_updates(&self, text: &str, updates: &[PlannedUpdate]) -> Result<String, DcuError> {
         // Use scan_for_updates: skips full JSON parse, only locates deps we need.
-        let locations =
-            JsonPatcher::scan_for_updates(text, updates).map_err(|e| DcuError::PatchFailed {
-                path: std::path::PathBuf::from("package.json"),
-                detail: e.to_string(),
-            })?;
+        let locations = JsonPatcher::scan_for_updates(text, updates);
 
         let patches: Vec<Patch> = updates
             .iter()
@@ -69,27 +63,23 @@ impl ManifestHandler for NodeHandler {
     }
 }
 
-/// Create a [`DependencySpec`] filter that skips non-version specs.
-///
-/// The parser already filters, but this is used when converting
-/// between internal representations.
-#[must_use]
-pub fn is_node_ecosystem(dep: &DependencySpec) -> bool {
-    matches!(
-        dep.section,
-        dependency_check_updates_core::DependencySection::Dependencies
-            | dependency_check_updates_core::DependencySection::DevDependencies
-            | dependency_check_updates_core::DependencySection::PeerDependencies
-            | dependency_check_updates_core::DependencySection::OptionalDependencies
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use dependency_check_updates_core::manifest::ManifestHandler;
-    use dependency_check_updates_core::{DependencySection, PlannedUpdate};
+    use dependency_check_updates_core::{DependencySection, DependencySpec, PlannedUpdate};
     use std::path::Path;
+
+    /// Test-only helper: true when the section belongs to the Node ecosystem.
+    fn is_node_ecosystem(dep: &DependencySpec) -> bool {
+        matches!(
+            dep.section,
+            DependencySection::Dependencies
+                | DependencySection::DevDependencies
+                | DependencySection::PeerDependencies
+                | DependencySection::OptionalDependencies
+        )
+    }
 
     #[test]
     fn test_node_handler_parse() {

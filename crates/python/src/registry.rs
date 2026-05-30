@@ -5,12 +5,12 @@ use std::sync::Arc;
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
-use tracing::{debug, warn};
+use tracing::debug;
 
-use dependency_check_updates_core::{DcuError, DependencySpec, ResolvedVersion, TargetLevel};
-
-const MAX_CONCURRENT_REQUESTS: usize = 10;
-const REQUEST_TIMEOUT_SECS: u64 = 30;
+use dependency_check_updates_core::{
+    DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
+    build_client, collect_task_results,
+};
 
 /// `PyPI` registry client.
 #[derive(Clone)]
@@ -44,18 +44,9 @@ impl PyPiRegistry {
     /// Panics if the HTTP client cannot be built.
     #[must_use]
     pub fn with_base_url(base_url: &str) -> Self {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .user_agent(concat!(
-                "dependency-check-updates/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .build()
-            .expect("failed to create HTTP client");
-
         Self {
-            client,
-            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            client: build_client(),
+            semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS)),
             base_url: Arc::from(base_url.trim_end_matches('/')),
         }
     }
@@ -153,18 +144,6 @@ impl PyPiRegistry {
         results.sort_unstable_by_key(|(idx, _)| *idx);
         results
     }
-}
-
-/// Collect results from spawned tasks, logging any `JoinError`s (e.g. panics).
-async fn collect_task_results<T>(handles: Vec<tokio::task::JoinHandle<T>>) -> Vec<T> {
-    let mut results = Vec::with_capacity(handles.len());
-    for handle in handles {
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(e) => warn!("task join error: {e}"),
-        }
-    }
-    results
 }
 
 impl Default for PyPiRegistry {
@@ -345,31 +324,4 @@ mod tests {
         let _registry = PyPiRegistry::default();
     }
 
-    #[tokio::test]
-    async fn test_collect_task_results_join_error() {
-        use dependency_check_updates_core::{DcuError, ResolvedVersion};
-
-        // Suppress panic output from the intentionally-panicking task.
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-
-        let handles: Vec<tokio::task::JoinHandle<(usize, Result<ResolvedVersion, DcuError>)>> = vec![
-            tokio::spawn(async {
-                (
-                    0,
-                    Ok(ResolvedVersion {
-                        latest: Some("1.0.0".into()),
-                        selected: None,
-                    }),
-                )
-            }),
-            tokio::spawn(async { panic!("simulated join error") }),
-        ];
-        let results = super::collect_task_results(handles).await;
-
-        std::panic::set_hook(prev_hook);
-
-        // The panicking task is dropped; only 1 result survives.
-        assert_eq!(results.len(), 1);
-    }
 }

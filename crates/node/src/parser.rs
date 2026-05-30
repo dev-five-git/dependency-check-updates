@@ -19,8 +19,6 @@ pub const DEPENDENCY_SECTIONS: &[(DependencySection, &str)] = &[
 pub struct PackageJsonManifest {
     /// The original raw text (preserved for surgical patching).
     pub original_text: String,
-    /// The parsed JSON value.
-    pub parsed: Value,
     /// All collected dependency specs.
     pub dependencies: Vec<DependencySpec>,
 }
@@ -39,7 +37,6 @@ impl PackageJsonManifest {
 
         Ok(Self {
             original_text: text.to_owned(),
-            parsed,
             dependencies,
         })
     }

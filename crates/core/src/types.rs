@@ -1,11 +1,18 @@
+//! Core domain types shared across every ecosystem crate: manifest kinds,
+//! dependency sections, version targets, and the parsed/resolved/planned
+//! value objects that flow through the scan → resolve → patch pipeline.
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// The kind of package manifest file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManifestKind {
+    /// Node.js `package.json`.
     PackageJson,
+    /// Rust `Cargo.toml`.
     CargoToml,
+    /// Python `pyproject.toml`.
     PyProjectToml,
     /// GitHub Actions workflow (`.github/workflows/*.yml` /`*.yaml`) or
     /// composite action definition (`action.yml` / `action.yaml`).
@@ -67,7 +74,9 @@ impl std::fmt::Display for ManifestKind {
 /// A reference to a manifest file on disk.
 #[derive(Debug, Clone)]
 pub struct ManifestRef {
+    /// Filesystem path to the manifest.
     pub path: PathBuf,
+    /// Which manifest format this file is.
     pub kind: ManifestKind,
 }
 
@@ -75,17 +84,21 @@ pub struct ManifestRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DependencySection {
-    // Node.js (package.json)
+    /// Node.js `dependencies`.
     Dependencies,
+    /// Node.js `devDependencies`.
     DevDependencies,
+    /// Node.js `peerDependencies`.
     PeerDependencies,
+    /// Node.js `optionalDependencies`.
     OptionalDependencies,
-    // Rust (Cargo.toml)
+    /// Rust `[build-dependencies]`.
     BuildDependencies,
+    /// Rust `[workspace.dependencies]`.
     WorkspaceDependencies,
-    // Python (pyproject.toml)
+    /// Python `[project] dependencies`.
     ProjectDependencies,
-    // GitHub Actions (`uses:` directives in workflows / composite actions)
+    /// GitHub Actions `uses:` directives in workflows / composite actions.
     GitHubActions,
 }
 
@@ -115,8 +128,11 @@ impl std::fmt::Display for DependencySection {
 /// A dependency found in a manifest file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencySpec {
+    /// Package name as written in the manifest.
     pub name: String,
+    /// Current version requirement string (range prefix preserved).
     pub current_req: String,
+    /// Section the dependency was found in.
     pub section: DependencySection,
 }
 
@@ -175,17 +191,24 @@ pub struct ResolvedVersion {
 /// A planned update for a single dependency.
 #[derive(Debug, Clone)]
 pub struct PlannedUpdate {
+    /// Package name being updated.
     pub name: String,
+    /// Section the dependency lives in.
     pub section: DependencySection,
+    /// Current version requirement string.
     pub from: String,
+    /// New version requirement string to write.
     pub to: String,
 }
 
 /// The type of version bump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BumpType {
+    /// Major version change (e.g. `1.x → 2.x`).
     Major,
+    /// Minor version change (e.g. `1.0 → 1.1`).
     Minor,
+    /// Patch version change (e.g. `1.0.0 → 1.0.1`).
     Patch,
 }
 

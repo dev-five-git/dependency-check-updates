@@ -136,14 +136,14 @@ impl PyProjectManifest {
 
     /// Apply planned updates to the document, returning the modified text.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if a dependency cannot be updated.
-    pub fn apply_updates(&mut self, updates: &[PlannedUpdate]) -> Result<String, PyProjectError> {
+    /// Infallible: updates that match no dependency in the document are
+    /// silently skipped (see [`Self::apply_single_update`]).
+    #[must_use]
+    pub fn apply_updates(&mut self, updates: &[PlannedUpdate]) -> String {
         for update in updates {
             self.apply_single_update(update);
         }
-        Ok(self.doc.to_string())
+        self.doc.to_string()
     }
 
     fn apply_single_update(&mut self, update: &PlannedUpdate) {
@@ -431,7 +431,7 @@ dependencies = [
 ]
 "#;
         let mut manifest = PyProjectManifest::parse(toml).unwrap();
-        let result = manifest.apply_updates(&[]).unwrap();
+        let result = manifest.apply_updates(&[]);
         assert!(result.contains("# Project config"));
         assert!(result.contains("# Main dependencies"));
     }
@@ -476,7 +476,7 @@ dependencies = [
             from: ">=2.28.0".to_owned(),
             to: ">=2.31.0".to_owned(),
         }];
-        let result = manifest.apply_updates(&updates).unwrap();
+        let result = manifest.apply_updates(&updates);
         assert!(result.contains("requests>=2.31.0"));
         assert!(result.contains("flask~=2.0"));
     }
@@ -496,7 +496,7 @@ flask = "^2.0"
             from: "^2.28.0".to_owned(),
             to: "^2.31.0".to_owned(),
         }];
-        let result = manifest.apply_updates(&updates).unwrap();
+        let result = manifest.apply_updates(&updates);
         assert!(result.contains("\"^2.31.0\""));
         assert!(result.contains("flask = \"^2.0\""));
     }
@@ -511,7 +511,7 @@ dependencies = [
 ]
 "#;
         let mut manifest = PyProjectManifest::parse(toml).unwrap();
-        let result = manifest.apply_updates(&[]).unwrap();
+        let result = manifest.apply_updates(&[]);
         assert!(result.contains("requests>=2.28.0"));
     }
 
@@ -533,7 +533,7 @@ dependencies = [
             from: ">=2.28.0".to_owned(),
             to: ">=2.31.0".to_owned(),
         }];
-        let result = manifest.apply_updates(&updates).unwrap();
+        let result = manifest.apply_updates(&updates);
         assert!(result.contains("requests[security]>=2.31.0"));
     }
 
@@ -552,7 +552,7 @@ dependencies = [
             from: ">=300".to_owned(),
             to: ">=306".to_owned(),
         }];
-        let result = manifest.apply_updates(&updates).unwrap();
+        let result = manifest.apply_updates(&updates);
         assert!(result.contains("pywin32>=306; sys_platform == 'win32'"));
     }
 
@@ -654,7 +654,7 @@ requests = "^2.28.0"
             from: "^2.28.0".to_owned(),
             to: "^2.31.0".to_owned(),
         }];
-        let result = manifest.apply_updates(&updates).unwrap();
+        let result = manifest.apply_updates(&updates);
         assert!(result.contains("\"^2.31.0\""));
         // python constraint should remain unchanged
         assert!(result.contains("python = \"^3.8\""));
@@ -674,7 +674,7 @@ dependencies = ["requests>=2.28.0"]
             to: ">=2.0".to_owned(),
         }];
         // Should succeed without error, just skip the missing dep
-        let result = manifest.apply_updates(&updates).unwrap();
+        let result = manifest.apply_updates(&updates);
         assert!(result.contains("requests>=2.28.0"));
     }
 

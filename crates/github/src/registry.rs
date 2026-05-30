@@ -17,7 +17,9 @@ use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tracing::{debug, trace};
 
-use dependency_check_updates_core::{DcuError, DependencySpec, ResolvedVersion, TargetLevel};
+use dependency_check_updates_core::{
+    DcuError, DependencySpec, ResolvedVersion, TargetLevel, build_client,
+};
 
 use crate::parser::is_version_ref;
 
@@ -25,10 +27,6 @@ use crate::parser::is_version_ref;
 /// 60 req/hr; keeping concurrency modest avoids burst-rejection during deep
 /// scans of multi-workflow repos.
 const MAX_CONCURRENT_REQUESTS: usize = 5;
-
-/// HTTP request timeout. GitHub API is normally <1s; 30s leaves room for
-/// network hiccups without freezing a CI job for minutes.
-const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Tags page size — GitHub API max is 100, which comfortably covers every
 /// mainstream action; spanning multiple pages is future work.
@@ -81,17 +79,8 @@ impl GitHubActionsRegistry {
     }
 
     fn build(base_url: &str, token: Option<Arc<str>>) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .user_agent(concat!(
-                "dependency-check-updates/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .build()
-            .expect("failed to create HTTP client");
-
         Self {
-            client,
+            client: build_client(),
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
             base_url: Arc::from(base_url.trim_end_matches('/')),
             token,

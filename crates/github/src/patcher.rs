@@ -7,7 +7,7 @@
 
 use dependency_check_updates_core::PlannedUpdate;
 
-use crate::parser::{UsesLocation, scan};
+use crate::parser::scan;
 
 /// Errors returned by the patcher.
 #[derive(Debug, thiserror::Error)]
@@ -73,14 +73,6 @@ impl WorkflowPatcher {
         }
 
         apply_patches(text, &patches)
-    }
-
-    /// Re-scan `text` and return every `uses:` location whose ref is
-    /// version-like. Exposed for callers that want to inspect the raw
-    /// locations (e.g. tests, future tools).
-    #[must_use]
-    pub fn scan(text: &str) -> Vec<UsesLocation> {
-        scan(text)
     }
 }
 
@@ -242,13 +234,6 @@ mod tests {
         ];
         let result = apply_patches("abcdefghijk", &patches);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_scan_alias() {
-        // Smoke test the re-exported scan.
-        let locs = WorkflowPatcher::scan("      - uses: actions/checkout@v5\n");
-        assert_eq!(locs.len(), 1);
     }
 
     #[test]

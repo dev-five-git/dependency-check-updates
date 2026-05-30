@@ -11,20 +11,6 @@
 
 use dependency_check_updates_core::{DependencySection, DependencySpec};
 
-/// Errors emitted by the workflow parser.
-///
-/// The parser is permissive — unparseable YAML never aborts the scan because
-/// the line-based approach simply skips lines that do not match the expected
-/// pattern. This variant exists only so we can convert to `DcuError` cleanly.
-#[derive(Debug, thiserror::Error)]
-pub enum WorkflowParseError {
-    /// Reserved for future structural validation (e.g. enforcing that every
-    /// `uses:` line resolves to `owner/repo`). Currently unused; the parser
-    /// never returns errors today.
-    #[error("invalid workflow: {0}")]
-    Invalid(String),
-}
-
 /// A located `uses:` directive in the workflow text.
 #[derive(Debug, Clone)]
 pub struct UsesLocation {
@@ -44,37 +30,32 @@ pub struct UsesLocation {
 /// Parsed workflow manifest.
 #[derive(Debug)]
 pub struct WorkflowManifest {
+    /// The original raw text (preserved for surgical patching).
     pub original_text: String,
+    /// Version-like `uses:` refs collected as dependency specs.
     pub dependencies: Vec<DependencySpec>,
-    pub locations: Vec<UsesLocation>,
 }
 
 impl WorkflowManifest {
     /// Parse a workflow file from raw text.
     ///
-    /// Returns successfully even for malformed YAML; unmatched lines are simply
-    /// ignored.
-    ///
-    /// # Errors
-    ///
-    /// Currently infallible — the signature mirrors other manifest handlers
-    /// to keep the trait surface uniform.
-    pub fn parse(text: &str) -> Result<Self, WorkflowParseError> {
-        let locations = scan(text);
-        let dependencies = locations
-            .iter()
+    /// Infallible: malformed YAML never aborts the scan — the line-based
+    /// approach simply skips lines that do not match the `uses:` pattern.
+    #[must_use]
+    pub fn parse(text: &str) -> Self {
+        let dependencies = scan(text)
+            .into_iter()
             .map(|loc| DependencySpec {
-                name: loc.name.clone(),
-                current_req: loc.current_ref.clone(),
+                name: loc.name,
+                current_req: loc.current_ref,
                 section: DependencySection::GitHubActions,
             })
             .collect();
 
-        Ok(Self {
+        Self {
             original_text: text.to_owned(),
             dependencies,
-            locations,
-        })
+        }
     }
 }
 
@@ -401,11 +382,10 @@ mod tests {
     #[test]
     fn test_parse_workflow_manifest() {
         let yaml = "      - uses: actions/checkout@v5\n";
-        let m = WorkflowManifest::parse(yaml).unwrap();
+        let m = WorkflowManifest::parse(yaml);
         assert_eq!(m.dependencies.len(), 1);
         assert_eq!(m.dependencies[0].name, "actions/checkout");
         assert_eq!(m.dependencies[0].current_req, "v5");
-        assert_eq!(m.locations.len(), 1);
     }
 
     #[test]

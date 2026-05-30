@@ -3,15 +3,17 @@
 //! Handles `Cargo.toml` parsing via `toml_edit` (format-preserving),
 //! `crates.io` registry lookups, and Rust semver resolution.
 
-pub mod parser;
-pub mod registry;
+#![warn(missing_docs)]
+
+mod parser;
+mod registry;
 
 use std::path::Path;
 
 use dependency_check_updates_core::manifest::{ManifestHandler, ParsedManifest};
 use dependency_check_updates_core::{DcuError, ManifestKind, ManifestRef, PlannedUpdate};
 
-pub use parser::{CargoTomlError, CargoTomlManifest};
+use parser::CargoTomlManifest;
 pub use registry::CratesIoRegistry;
 
 /// Rust manifest handler for `Cargo.toml` files.

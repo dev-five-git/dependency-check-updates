@@ -5,15 +5,12 @@ use std::sync::Arc;
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
-use dependency_check_updates_core::{DcuError, DependencySpec, ResolvedVersion, TargetLevel};
-
-/// Maximum concurrent registry requests.
-const MAX_CONCURRENT_REQUESTS: usize = 10;
-
-/// Request timeout in seconds.
-const REQUEST_TIMEOUT_SECS: u64 = 30;
+use dependency_check_updates_core::{
+    DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
+    build_client, collect_task_results, strip_range_prefix,
+};
 
 /// npm registry client for looking up package versions.
 #[derive(Clone)]
@@ -50,18 +47,9 @@ impl NpmRegistry {
     /// Panics if the HTTP client cannot be built (should never happen with default settings).
     #[must_use]
     pub fn with_base_url(base_url: &str) -> Self {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .user_agent(concat!(
-                "dependency-check-updates/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .build()
-            .expect("failed to create HTTP client");
-
         Self {
-            client,
-            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            client: build_client(),
+            semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS)),
             base_url: Arc::from(base_url.trim_end_matches('/')),
         }
     }
@@ -208,18 +196,6 @@ impl NpmRegistry {
     }
 }
 
-/// Collect results from spawned tasks, logging any `JoinError`s (e.g. panics).
-async fn collect_task_results<T>(handles: Vec<tokio::task::JoinHandle<T>>) -> Vec<T> {
-    let mut results = Vec::with_capacity(handles.len());
-    for handle in handles {
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(e) => warn!("task join error: {e}"),
-        }
-    }
-    results
-}
-
 impl Default for NpmRegistry {
     fn default() -> Self {
         Self::new()
@@ -324,8 +300,7 @@ fn select_version(
 /// Strips leading range operators: `^1.2.3` -> `1.2.3`, `~2.0.0` -> `2.0.0`,
 /// `>=1.0.0` -> `1.0.0`.
 fn parse_base_version(req_str: &str) -> Option<node_semver::Version> {
-    let cleaned = req_str.trim_start_matches(|c: char| !c.is_ascii_digit());
-    node_semver::Version::parse(cleaned).ok()
+    node_semver::Version::parse(strip_range_prefix(req_str)).ok()
 }
 
 #[cfg(test)]
@@ -989,38 +964,4 @@ mod tests {
         assert_eq!(result.selected.as_deref(), Some("19.0.0"));
     }
 
-    #[tokio::test]
-    async fn test_collect_task_results_join_error() {
-        // Suppress panic output from the intentionally-panicking task.
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-
-        let handles: Vec<tokio::task::JoinHandle<(usize, Result<ResolvedVersion, DcuError>)>> = vec![
-            tokio::spawn(async {
-                (
-                    0,
-                    Ok(ResolvedVersion {
-                        latest: Some("1.0.0".into()),
-                        selected: None,
-                    }),
-                )
-            }),
-            tokio::spawn(async { panic!("simulated join error") }),
-            tokio::spawn(async {
-                (
-                    2,
-                    Ok(ResolvedVersion {
-                        latest: Some("2.0.0".into()),
-                        selected: None,
-                    }),
-                )
-            }),
-        ];
-        let results = collect_task_results(handles).await;
-
-        std::panic::set_hook(prev_hook);
-
-        // The panicking task is dropped; only 2 results survive.
-        assert_eq!(results.len(), 2);
-    }
 }

@@ -10,17 +10,19 @@
 //! names, commit SHAs) are intentionally skipped: tracking the moving target
 //! they point at is the caller's responsibility.
 
-pub mod parser;
-pub mod patcher;
-pub mod registry;
+#![warn(missing_docs)]
+
+mod parser;
+mod patcher;
+mod registry;
 
 use std::path::Path;
 
 use dependency_check_updates_core::manifest::{ManifestHandler, ParsedManifest};
 use dependency_check_updates_core::{DcuError, ManifestKind, ManifestRef, PlannedUpdate};
 
-pub use parser::{UsesLocation, WorkflowManifest, WorkflowParseError, is_version_ref};
-pub use patcher::{Patch, PatchError, WorkflowPatcher};
+use parser::WorkflowManifest;
+use patcher::WorkflowPatcher;
 pub use registry::GitHubActionsRegistry;
 
 /// Handler for GitHub Actions workflow / action manifest files.
@@ -28,10 +30,7 @@ pub struct GitHubHandler;
 
 impl ManifestHandler for GitHubHandler {
     fn parse(&self, text: &str, path: &Path) -> Result<ParsedManifest, DcuError> {
-        let manifest = WorkflowManifest::parse(text).map_err(|e| DcuError::ManifestParse {
-            path: path.to_path_buf(),
-            detail: e.to_string(),
-        })?;
+        let manifest = WorkflowManifest::parse(text);
 
         Ok(ParsedManifest {
             manifest_ref: ManifestRef {

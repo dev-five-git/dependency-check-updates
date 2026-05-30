@@ -42,13 +42,7 @@ owo-colors.workspace = true
 semver = "1.0"
 
 [dev-dependencies]
-wiremock.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
 tempfile.workspace = true
-dependency-check-updates-node.workspace = true
-dependency-check-updates-rust.workspace = true
-dependency-check-updates-python.workspace = true
-dependency-check-updates-github.workspace = true
 
 [lints]
 workspace = true
