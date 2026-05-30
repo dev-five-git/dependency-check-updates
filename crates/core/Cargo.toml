@@ -21,6 +21,8 @@ ignore.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
+node-semver.workspace = true
+semver = "1.0"
 
 [dev-dependencies]
 tempfile.workspace = true

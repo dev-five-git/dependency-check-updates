@@ -13,10 +13,12 @@ pub mod manifest;
 pub mod style;
 pub mod types;
 pub mod util;
+pub mod version;
 
 // Re-export commonly used types
 pub use error::DcuError;
 pub use http::{DEFAULT_MAX_CONCURRENT_REQUESTS, DEFAULT_REQUEST_TIMEOUT_SECS, build_client};
+pub use version::{SelectableVersion, select_version};
 pub use manifest::{ManifestHandler, ParsedManifest, RegistryClient, ScanResult, Scanner};
 pub use style::{FileStyle, IndentStyle, LineEnding};
 pub use types::{

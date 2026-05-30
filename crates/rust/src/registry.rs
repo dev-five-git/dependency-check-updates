@@ -179,76 +179,26 @@ impl Default for CratesIoRegistry {
     }
 }
 
+/// Select the appropriate version based on target level.
+///
+/// Thin wrapper over [`dependency_check_updates_core::select_version`]. The
+/// crates.io `latest` is already the highest stable version, which doubles as
+/// the fallback for both the stable-`Latest` and unparseable-`Minor`/`Patch`
+/// cases.
 fn select_version(
     current_req_str: &str,
     latest: Option<&String>,
     all_versions: &[semver::Version],
     target: TargetLevel,
 ) -> Option<String> {
-    if all_versions.is_empty() {
-        return latest.cloned();
-    }
-
     let current = parse_base_version(current_req_str);
-
-    // "Prerelease tail" policy: if the user is already on a prerelease
-    // (e.g. `2.0.0-rc.37`), `Latest` should consider prereleases of the
-    // same major.minor.patch train so they can move to `2.0.0-rc.38` or
-    // `2.0.0` stable. Unrelated prereleases (e.g. `3.0.0-alpha.1`) are
-    // still excluded — we only include stables outside the current train.
-    let current_is_prerelease = current.as_ref().is_some_and(|v| !v.pre.is_empty());
-
-    // Accept stable, or prereleases of the same M.m.p train as `current`.
-    let accept_pre_aware = |v: &&semver::Version| -> bool {
-        if v.pre.is_empty() {
-            return true;
-        }
-        if !current_is_prerelease {
-            return false;
-        }
-        // Safe: current_is_prerelease implies current is Some.
-        let cur = current.as_ref().expect("checked above");
-        v.major == cur.major && v.minor == cur.minor && v.patch == cur.patch
-    };
-
-    match target {
-        TargetLevel::Latest => all_versions
-            .iter()
-            .rev()
-            .find(accept_pre_aware)
-            .map(std::string::ToString::to_string),
-        // Greatest: highest version number, INCLUDING prereleases (matches
-        // README). `all_versions` is sorted ascending, so the last one wins.
-        //
-        // Newest: MVP alias for Greatest. The crates.io response here does
-        // not expose `created_at`, so true publish-date ordering is future
-        // work. This is at least consistent with README ("most recently
-        // published") for repositories where version order matches publish
-        // order — the common case.
-        TargetLevel::Greatest | TargetLevel::Newest => {
-            all_versions.last().map(std::string::ToString::to_string)
-        }
-        TargetLevel::Minor => {
-            let Some(cur) = &current else {
-                return latest.cloned();
-            };
-            all_versions
-                .iter()
-                .rev()
-                .find(|v| v.major == cur.major && accept_pre_aware(v))
-                .map(std::string::ToString::to_string)
-        }
-        TargetLevel::Patch => {
-            let Some(cur) = &current else {
-                return latest.cloned();
-            };
-            all_versions
-                .iter()
-                .rev()
-                .find(|v| v.major == cur.major && v.minor == cur.minor && accept_pre_aware(v))
-                .map(std::string::ToString::to_string)
-        }
-    }
+    dependency_check_updates_core::select_version(
+        current.as_ref(),
+        all_versions,
+        target,
+        latest.cloned(),
+        latest.cloned(),
+    )
 }
 
 fn parse_base_version(req_str: &str) -> Option<semver::Version> {

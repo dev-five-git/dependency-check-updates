@@ -218,81 +218,24 @@ fn extract_sorted_versions(info: &NpmPackageInfo) -> Vec<node_semver::Version> {
 }
 
 /// Select the appropriate version based on target level.
+///
+/// Thin wrapper over [`dependency_check_updates_core::select_version`]: parses
+/// the current requirement and supplies npm's fallbacks (the dist-tags latest
+/// for both the stable-`Latest` and unparseable-`Minor`/`Patch` cases).
 fn select_version(
     current_req_str: &str,
     latest: Option<&String>,
     all_versions: &[node_semver::Version],
     target: TargetLevel,
 ) -> Option<String> {
-    if all_versions.is_empty() {
-        return latest.cloned();
-    }
-
-    let current_version = parse_base_version(current_req_str);
-
-    // "Prerelease tail" policy: when the user is already on a prerelease
-    // (e.g. `4.0.0-beta.1`), `Latest` may pick prereleases of the SAME
-    // major.minor.patch train so they can move to `4.0.0-beta.2` or
-    // `4.0.0` stable. Unrelated prereleases are still excluded.
-    let current_is_prerelease = current_version
-        .as_ref()
-        .is_some_and(|v| !v.pre_release.is_empty());
-
-    let accept_pre_aware = |v: &&node_semver::Version| -> bool {
-        if v.pre_release.is_empty() {
-            return true;
-        }
-        if !current_is_prerelease {
-            return false;
-        }
-        let cur = current_version.as_ref().expect("checked above");
-        v.major == cur.major && v.minor == cur.minor && v.patch == cur.patch
-    };
-
-    match target {
-        TargetLevel::Latest => {
-            // When the user is on a prerelease, we can't trust dist-tags.latest
-            // (may be an older stable). Pick the highest eligible candidate
-            // from the full sorted list using the prerelease-tail policy.
-            if current_is_prerelease {
-                all_versions
-                    .iter()
-                    .rev()
-                    .find(accept_pre_aware)
-                    .map(std::string::ToString::to_string)
-            } else {
-                latest.cloned()
-            }
-        }
-        // Greatest: highest version number, INCLUDING prereleases (matches README).
-        // Newest: MVP alias for Greatest. npm response here does not expose
-        // publish times, so true publish-date ordering is future work.
-        TargetLevel::Greatest | TargetLevel::Newest => {
-            all_versions.last().map(std::string::ToString::to_string)
-        }
-        TargetLevel::Minor => {
-            let Some(current) = &current_version else {
-                return latest.cloned();
-            };
-            all_versions
-                .iter()
-                .rev()
-                .find(|v| v.major == current.major && accept_pre_aware(v))
-                .map(std::string::ToString::to_string)
-        }
-        TargetLevel::Patch => {
-            let Some(current) = &current_version else {
-                return latest.cloned();
-            };
-            all_versions
-                .iter()
-                .rev()
-                .find(|v| {
-                    v.major == current.major && v.minor == current.minor && accept_pre_aware(v)
-                })
-                .map(std::string::ToString::to_string)
-        }
-    }
+    let current = parse_base_version(current_req_str);
+    dependency_check_updates_core::select_version(
+        current.as_ref(),
+        all_versions,
+        target,
+        latest.cloned(),
+        latest.cloned(),
+    )
 }
 
 /// Parse a base version from a requirement string.

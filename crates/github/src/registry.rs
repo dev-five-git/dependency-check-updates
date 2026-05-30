@@ -341,6 +341,12 @@ fn parse_current_ref(req: &str) -> Option<node_semver::Version> {
 }
 
 /// Select a tag for the dep based on the target level.
+///
+/// Parses + sorts the tag list, then delegates the target-match algorithm to
+/// [`dependency_check_updates_core::select_version`]. GitHub-specific
+/// behaviour is supplied via the fallbacks: the highest stable tag stands in
+/// for `latest`, while an unparseable current ref yields `None` for
+/// `Minor`/`Patch` (there is no major to stay on).
 fn select_from_tags(tags: &[Tag], current_req: &str, target: TargetLevel) -> ResolvedVersion {
     // Parse + sort ascending by semver.
     let mut versions: Vec<node_semver::Version> =
@@ -354,73 +360,14 @@ fn select_from_tags(tags: &[Tag], current_req: &str, target: TargetLevel) -> Res
         .map(node_semver::Version::to_string);
 
     let current = parse_current_ref(current_req);
-    let current_is_pre = current.as_ref().is_some_and(|v| !v.pre_release.is_empty());
 
-    // Pre-release tail policy (matches the npm registry): if user is on a
-    // pre-release of X.Y.Z, accept further pre-releases on the same X.Y.Z
-    // train AND any stable; never jump to an unrelated pre-release.
-    //
-    // The closure relies on the invariant `current_is_pre ⇒ current.is_some()`
-    // (`is_some_and` above). When `current_is_pre` is false we never inspect
-    // `current`, so the closure has no unreachable None-branch.
-    let accept = |v: &&node_semver::Version| -> bool {
-        if v.pre_release.is_empty() {
-            return true;
-        }
-        if !current_is_pre {
-            return false;
-        }
-        // `current_is_pre == true` ⇒ `current.as_ref()` is Some, so the
-        // expect cannot fire. Keeping it explicit (over `unwrap`) documents
-        // the invariant for readers.
-        let cur = current
-            .as_ref()
-            .expect("current_is_pre implies current.is_some");
-        v.major == cur.major && v.minor == cur.minor && v.patch == cur.patch
-    };
-
-    let selected = match target {
-        TargetLevel::Latest => {
-            if current_is_pre {
-                versions
-                    .iter()
-                    .rev()
-                    .find(accept)
-                    .map(node_semver::Version::to_string)
-            } else {
-                highest_stable.clone()
-            }
-        }
-        TargetLevel::Greatest | TargetLevel::Newest => {
-            versions.last().map(node_semver::Version::to_string)
-        }
-        TargetLevel::Minor => {
-            let Some(cur) = current.as_ref() else {
-                return ResolvedVersion {
-                    latest: highest_stable,
-                    selected: None,
-                };
-            };
-            versions
-                .iter()
-                .rev()
-                .find(|v| v.major == cur.major && accept(v))
-                .map(node_semver::Version::to_string)
-        }
-        TargetLevel::Patch => {
-            let Some(cur) = current.as_ref() else {
-                return ResolvedVersion {
-                    latest: highest_stable,
-                    selected: None,
-                };
-            };
-            versions
-                .iter()
-                .rev()
-                .find(|v| v.major == cur.major && v.minor == cur.minor && accept(v))
-                .map(node_semver::Version::to_string)
-        }
-    };
+    let selected = dependency_check_updates_core::select_version(
+        current.as_ref(),
+        &versions,
+        target,
+        highest_stable.clone(),
+        None,
+    );
 
     ResolvedVersion {
         latest: highest_stable,

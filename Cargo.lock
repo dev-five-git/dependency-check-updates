@@ -346,7 +346,9 @@ version = "0.1.13"
 dependencies = [
  "ignore",
  "miette",
+ "node-semver",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
