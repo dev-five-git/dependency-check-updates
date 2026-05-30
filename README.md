@@ -182,6 +182,9 @@ Usage: dcu [OPTIONS] [FILTER]...
 | `-x, --reject <PATTERN>` | Exclude packages by name (repeatable) | — |
 | `--manifest <PATH>` | Operate on a single specific manifest file | *(auto)* |
 | `--format <FORMAT>` | Output format: `table` or `json` | `table` |
+| `--remove-lockfile` | Delete lockfiles next to each manifest so the package manager re-resolves transitive deps on the next install | off |
+| `--remove-installed` | Delete installed-dependency directories next to each manifest for a clean install | off |
+| `--rm` | Shortcut for `--remove-lockfile --remove-installed` — wipes both in one go | off |
 | `-e, --error-level <N>` | `1` = always exit 0 · `2` = exit 1 when updates exist (CI gate) | `1` |
 | `-v, --verbose` | Increase verbosity: `-v` info · `-vv` debug · `-vvv` trace | off |
 | `-h, --help` | Print help | — |
@@ -232,6 +235,20 @@ dcu -vvv  # trace
 
 # Combining flags — recursive, patch-only upgrade in a monorepo
 dcu -d -u -t patch
+
+# Force a full transitive refresh: bump manifests, wipe lockfiles, wipe
+# installed copies. The next `bun install` / `cargo build` / `uv sync`
+# rebuilds the dep tree from scratch and picks up the latest dep-of-dep.
+dcu -u --rm                                      # shortcut for both removals
+dcu -d -u --rm                                   # same, monorepo-wide
+dcu -u --remove-lockfile                         # lockfiles only, keep installed
+dcu -u --remove-installed                        # installed only, keep lockfiles
+
+# Files / directories removed (per manifest discovered):
+#   package.json   → bun.lock, bun.lockb, package-lock.json, pnpm-lock.yaml,
+#                    yarn.lock, node_modules/
+#   Cargo.toml     → Cargo.lock, target/
+#   pyproject.toml → uv.lock, poetry.lock, Pipfile.lock, .venv/, venv/
 
 # GitHub Actions: pin a higher rate limit by exporting a token
 GITHUB_TOKEN=ghp_xxx dcu -d -u
