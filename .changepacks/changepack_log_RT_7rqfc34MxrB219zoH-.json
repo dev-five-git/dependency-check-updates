@@ -1,0 +1,1 @@
+{"changes":{"bridge/node/package.json":"Patch","crates/rust/Cargo.toml":"Patch","crates/core/Cargo.toml":"Patch","bridge/python/pyproject.toml":"Patch","crates/python/Cargo.toml":"Patch","crates/node/Cargo.toml":"Patch","crates/github/Cargo.toml":"Patch","crates/cli/Cargo.toml":"Patch"},"note":"Impl rm option","date":"2026-05-30T18:20:40.462866100Z"}
