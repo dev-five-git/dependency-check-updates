@@ -430,6 +430,15 @@ fn ref_precision(req: &str) -> usize {
 /// if nothing at or above that precision is published, downward, returning the
 /// first form an actual tag matches. Pre-release / build refs are published
 /// only as exact full tags and are returned verbatim.
+///
+/// The ref the user currently pins is treated as known-to-exist (their
+/// workflow runs on it right now). So when the selected version shares the
+/// current pin's prefix at the pin precision, that very same ref is returned
+/// without consulting the (capped) fetched tag window — otherwise a moving
+/// major tag like `@v2` that sorts past the 100-tag fetch ceiling (e.g.
+/// `taiki-e/install-action`, which publishes hundreds of `v2.x.y` patch tags)
+/// would be wrongly escalated to `v2.81.6`, surfacing a spurious update even
+/// though `@v2` already floats to that version.
 fn pick_existing_ref(selected: &str, current_req: &str, tags: &[Tag]) -> String {
     let (numeric, suffix) = selected
         .find(|c: char| !c.is_ascii_digit() && c != '.')
@@ -441,6 +450,16 @@ fn pick_existing_ref(selected: &str, current_req: &str, tags: &[Tag]) -> String 
     let segments: Vec<&str> = numeric.split('.').filter(|s| !s.is_empty()).collect();
     let len = segments.len();
     let start = ref_precision(current_req).clamp(1, len.max(1));
+
+    // If the selected version's prefix at the pin precision equals the ref the
+    // user already pins, keep that form: it is provably backed by a tag (the
+    // user is on it), so no fetch-window lookup is needed and no escalation
+    // should happen. Crossing to a different prefix (e.g. a new major) falls
+    // through to the existence-checked walk below.
+    let current_prefix = segments[..start].join(".");
+    if tag_numeric_str(current_req) == Some(current_prefix.as_str()) {
+        return current_prefix;
+    }
 
     let exists = |p: usize| {
         let candidate = segments[..p].join(".");
@@ -681,6 +700,23 @@ mod tests {
     #[case::ignores_non_version_tags("8.1.0", "v7", &["main", "v8.1.0"], "8.1.0")]
     // Pre-release refs are returned verbatim (only ever exact full tags).
     #[case::prerelease_verbatim("2.0.0-rc.1", "v1", &["v2.0.0-rc.1"], "2.0.0-rc.1")]
+    // Same-major float pin: `v2` resolves a higher patch in the SAME major, but
+    // the `v2` moving tag is absent from the (capped) fetched window. The pin
+    // the user is already on is known to exist, so we keep `2` instead of
+    // escalating to the full `2.81.6` — no spurious update.
+    #[case::same_major_float_kept_without_tag(
+        "2.81.6",
+        "v2",
+        &["v2.81.6", "v2.81.5", "v2.80.0"],
+        "2"
+    )]
+    // Same major.minor float pin, full tag absent from the window → keep `2.5`.
+    #[case::same_major_minor_float_kept_without_tag(
+        "2.5.9",
+        "v2.5",
+        &["v2.5.9", "v2.5.8"],
+        "2.5"
+    )]
     fn pick_existing_ref_cases(
         #[case] selected: &str,
         #[case] current: &str,
@@ -779,6 +815,36 @@ mod tests {
             // `5.0.0`. This is `pick_existing_ref` preserving the pin precision.
             assert_eq!(result.as_ref().unwrap().selected.as_deref(), Some("5"));
         }
+    }
+
+    #[tokio::test]
+    async fn resolve_batch_keeps_major_float_when_tag_past_window() {
+        install_crypto_provider();
+        let mock = MockServer::start().await;
+
+        // Mirrors `taiki-e/install-action`: a high-velocity action whose moving
+        // `v2` major tag sorts past the 100-tag fetch ceiling, so only the
+        // full `v2.81.x` patch tags are visible. The resolved ref must stay at
+        // the `v2` major-float form the user already pins — NOT escalate to the
+        // full `2.81.6` (which `compute_updates` would then surface as a bogus
+        // `v2 -> v2.81.6` update).
+        Mock::given(method("GET"))
+            .and(match_path("/repos/taiki-e/install-action/tags"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(tags_response(&["v2.81.6", "v2.81.5", "v2.80.0"])),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let reg = GitHubActionsRegistry::with_base_url(&mock.uri());
+        let deps = vec![dep("taiki-e/install-action", "v2")];
+        let results = reg.resolve_batch(&deps, TargetLevel::Latest).await;
+        assert_eq!(results.len(), 1);
+        let (_, ref result) = results[0];
+        assert!(result.is_ok());
+        assert_eq!(result.as_ref().unwrap().selected.as_deref(), Some("2"));
     }
 
     #[tokio::test]
