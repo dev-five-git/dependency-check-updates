@@ -1,6 +1,6 @@
 [package]
 name = "dependency-check-updates-github"
-version = "0.1.14"
+version = "0.1.15"
 description = "GitHub Actions workflow support for dependency-check-updates"
 edition.workspace = true
 rust-version.workspace = true
