@@ -22,6 +22,41 @@ pub fn strip_range_prefix(req_str: &str) -> &str {
     req_str.trim_start_matches(|c: char| !c.is_ascii_digit())
 }
 
+/// Pad a numeric version prefix to exactly three segments while preserving any
+/// pre-release / build-metadata suffix.
+///
+/// The input is treated as `<numeric-prefix><suffix>`; the prefix is split on
+/// `.`, empty segments are skipped, and the result is rebuilt with `.0` filled
+/// in. Inputs with 0 or >= 3 numeric segments are returned unchanged (callers
+/// pass these through `semver::Version::parse` / `node_semver::Version::parse`,
+/// which decide whether they are accepted).
+///
+/// ```
+/// use dependency_check_updates_core::pad_to_three_segments;
+/// assert_eq!(pad_to_three_segments("5"), "5.0.0");
+/// assert_eq!(pad_to_three_segments("5.1"), "5.1.0");
+/// assert_eq!(pad_to_three_segments("5.1.0"), "5.1.0");
+/// assert_eq!(pad_to_three_segments("1.2-beta"), "1.2.0-beta");
+/// assert_eq!(pad_to_three_segments(""), "");
+/// ```
+#[must_use]
+pub fn pad_to_three_segments(v: &str) -> String {
+    if v.is_empty() {
+        return v.to_owned();
+    }
+    let (numeric, suffix) = v
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .map_or((v, ""), |i| v.split_at(i));
+    let parts: Vec<&str> = numeric.split('.').filter(|s| !s.is_empty()).collect();
+    match parts.len() {
+        1 => format!("{}.0.0{}", parts[0], suffix),
+        2 => format!("{}.{}.0{}", parts[0], parts[1], suffix),
+        // 0 (no numeric prefix) or >= 3 (already padded / over-padded): leave
+        // as-is. Callers' parsers decide whether to accept the result.
+        _ => v.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37,5 +72,18 @@ mod tests {
     #[case::empty_input("", "")]
     fn strip_range_prefix_cases(#[case] input: &str, #[case] expected: &str) {
         assert_eq!(strip_range_prefix(input), expected);
+    }
+
+    #[rstest]
+    #[case("5", "5.0.0")]
+    #[case("5.1", "5.1.0")]
+    #[case("5.1.0", "5.1.0")]
+    #[case("5.1.2.3", "5.1.2.3")] // 4+ segments left as-is
+    #[case("5.1.0-rc.1", "5.1.0-rc.1")]
+    #[case("1.2-beta", "1.2.0-beta")]
+    #[case("5-beta", "5.0.0-beta")]
+    #[case("", "")]
+    fn pad_to_three_segments_cases(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(pad_to_three_segments(input), expected);
     }
 }

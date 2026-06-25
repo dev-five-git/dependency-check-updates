@@ -24,5 +24,5 @@ pub use types::{
     BumpType, DependencySection, DependencySpec, ManifestKind, ManifestRef, PlannedUpdate,
     ResolvedVersion, TargetLevel,
 };
-pub use util::strip_range_prefix;
+pub use util::{pad_to_three_segments, strip_range_prefix};
 pub use version::{SelectableVersion, select_version};

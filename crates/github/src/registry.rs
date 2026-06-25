@@ -18,7 +18,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
-    DcuError, DependencySpec, ResolvedVersion, TargetLevel, build_client,
+    DcuError, DependencySpec, ResolvedVersion, TargetLevel, build_client, pad_to_three_segments,
 };
 
 use crate::parser::is_version_ref;
@@ -366,20 +366,16 @@ fn normalize_tag(tag: &str) -> Option<node_semver::Version> {
         return None;
     }
     let stripped = tag.strip_prefix('v').unwrap_or(tag);
-    // Separate the numeric `1.2.3` head from a `-pre+build` tail.
-    let (numeric, suffix) = stripped
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .map_or((stripped, ""), |i| stripped.split_at(i));
-
-    let parts: Vec<&str> = numeric.split('.').filter(|s| !s.is_empty()).collect();
-    // `is_version_ref` above guarantees `numeric` starts with at least one
-    // digit, so `parts.len() >= 1` always — the previous explicit `0 =>`
-    // arm was unreachable and is folded into the wildcard `_` arm.
-    let padded = match parts.len() {
-        1 => format!("{}.0.0{}", parts[0], suffix),
-        2 => format!("{}.{}.0{}", parts[0], parts[1], suffix),
-        _ => format!("{numeric}{suffix}"),
-    };
+    // Pad the numeric `1.2.3` head to three segments, preserving any
+    // `-pre+build` tail. Shared with the cli `compute_updates` safety net
+    // so both crates pad identically.
+    //
+    // Byte-equivalence with the old inline logic: `is_version_ref` guarantees
+    // `stripped` starts with a digit, so `find(non-digit-dot)` produces a
+    // (numeric, suffix) split whose concatenation IS `stripped`. The shared
+    // helper's `_ => v.to_owned()` therefore yields the same bytes as the old
+    // `_ => format!("{numeric}{suffix}")` for >=3-segment inputs.
+    let padded = pad_to_three_segments(stripped);
 
     node_semver::Version::parse(&padded).ok()
 }
