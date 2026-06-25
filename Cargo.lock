@@ -388,6 +388,7 @@ name = "dependency-check-updates-node"
 version = "0.1.15"
 dependencies = [
  "dependency-check-updates-core",
+ "futures",
  "node-semver",
  "reqwest",
  "rstest",
@@ -406,6 +407,7 @@ name = "dependency-check-updates-python"
 version = "0.1.15"
 dependencies = [
  "dependency-check-updates-core",
+ "futures",
  "pep440_rs",
  "reqwest",
  "rstest",
@@ -433,6 +435,7 @@ name = "dependency-check-updates-rust"
 version = "0.1.15"
 dependencies = [
  "dependency-check-updates-core",
+ "futures",
  "reqwest",
  "rstest",
  "rustls",

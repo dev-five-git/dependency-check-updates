@@ -10,7 +10,7 @@ use tracing::debug;
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, collect_task_results, select_version, strip_range_prefix,
+    build_client, select_version, strip_range_prefix,
 };
 
 /// `PyPI` registry client.
@@ -187,23 +187,19 @@ impl PyPiRegistry {
         deps: &[DependencySpec],
         target: TargetLevel,
     ) -> Vec<(usize, Result<ResolvedVersion, DcuError>)> {
-        let mut handles = Vec::with_capacity(deps.len());
-
-        for (idx, dep) in deps.iter().enumerate() {
-            let dep = dep.clone();
-            let registry = self.clone();
-
-            let handle = tokio::spawn(async move {
-                let result = registry.resolve_version(&dep, target).await;
-                (idx, result)
-            });
-
-            handles.push(handle);
-        }
-
-        let mut results = collect_task_results(handles).await;
-        results.sort_unstable_by_key(|(idx, _)| *idx);
-        results
+        // `join_all` drives all per-dep futures concurrently on the current
+        // task — no `tokio::spawn`, so no per-dep `JoinHandle` allocation and
+        // no `DependencySpec`/`Arc` clones (both are borrowed for the duration
+        // of the `.await`). Real concurrency still comes from the inner
+        // `Semaphore`-gated HTTP requests, which cooperate via `.await`.
+        // `join_all` preserves the source order of the iterator, so no
+        // post-sort is needed.
+        futures::future::join_all(
+            deps.iter()
+                .enumerate()
+                .map(|(idx, dep)| async move { (idx, self.resolve_version(dep, target).await) }),
+        )
+        .await
     }
 }
 
