@@ -38,14 +38,20 @@ struct Tag {
     name: String,
 }
 
-/// Per-repo tag list with its parse + sort + highest-stable lookup already
-/// done once. Built once per unique `owner/repo` in `resolve_batch` so each
-/// duplicate-repo dep reuses the same prepared data instead of re-parsing
-/// and re-sorting the same 100-entry tag list.
+/// Per-repo tag list with its parse + sort + highest-stable lookup AND the
+/// `pick_existing_ref` numeric-prefix set already done once. Built once per
+/// unique `owner/repo` in `resolve_batch` so each duplicate-repo dep reuses
+/// the same prepared data instead of re-parsing and re-sorting the same
+/// 100-entry tag list — and instead of rebuilding the same `tag_numerics`
+/// `HashSet` inside `pick_existing_ref` for every dep that shares the repo.
 struct PreparedTags {
-    tags: Vec<Tag>,
     sorted_versions: Vec<node_semver::Version>,
     highest_stable: Option<String>,
+    /// Numeric tag prefixes (`v8.1.0` → `8.1.0`, `v8` → `8`) used by
+    /// `pick_existing_ref` to check existence at a given precision. Owned
+    /// `String`s let the set outlive the source `Vec<Tag>` so the tag list
+    /// can be consumed once and dropped.
+    tag_numerics: HashSet<String>,
 }
 
 impl PreparedTags {
@@ -58,10 +64,14 @@ impl PreparedTags {
             .rev()
             .find(|v| v.pre_release.is_empty())
             .map(node_semver::Version::to_string);
+        let tag_numerics: HashSet<String> = tags
+            .into_iter()
+            .filter_map(|t| tag_numeric_str(&t.name).map(str::to_owned))
+            .collect();
         Self {
-            tags,
             sorted_versions,
             highest_stable,
+            tag_numerics,
         }
     }
 }
@@ -271,9 +281,9 @@ impl GitHubActionsRegistry {
                     // only the full tag was published), so the emitted ref
                     // never dangles. `compute_updates` skips its generic
                     // precision truncation for GitHub on the strength of this.
-                    resolved.selected = resolved
-                        .selected
-                        .map(|sel| pick_existing_ref(&sel, &dep.current_req, &prepared.tags));
+                    resolved.selected = resolved.selected.map(|sel| {
+                        pick_existing_ref(&sel, &dep.current_req, &prepared.tag_numerics)
+                    });
                     trace!(
                         action = %dep.name,
                         current = %dep.current_req,
@@ -466,7 +476,7 @@ fn ref_precision(req: &str) -> usize {
 /// `taiki-e/install-action`, which publishes hundreds of `v2.x.y` patch tags)
 /// would be wrongly escalated to `v2.81.6`, surfacing a spurious update even
 /// though `@v2` already floats to that version.
-fn pick_existing_ref(selected: &str, current_req: &str, tags: &[Tag]) -> String {
+fn pick_existing_ref(selected: &str, current_req: &str, tag_numerics: &HashSet<String>) -> String {
     let (numeric, suffix) = selected
         .find(|c: char| !c.is_ascii_digit() && c != '.')
         .map_or((selected, ""), |i| selected.split_at(i));
@@ -488,16 +498,10 @@ fn pick_existing_ref(selected: &str, current_req: &str, tags: &[Tag]) -> String 
         return current_prefix;
     }
 
-    // Pre-compute the set of numeric tag prefixes once. The original per-precision
-    // closure walked the full tag list calling `tag_numeric_str` on every name,
-    // turning the search into O(precisions × tags); a single `HashSet` collect
-    // drops it to O(tags + precisions). `tag_numeric_str` filters non-version
-    // tags (`main`, SHAs) exactly as the prior `any` short-circuit did.
-    let tag_numerics: HashSet<&str> = tags
-        .iter()
-        .filter_map(|t| tag_numeric_str(&t.name))
-        .collect();
-
+    // `tag_numerics` (the set of numeric tag prefixes such as `5.0.0`, `5`)
+    // is precomputed once per unique repo in `PreparedTags::new`, so every
+    // dep that shares the repo reuses the same HashSet instead of rebuilding
+    // a per-call one — turning the per-dep O(tags) HashSet build into O(1).
     // Prefer the shortest form at or above the pin precision; otherwise the
     // longest shorter form. The resolved version always came from a real tag,
     // so some precision in this order always matches — the `expect` documents
@@ -758,8 +762,11 @@ mod tests {
         #[case] tag_names: &[&str],
         #[case] expected: &str,
     ) {
-        let tags = make_tags(tag_names);
-        assert_eq!(pick_existing_ref(selected, current, &tags), expected);
+        let prepared = PreparedTags::new(make_tags(tag_names));
+        assert_eq!(
+            pick_existing_ref(selected, current, &prepared.tag_numerics),
+            expected,
+        );
     }
 
     #[rstest]
