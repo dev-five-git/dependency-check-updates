@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 use tracing::debug;
 
 use crate::error::DcuError;
-use crate::types::{
-    DependencySpec, ManifestKind, ManifestRef, PlannedUpdate, ResolvedVersion, TargetLevel,
-};
+use crate::types::{DependencySpec, ManifestKind, ManifestRef, PlannedUpdate};
 
 // ---------------------------------------------------------------------------
 // ManifestHandler — parse manifests and apply updates
@@ -49,30 +47,6 @@ pub struct ParsedManifest {
     pub original_text: String,
     /// Collected dependencies.
     pub dependencies: Vec<DependencySpec>,
-}
-
-// ---------------------------------------------------------------------------
-// RegistryClient — resolve versions from a package registry
-// ---------------------------------------------------------------------------
-
-/// A client for a package registry (npm, crates.io, `PyPI`).
-///
-/// Each language crate provides an implementation.
-/// Uses async methods for network I/O.
-pub trait RegistryClient: Send + Sync {
-    /// Resolve the target version for a single dependency.
-    fn resolve_version(
-        &self,
-        dep: &DependencySpec,
-        target: TargetLevel,
-    ) -> impl std::future::Future<Output = Result<ResolvedVersion, DcuError>> + Send;
-
-    /// Resolve versions for a batch of dependencies concurrently.
-    fn resolve_batch(
-        &self,
-        deps: &[DependencySpec],
-        target: TargetLevel,
-    ) -> impl std::future::Future<Output = Vec<(usize, Result<ResolvedVersion, DcuError>)>> + Send;
 }
 
 // ---------------------------------------------------------------------------
