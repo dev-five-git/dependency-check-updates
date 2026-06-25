@@ -52,6 +52,8 @@ rustls = { version = "0.23", default-features = false, features = [
   "tls12",
 ] }
 node-semver = "2.2"
+semver = "1.0"
+pep440_rs = "0.7.3"
 ignore = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

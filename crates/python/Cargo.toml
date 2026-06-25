@@ -14,7 +14,7 @@ categories.workspace = true
 
 [dependencies]
 dependency-check-updates-core.workspace = true
-pep440_rs = "0.7.3"
+pep440_rs.workspace = true
 toml_edit.workspace = true
 serde.workspace = true
 serde_json.workspace = true

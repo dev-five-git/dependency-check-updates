@@ -19,7 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["sync"] }
-semver = "1.0"
+semver.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 

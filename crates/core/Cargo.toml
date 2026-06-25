@@ -22,8 +22,8 @@ tracing.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 node-semver.workspace = true
-semver = "1.0"
-pep440_rs = "0.7.3"
+semver.workspace = true
+pep440_rs.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
