@@ -130,8 +130,12 @@ impl PyPiRegistry {
         let latest = Some(info.info.version.clone());
 
         // (parsed PEP 440 version, max upload timestamp) for every release that
-        // has at least one non-yanked file and parses cleanly.
-        let mut candidates: Vec<(pep440_rs::Version, String)> = info
+        // has at least one non-yanked file and parses cleanly. The upload
+        // timestamp is borrowed straight out of `info.releases`; the borrow is
+        // dropped together with `candidates` and never escapes this function,
+        // so we avoid the per-file `String` clone the old code did just to feed
+        // `.max()`.
+        let mut candidates: Vec<(pep440_rs::Version, &str)> = info
             .releases
             .iter()
             .filter_map(|(ver_str, files)| {
@@ -141,25 +145,30 @@ impl PyPiRegistry {
                 let parsed = pep440_rs::Version::from_str(ver_str).ok()?;
                 let upload = files
                     .iter()
-                    .map(|f| f.upload_time_iso_8601.clone())
+                    .map(|f| f.upload_time_iso_8601.as_str())
                     .max()
-                    .unwrap_or_default();
+                    .unwrap_or("");
                 Some((parsed, upload))
             })
             .collect();
         candidates.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let versions: Vec<pep440_rs::Version> = candidates.iter().map(|(v, _)| v.clone()).collect();
-
         let selected = if target == TargetLevel::Newest {
             // Most recently uploaded by date (ISO-8601 sorts chronologically),
-            // which can differ from the highest version number.
+            // which can differ from the highest version number. `max_by`
+            // returns `None` only on an empty iterator, which already means
+            // there are no candidates to fall back to — no extra `or_else`
+            // branch is reachable.
             candidates
                 .iter()
-                .max_by(|a, b| a.1.cmp(&b.1))
+                .max_by(|a, b| a.1.cmp(b.1))
                 .map(|(v, _)| v.to_string())
-                .or_else(|| versions.last().map(ToString::to_string))
         } else {
+            // Consume `candidates` to move each parsed `Version` into the
+            // selection list instead of cloning every element; the borrowed
+            // upload `&str` halves are dropped with the tuples.
+            let versions: Vec<pep440_rs::Version> =
+                candidates.into_iter().map(|(v, _)| v).collect();
             let current = pep440_rs::Version::from_str(strip_range_prefix(&dep.current_req)).ok();
             select_version(
                 current.as_ref(),
