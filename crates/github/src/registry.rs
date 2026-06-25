@@ -461,11 +461,15 @@ fn pick_existing_ref(selected: &str, current_req: &str, tags: &[Tag]) -> String 
         return current_prefix;
     }
 
-    let exists = |p: usize| {
-        let candidate = segments[..p].join(".");
-        tags.iter()
-            .any(|t| tag_numeric_str(&t.name) == Some(candidate.as_str()))
-    };
+    // Pre-compute the set of numeric tag prefixes once. The original per-precision
+    // closure walked the full tag list calling `tag_numeric_str` on every name,
+    // turning the search into O(precisions × tags); a single `HashSet` collect
+    // drops it to O(tags + precisions). `tag_numeric_str` filters non-version
+    // tags (`main`, SHAs) exactly as the prior `any` short-circuit did.
+    let tag_numerics: HashSet<&str> = tags
+        .iter()
+        .filter_map(|t| tag_numeric_str(&t.name))
+        .collect();
 
     // Prefer the shortest form at or above the pin precision; otherwise the
     // longest shorter form. The resolved version always came from a real tag,
@@ -473,7 +477,10 @@ fn pick_existing_ref(selected: &str, current_req: &str, tags: &[Tag]) -> String 
     // that invariant and keeps the success line on the covered path.
     let chosen = (start..=len)
         .chain((1..start).rev())
-        .find(|&p| exists(p))
+        .find(|&p| {
+            let candidate = segments[..p].join(".");
+            tag_numerics.contains(candidate.as_str())
+        })
         .expect("resolved version is always backed by at least one tag");
     segments[..chosen].join(".")
 }
