@@ -38,6 +38,34 @@ struct Tag {
     name: String,
 }
 
+/// Per-repo tag list with its parse + sort + highest-stable lookup already
+/// done once. Built once per unique `owner/repo` in `resolve_batch` so each
+/// duplicate-repo dep reuses the same prepared data instead of re-parsing
+/// and re-sorting the same 100-entry tag list.
+struct PreparedTags {
+    tags: Vec<Tag>,
+    sorted_versions: Vec<node_semver::Version>,
+    highest_stable: Option<String>,
+}
+
+impl PreparedTags {
+    fn new(tags: Vec<Tag>) -> Self {
+        let mut sorted_versions: Vec<node_semver::Version> =
+            tags.iter().filter_map(|t| normalize_tag(&t.name)).collect();
+        sorted_versions.sort();
+        let highest_stable = sorted_versions
+            .iter()
+            .rev()
+            .find(|v| v.pre_release.is_empty())
+            .map(node_semver::Version::to_string);
+        Self {
+            tags,
+            sorted_versions,
+            highest_stable,
+        }
+    }
+}
+
 /// GitHub Tags API client.
 #[derive(Clone)]
 pub struct GitHubActionsRegistry {
@@ -205,13 +233,16 @@ impl GitHubActionsRegistry {
         }
 
         let fetched = futures::future::join_all(fetch_futures).await;
-        let mut tags_by_repo: HashMap<String, Result<Vec<Tag>, String>> = HashMap::new();
+        // Build prepared tag data ONCE per unique repo (parse + sort +
+        // highest-stable). A workflow that uses the same repo across N jobs
+        // now pays this cost once instead of N times.
+        let mut prepared_by_repo: HashMap<String, Result<PreparedTags, String>> = HashMap::new();
         for (repo, result) in fetched {
-            tags_by_repo.insert(repo, result);
+            prepared_by_repo.insert(repo, result.map(PreparedTags::new));
         }
 
-        // Step 3: resolve each dep against the cached tag list. Errors are
-        // duplicated per-dep so each failing dep gets its own diagnostic.
+        // Step 3: resolve each dep against the cached prepared data. Errors
+        // are duplicated per-dep so each failing dep gets its own diagnostic.
         let mut results = Vec::with_capacity(deps.len());
         for (idx, dep) in deps.iter().enumerate() {
             let Some(key) = Self::repo_key(&dep.name) else {
@@ -227,14 +258,14 @@ impl GitHubActionsRegistry {
 
             // Safe because `key` came from `repo_key(&dep.name)`, and every
             // such value was inserted into `unique_repos` (and therefore into
-            // `tags_by_repo`) above. Using `.expect()` documents the invariant
-            // and keeps the code path linear for coverage.
-            match tags_by_repo
+            // `prepared_by_repo`) above. Using `.expect()` documents the
+            // invariant and keeps the code path linear for coverage.
+            match prepared_by_repo
                 .get(&key)
                 .expect("tags cache must contain every unique repo key")
             {
-                Ok(tags) => {
-                    let mut resolved = select_from_tags(tags, &dep.current_req, target);
+                Ok(prepared) => {
+                    let mut resolved = select_from_tags(prepared, &dep.current_req, target);
                     // Collapse the resolved full version to the shortest ref
                     // form that an actual tag backs (e.g. `v8` → `v8.1.0` when
                     // only the full tag was published), so the emitted ref
@@ -242,7 +273,7 @@ impl GitHubActionsRegistry {
                     // precision truncation for GitHub on the strength of this.
                     resolved.selected = resolved
                         .selected
-                        .map(|sel| pick_existing_ref(&sel, &dep.current_req, tags));
+                        .map(|sel| pick_existing_ref(&sel, &dep.current_req, &prepared.tags));
                     trace!(
                         action = %dep.name,
                         current = %dep.current_req,
@@ -361,30 +392,26 @@ fn parse_current_ref(req: &str) -> Option<node_semver::Version> {
 /// lookup per tag), so true publish-date ordering is intentionally not
 /// attempted — unlike the npm/crates.io/PyPI registries, whose responses
 /// already carry timestamps.
-fn select_from_tags(tags: &[Tag], current_req: &str, target: TargetLevel) -> ResolvedVersion {
-    // Parse + sort ascending by semver.
-    let mut versions: Vec<node_semver::Version> =
-        tags.iter().filter_map(|t| normalize_tag(&t.name)).collect();
-    versions.sort();
-
-    let highest_stable = versions
-        .iter()
-        .rev()
-        .find(|v| v.pre_release.is_empty())
-        .map(node_semver::Version::to_string);
-
+fn select_from_tags(
+    prepared: &PreparedTags,
+    current_req: &str,
+    target: TargetLevel,
+) -> ResolvedVersion {
+    // Parsing + sorting + highest-stable extraction live on `PreparedTags`,
+    // built once per unique repo by `resolve_batch`. This function is now
+    // only the per-dep `current_req` parse + `select_version` dispatch.
     let current = parse_current_ref(current_req);
 
     let selected = dependency_check_updates_core::select_version(
         current.as_ref(),
-        &versions,
+        &prepared.sorted_versions,
         target,
-        highest_stable.as_deref(),
+        prepared.highest_stable.as_deref(),
         None,
     );
 
     ResolvedVersion {
-        latest: highest_stable,
+        latest: prepared.highest_stable.clone(),
         selected,
     }
 }
@@ -664,8 +691,8 @@ mod tests {
         #[case] expected_selected: Option<&str>,
         #[case] expected_latest: Option<&str>,
     ) {
-        let tags = make_tags(tag_names);
-        let r = select_from_tags(&tags, current_req, target);
+        let prepared = PreparedTags::new(make_tags(tag_names));
+        let r = select_from_tags(&prepared, current_req, target);
         assert_eq!(r.selected.as_deref(), expected_selected);
         assert_eq!(r.latest.as_deref(), expected_latest);
     }
