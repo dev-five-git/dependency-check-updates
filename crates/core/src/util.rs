@@ -4,6 +4,8 @@
 //! (npm, crates.io, `PyPI`). Centralising them keeps the version-string
 //! handling in one place.
 
+use std::borrow::Cow;
+
 /// Strip a leading semver range operator from a requirement string, returning
 /// the bare numeric version portion.
 ///
@@ -40,20 +42,21 @@ pub fn strip_range_prefix(req_str: &str) -> &str {
 /// assert_eq!(pad_to_three_segments(""), "");
 /// ```
 #[must_use]
-pub fn pad_to_three_segments(v: &str) -> String {
+pub fn pad_to_three_segments(v: &str) -> Cow<'_, str> {
     if v.is_empty() {
-        return v.to_owned();
+        return Cow::Borrowed(v);
     }
     let (numeric, suffix) = v
         .find(|c: char| !c.is_ascii_digit() && c != '.')
         .map_or((v, ""), |i| v.split_at(i));
     let parts: Vec<&str> = numeric.split('.').filter(|s| !s.is_empty()).collect();
     match parts.len() {
-        1 => format!("{}.0.0{}", parts[0], suffix),
-        2 => format!("{}.{}.0{}", parts[0], parts[1], suffix),
+        1 => Cow::Owned(format!("{}.0.0{}", parts[0], suffix)),
+        2 => Cow::Owned(format!("{}.{}.0{}", parts[0], parts[1], suffix)),
         // 0 (no numeric prefix) or >= 3 (already padded / over-padded): leave
-        // as-is. Callers' parsers decide whether to accept the result.
-        _ => v.to_owned(),
+        // as-is (zero-cost borrow). Callers' parsers decide whether to accept
+        // the result.
+        _ => Cow::Borrowed(v),
     }
 }
 
