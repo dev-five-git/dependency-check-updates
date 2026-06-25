@@ -92,6 +92,7 @@ impl PyProjectManifest {
                                     name: name.to_owned(),
                                     current_req: version,
                                     section: DependencySection::Dependencies,
+                                    path_version: None,
                                 });
                             }
                         }
@@ -106,6 +107,7 @@ impl PyProjectManifest {
                                     name: name.to_owned(),
                                     current_req: version,
                                     section: DependencySection::DevDependencies,
+                                    path_version: None,
                                 });
                             }
                         }
@@ -234,6 +236,7 @@ fn parse_pep508_spec(spec: &str, section: DependencySection) -> Option<Dependenc
         name: name.to_owned(),
         current_req: rest.to_owned(),
         section,
+        path_version: None,
     })
 }
 

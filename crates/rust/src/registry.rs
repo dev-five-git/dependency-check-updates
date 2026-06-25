@@ -110,6 +110,16 @@ impl CratesIoRegistry {
         dep: &DependencySpec,
         target: TargetLevel,
     ) -> Result<ResolvedVersion, DcuError> {
+        // Local path dependency: the version is dictated by the crate on disk
+        // (resolved at parse time), not crates.io. Short-circuit before any
+        // network call so the declared `version` is synced to that local crate.
+        if let Some(local) = &dep.path_version {
+            return Ok(ResolvedVersion {
+                latest: Some(local.clone()),
+                selected: Some(local.clone()),
+            });
+        }
+
         let crate_versions = self.fetch_versions(&dep.name).await?;
 
         let yanked_count = crate_versions.iter().filter(|v| v.yanked).count();
@@ -269,6 +279,7 @@ mod tests {
             name: "serde".to_owned(),
             current_req: current_req.to_owned(),
             section: DependencySection::Dependencies,
+            path_version: None,
         }
     }
 
@@ -510,6 +521,7 @@ mod tests {
             name: "nonexistent".to_owned(),
             current_req: "^1.0.0".to_owned(),
             section: DependencySection::Dependencies,
+            path_version: None,
         };
         let result = registry.resolve_version(&dep, TargetLevel::Latest).await;
         assert!(result.is_err());
@@ -547,11 +559,13 @@ mod tests {
                 name: "serde".to_owned(),
                 current_req: "^1.0.0".to_owned(),
                 section: DependencySection::Dependencies,
+                path_version: None,
             },
             DependencySpec {
                 name: "tokio".to_owned(),
                 current_req: "^1.0.0".to_owned(),
                 section: DependencySection::Dependencies,
+                path_version: None,
             },
         ];
         let results = registry.resolve_batch(&deps, TargetLevel::Latest).await;
@@ -627,5 +641,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.latest, Some("2.0.0".to_owned()));
+    }
+
+    /// A dependency carrying `path_version` is resolved from that local version
+    /// without any registry call. The base URL points at an unbindable port, so
+    /// a successful result proves the network was never touched.
+    #[rstest]
+    #[tokio::test]
+    async fn resolve_version_path_dep_short_circuits_without_network() {
+        install_tls_provider();
+        let registry = CratesIoRegistry::with_base_url("http://127.0.0.1:1");
+        let dep = DependencySpec {
+            name: "hwp".to_owned(),
+            current_req: "0.2.0".to_owned(),
+            section: DependencySection::Dependencies,
+            path_version: Some("0.3.0".to_owned()),
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .unwrap();
+        assert_eq!(result.latest.as_deref(), Some("0.3.0"));
+        assert_eq!(result.selected.as_deref(), Some("0.3.0"));
     }
 }

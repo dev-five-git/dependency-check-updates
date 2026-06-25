@@ -49,6 +49,7 @@ impl WorkflowManifest {
                 name: loc.name,
                 current_req: loc.current_ref,
                 section: DependencySection::GitHubActions,
+                path_version: None,
             })
             .collect();
 

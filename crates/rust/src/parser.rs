@@ -1,5 +1,7 @@
 //! Cargo.toml parsing and format-preserving dependency updates via `toml_edit`.
 
+use std::path::Path;
+
 use dependency_check_updates_core::{DependencySection, DependencySpec, PlannedUpdate};
 use toml_edit::{DocumentMut, Item, Table, Value};
 
@@ -22,17 +24,34 @@ pub struct CargoTomlManifest {
 }
 
 impl CargoTomlManifest {
-    /// Parse a Cargo.toml from raw text.
+    /// Parse a Cargo.toml from raw text, without resolving local path
+    /// dependencies (used by the patch path, which only needs the document).
     ///
     /// # Errors
     ///
     /// Returns an error if the text is not valid TOML.
     pub fn parse(text: &str) -> Result<Self, CargoTomlError> {
+        Self::parse_in_dir(text, None)
+    }
+
+    /// Parse a Cargo.toml from raw text, resolving local path dependencies
+    /// relative to `manifest_dir` when provided.
+    ///
+    /// A dependency such as `dep = { path = "../dep", version = "0.2.0" }`
+    /// has its target version read from `../dep/Cargo.toml` (the crate on
+    /// disk) instead of crates.io, so the declared `version` can be synced to
+    /// the local crate. When `manifest_dir` is `None`, path dependencies are
+    /// skipped entirely (never resolved against the registry).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the text is not valid TOML.
+    pub fn parse_in_dir(text: &str, manifest_dir: Option<&Path>) -> Result<Self, CargoTomlError> {
         let doc: DocumentMut = text
             .parse()
             .map_err(|e: toml_edit::TomlError| CargoTomlError::ParseFailed(e.to_string()))?;
 
-        let dependencies = Self::collect_dependencies(&doc);
+        let dependencies = Self::collect_dependencies(&doc, manifest_dir);
 
         Ok(Self {
             original_text: text.to_owned(),
@@ -41,12 +60,12 @@ impl CargoTomlManifest {
         })
     }
 
-    fn collect_dependencies(doc: &DocumentMut) -> Vec<DependencySpec> {
+    fn collect_dependencies(doc: &DocumentMut, manifest_dir: Option<&Path>) -> Vec<DependencySpec> {
         let mut deps = Vec::new();
 
         for &(section, key) in CARGO_SECTIONS {
             if let Some(table) = doc.get(key).and_then(Item::as_table) {
-                Self::collect_from_table(table, section, &mut deps);
+                Self::collect_from_table(table, section, manifest_dir, &mut deps);
             }
         }
 
@@ -56,6 +75,7 @@ impl CargoTomlManifest {
                 Self::collect_from_table(
                     ws_deps,
                     DependencySection::WorkspaceDependencies,
+                    manifest_dir,
                     &mut deps,
                 );
             }
@@ -67,53 +87,36 @@ impl CargoTomlManifest {
     fn collect_from_table(
         table: &Table,
         section: DependencySection,
+        manifest_dir: Option<&Path>,
         deps: &mut Vec<DependencySpec>,
     ) {
         for (name, item) in table {
-            if let Some(version) = Self::extract_version(item) {
-                // Skip path/git dependencies without a version, and skip
-                // wildcard-only requirements like `*` which already mean
-                // "any version" — updating them would be a meaningless no-op.
-                if !version.is_empty() && version.trim() != "*" {
+            match classify_dependency(item, manifest_dir) {
+                Some(DepKind::Registry(version)) => {
+                    // Skip wildcard-only requirements like `*` which already
+                    // mean "any version" — updating them would be a no-op.
+                    if !version.is_empty() && version.trim() != "*" {
+                        deps.push(DependencySpec {
+                            name: name.to_owned(),
+                            current_req: version,
+                            section,
+                            path_version: None,
+                        });
+                    }
+                }
+                Some(DepKind::Path {
+                    current_req,
+                    local_version,
+                }) => {
                     deps.push(DependencySpec {
                         name: name.to_owned(),
-                        current_req: version,
+                        current_req,
                         section,
+                        path_version: Some(local_version),
                     });
                 }
+                None => {}
             }
-        }
-    }
-
-    /// Extract the version string from a dependency item.
-    ///
-    /// Handles:
-    /// - `dep = "1.0"` (string form)
-    /// - `dep = { version = "1.0", features = [...] }` (table form)
-    /// - `dep = { workspace = true }` → skipped
-    /// - `dep = { git = "..." }` → skipped (no version)
-    fn extract_version(item: &Item) -> Option<String> {
-        match item {
-            Item::Value(Value::String(s)) => Some(s.value().to_owned()),
-            Item::Value(Value::InlineTable(t)) => {
-                // Skip workspace = true
-                if t.get("workspace").and_then(Value::as_bool).unwrap_or(false) {
-                    return None;
-                }
-                // Skip git/path-only deps
-                t.get("version").and_then(Value::as_str).map(String::from)
-            }
-            Item::Table(t) => {
-                if t.get("workspace")
-                    .and_then(Item::as_value)
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    return None;
-                }
-                t.get("version").and_then(Item::as_str).map(String::from)
-            }
-            _ => None,
         }
     }
 
@@ -180,6 +183,159 @@ impl CargoTomlManifest {
         }
 
         Ok(())
+    }
+}
+
+/// How a single dependency entry should be resolved.
+enum DepKind {
+    /// Ordinary dependency resolved against crates.io. Carries the current
+    /// version requirement string.
+    Registry(String),
+    /// Local `path` dependency that also declares a `version`. The `version`
+    /// field is synced to `local_version` (the version of the crate on disk).
+    Path {
+        current_req: String,
+        local_version: String,
+    },
+}
+
+/// The relevant fields of a table-form dependency, normalised across the
+/// inline (`{ ... }`) and full-table (`[deps.x]`) representations.
+struct DepFields<'a> {
+    workspace: bool,
+    path: Option<&'a str>,
+    version: Option<&'a str>,
+}
+
+impl<'a> DepFields<'a> {
+    fn from_item(item: &'a Item) -> Option<Self> {
+        match item {
+            Item::Value(Value::InlineTable(t)) => Some(Self {
+                workspace: t.get("workspace").and_then(Value::as_bool).unwrap_or(false),
+                path: t.get("path").and_then(Value::as_str),
+                version: t.get("version").and_then(Value::as_str),
+            }),
+            Item::Table(t) => Some(Self {
+                workspace: t.get("workspace").and_then(Item::as_bool).unwrap_or(false),
+                path: t.get("path").and_then(Item::as_str),
+                version: t.get("version").and_then(Item::as_str),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Classify a dependency entry into how its version should be resolved.
+///
+/// Handles:
+/// - `dep = "1.0"` (string form) → registry
+/// - `dep = { version = "1.0", features = [...] }` → registry
+/// - `dep = { path = "../dep", version = "0.2.0" }` → path (synced to the
+///   local crate's version, resolved relative to `manifest_dir`)
+/// - `dep = { workspace = true }` → skipped (resolved from `[workspace.dependencies]`)
+/// - `dep = { git = "..." }` / `dep = { path = "../dep" }` → skipped (no version)
+///
+/// A path dependency is **never** resolved against crates.io: if its local
+/// version cannot be determined (no `version` key, no `manifest_dir`, or the
+/// crate on disk is unreadable) the entry is skipped entirely.
+fn classify_dependency(item: &Item, manifest_dir: Option<&Path>) -> Option<DepKind> {
+    if let Item::Value(Value::String(s)) = item {
+        return Some(DepKind::Registry(s.value().to_owned()));
+    }
+
+    let fields = DepFields::from_item(item)?;
+    if fields.workspace {
+        return None;
+    }
+
+    if let Some(path) = fields.path {
+        let version = fields.version?;
+        let dir = manifest_dir?;
+        let local_version = resolve_path_dep_version(dir, path)?;
+        return Some(DepKind::Path {
+            current_req: version.to_owned(),
+            local_version,
+        });
+    }
+
+    Some(DepKind::Registry(fields.version?.to_owned()))
+}
+
+/// A `[package].version` value: either a literal string or inherited from the
+/// workspace (`version.workspace = true`).
+enum PackageVersion {
+    Literal(String),
+    Inherited,
+}
+
+/// Resolve the version of a local path dependency from its own `Cargo.toml`.
+///
+/// `manifest_dir` is the directory of the manifest that declares the
+/// dependency; `dep_path` is the dependency's `path` value (relative or
+/// absolute). Returns `None` when the crate cannot be read or has no
+/// resolvable `[package].version`.
+fn resolve_path_dep_version(manifest_dir: &Path, dep_path: &str) -> Option<String> {
+    let crate_dir = manifest_dir.join(dep_path);
+    let cargo_path = crate_dir.join("Cargo.toml");
+    let text = std::fs::read_to_string(&cargo_path).ok()?;
+    let doc: DocumentMut = text.parse().ok()?;
+
+    match package_version(&doc)? {
+        PackageVersion::Literal(v) => Some(v),
+        PackageVersion::Inherited => resolve_workspace_version(&crate_dir),
+    }
+}
+
+/// Read `[package].version` from a parsed `Cargo.toml`.
+fn package_version(doc: &DocumentMut) -> Option<PackageVersion> {
+    let version = doc
+        .get("package")
+        .and_then(Item::as_table)?
+        .get("version")?;
+
+    if let Some(s) = version.as_str() {
+        return Some(PackageVersion::Literal(s.to_owned()));
+    }
+    if is_workspace_inherited(version) {
+        return Some(PackageVersion::Inherited);
+    }
+    None
+}
+
+/// Whether a `version` item is `{ workspace = true }` / `version.workspace = true`.
+fn is_workspace_inherited(item: &Item) -> bool {
+    let workspace = match item {
+        Item::Value(Value::InlineTable(t)) => t.get("workspace").and_then(Value::as_bool),
+        Item::Table(t) => t.get("workspace").and_then(Item::as_bool),
+        _ => None,
+    };
+    workspace.unwrap_or(false)
+}
+
+/// Walk up from `crate_dir` to find the nearest workspace root and read its
+/// `[workspace.package].version` (the value a crate inherits via
+/// `version.workspace = true`).
+fn resolve_workspace_version(crate_dir: &Path) -> Option<String> {
+    let mut dir = std::fs::canonicalize(crate_dir).ok()?;
+    loop {
+        let cargo_path = dir.join("Cargo.toml");
+        if let Ok(text) = std::fs::read_to_string(&cargo_path) {
+            if let Ok(doc) = text.parse::<DocumentMut>() {
+                if let Some(version) = doc
+                    .get("workspace")
+                    .and_then(Item::as_table)
+                    .and_then(|w| w.get("package"))
+                    .and_then(Item::as_table)
+                    .and_then(|p| p.get("version"))
+                    .and_then(Item::as_str)
+                {
+                    return Some(version.to_owned());
+                }
+            }
+        }
+        if !dir.pop() {
+            return None;
+        }
     }
 }
 
@@ -520,5 +676,212 @@ serde = "1.0"
         } else {
             assert!(result.is_err());
         }
+    }
+
+    // ----- Local path dependency resolution -------------------------------
+
+    use tempfile::TempDir;
+
+    /// Write `content` to `<dir>/<rel>`, creating parent directories.
+    fn write_file(dir: &Path, rel: &str, content: &str) {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    /// `{ path = "../hwp", version = "0.2.0" }` resolves `path_version` from the
+    /// local crate's literal `[package].version` (here a higher 0.3.0), keeping
+    /// `current_req` as the manifest's declared version.
+    #[test]
+    fn path_dep_syncs_to_local_literal_version() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "hwp/Cargo.toml",
+            "[package]\nname = \"hwp\"\nversion = \"0.3.0\"\n",
+        );
+        let app_dir = tmp.path().join("app");
+        std::fs::create_dir_all(&app_dir).unwrap();
+
+        let manifest = "[dependencies]\nhwp = { path = \"../hwp\", version = \"0.2.0\" }\n";
+        let parsed = CargoTomlManifest::parse_in_dir(manifest, Some(&app_dir)).unwrap();
+
+        assert_eq!(parsed.dependencies.len(), 1);
+        let dep = &parsed.dependencies[0];
+        assert_eq!(dep.name, "hwp");
+        assert_eq!(dep.current_req, "0.2.0");
+        assert_eq!(dep.path_version.as_deref(), Some("0.3.0"));
+    }
+
+    /// A path dep whose local crate is *older* than the declared version still
+    /// resolves — exact-sync (and its allowed downgrade) is decided later in the
+    /// pipeline; the parser just reports the on-disk version.
+    #[test]
+    fn path_dep_reports_lower_local_version() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "hwp/Cargo.toml",
+            "[package]\nname = \"hwp\"\nversion = \"0.1.0\"\n",
+        );
+        let app_dir = tmp.path().join("app");
+        std::fs::create_dir_all(&app_dir).unwrap();
+
+        let manifest = "[dependencies]\nhwp = { path = \"../hwp\", version = \"0.2.0\" }\n";
+        let parsed = CargoTomlManifest::parse_in_dir(manifest, Some(&app_dir)).unwrap();
+
+        assert_eq!(
+            parsed.dependencies[0].path_version.as_deref(),
+            Some("0.1.0")
+        );
+    }
+
+    /// `version.workspace = true` in the local crate resolves by walking up to
+    /// the workspace root's `[workspace.package].version`.
+    #[test]
+    fn path_dep_resolves_workspace_inherited_version() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/hwp\", \"crates/app\"]\n\n[workspace.package]\nversion = \"1.2.3\"\n",
+        );
+        write_file(
+            tmp.path(),
+            "crates/hwp/Cargo.toml",
+            "[package]\nname = \"hwp\"\nversion.workspace = true\n",
+        );
+        let app_dir = tmp.path().join("crates/app");
+        std::fs::create_dir_all(&app_dir).unwrap();
+
+        let manifest = "[dependencies]\nhwp = { path = \"../hwp\", version = \"1.0.0\" }\n";
+        let parsed = CargoTomlManifest::parse_in_dir(manifest, Some(&app_dir)).unwrap();
+
+        assert_eq!(
+            parsed.dependencies[0].path_version.as_deref(),
+            Some("1.2.3")
+        );
+    }
+
+    /// The full-table form `[dependencies.hwp]` with `path` + `version` is
+    /// resolved the same way as the inline form.
+    #[test]
+    fn path_dep_full_table_form_resolved() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "hwp/Cargo.toml",
+            "[package]\nname = \"hwp\"\nversion = \"0.5.0\"\n",
+        );
+        let app_dir = tmp.path().join("app");
+        std::fs::create_dir_all(&app_dir).unwrap();
+
+        let manifest = "[dependencies.hwp]\npath = \"../hwp\"\nversion = \"0.2.0\"\n";
+        let parsed = CargoTomlManifest::parse_in_dir(manifest, Some(&app_dir)).unwrap();
+
+        assert_eq!(parsed.dependencies.len(), 1);
+        assert_eq!(
+            parsed.dependencies[0].path_version.as_deref(),
+            Some("0.5.0")
+        );
+    }
+
+    /// `[workspace.dependencies]` path deps (the publish-ready monorepo pattern)
+    /// are resolved against the local crate too.
+    #[test]
+    fn workspace_dependency_path_resolved() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "crates/core/Cargo.toml",
+            "[package]\nname = \"core\"\nversion = \"0.1.20\"\n",
+        );
+
+        let manifest =
+            "[workspace.dependencies]\ncore = { path = \"crates/core\", version = \"0.1.15\" }\n";
+        let parsed = CargoTomlManifest::parse_in_dir(manifest, Some(tmp.path())).unwrap();
+
+        assert_eq!(parsed.dependencies.len(), 1);
+        assert_eq!(
+            parsed.dependencies[0].section,
+            DependencySection::WorkspaceDependencies
+        );
+        assert_eq!(
+            parsed.dependencies[0].path_version.as_deref(),
+            Some("0.1.20")
+        );
+    }
+
+    /// A path dep whose local crate cannot be found is skipped entirely — it is
+    /// never resolved against crates.io. Sibling registry deps are unaffected.
+    #[test]
+    fn path_dep_missing_crate_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let app_dir = tmp.path().join("app");
+        std::fs::create_dir_all(&app_dir).unwrap();
+
+        let manifest =
+            "[dependencies]\nhwp = { path = \"../hwp\", version = \"0.2.0\" }\ntokio = \"1.0\"\n";
+        let parsed = CargoTomlManifest::parse_in_dir(manifest, Some(&app_dir)).unwrap();
+
+        assert_eq!(parsed.dependencies.len(), 1);
+        assert_eq!(parsed.dependencies[0].name, "tokio");
+    }
+
+    /// Without a manifest directory (e.g. the patch path) path deps are skipped
+    /// rather than resolved against the registry.
+    #[test]
+    fn path_dep_without_manifest_dir_is_skipped() {
+        let manifest =
+            "[dependencies]\nhwp = { path = \"../hwp\", version = \"0.2.0\" }\ntokio = \"1.0\"\n";
+        let parsed = CargoTomlManifest::parse(manifest).unwrap();
+
+        assert_eq!(parsed.dependencies.len(), 1);
+        assert_eq!(parsed.dependencies[0].name, "tokio");
+    }
+
+    /// A `path` dep with no `version` key has nothing to sync and is skipped,
+    /// even when the local crate exists.
+    #[test]
+    fn path_dep_without_version_key_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "hwp/Cargo.toml",
+            "[package]\nname = \"hwp\"\nversion = \"0.3.0\"\n",
+        );
+        let app_dir = tmp.path().join("app");
+        std::fs::create_dir_all(&app_dir).unwrap();
+
+        let manifest = "[dependencies]\nhwp = { path = \"../hwp\" }\ntokio = \"1.0\"\n";
+        let parsed = CargoTomlManifest::parse_in_dir(manifest, Some(&app_dir)).unwrap();
+
+        assert_eq!(parsed.dependencies.len(), 1);
+        assert_eq!(parsed.dependencies[0].name, "tokio");
+    }
+
+    /// Applying an update to an inline path dep replaces only `version`, leaving
+    /// the `path` key intact (format-preserving).
+    #[test]
+    fn apply_update_preserves_path_key() {
+        let toml = "[dependencies]\nhwp = { path = \"../hwp\", version = \"0.2.0\" }\n";
+        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "hwp".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "0.2.0".to_owned(),
+            to: "0.3.0".to_owned(),
+        }];
+        let out = manifest.apply_updates(&updates).unwrap();
+        assert!(
+            out.contains("path = \"../hwp\""),
+            "path key dropped:\n{out}"
+        );
+        assert!(
+            out.contains("version = \"0.3.0\""),
+            "version not synced:\n{out}"
+        );
     }
 }

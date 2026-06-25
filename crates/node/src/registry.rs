@@ -347,6 +347,7 @@ mod tests {
             name: name.to_owned(),
             current_req: current_req.to_owned(),
             section: DependencySection::Dependencies,
+            path_version: None,
         }
     }
 

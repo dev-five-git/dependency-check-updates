@@ -50,6 +50,20 @@ pub(crate) fn compute_updates(
             continue;
         };
 
+        // Local path dependency: exact-sync the `version` field to the crate
+        // on disk. The path crate's actual version is the source of truth, so
+        // this bypasses the never-downgrade safety net below — Cargo requires
+        // the requirement to be satisfiable by the local crate's version.
+        if dep.path_version.is_some() {
+            if let Some(update) = sync_path_dep(dep, selected) {
+                debug!(name = %update.name, from = %update.from, to = %update.to, "path dep sync");
+                updates.push(update);
+            } else {
+                trace!(package = %dep.name, version = %dep.current_req, "path dep already in sync");
+            }
+            continue;
+        }
+
         // Strip range prefix for comparison
         let current_bare = dep
             .current_req
@@ -121,6 +135,52 @@ pub(crate) fn compute_updates(
     }
 
     updates
+}
+
+/// Compute the exact-sync update for a local path dependency.
+///
+/// The `version` field of a `{ path = "...", version = "..." }` dependency is
+/// synced to `local_version` (the version of the crate on disk). Unlike the
+/// registry path this allows "downgrades": if the local crate is *older* than
+/// the declared requirement the field is lowered to match, because Cargo
+/// requires the requirement to be satisfiable by the path crate's version.
+///
+/// The range prefix (`^`, `~`, `>=`, …) and the user's pin precision are
+/// preserved for plain numeric versions (`0.2` → `0.3`); otherwise the full
+/// local version is written (build metadata stripped, pre-release preserved).
+/// Returns `None` when the field is already in sync.
+fn sync_path_dep(dep: &DependencySpec, local_version: &str) -> Option<PlannedUpdate> {
+    let current_bare = dep
+        .current_req
+        .trim_start_matches(|c: char| !c.is_ascii_digit());
+    if current_bare.is_empty() {
+        // e.g. `version = "*"` — already matches any version, nothing to sync.
+        return None;
+    }
+
+    let precision = count_version_segments(current_bare);
+    let new_bare = if precision < 3 && is_plain_numeric_version(local_version) {
+        truncate_version(local_version, precision)
+    } else {
+        // Full version: strip build metadata (`+...`), keep any pre-release.
+        local_version
+            .split('+')
+            .next()
+            .unwrap_or(local_version)
+            .to_owned()
+    };
+
+    if current_bare == new_bare {
+        return None;
+    }
+
+    let prefix = &dep.current_req[..dep.current_req.len() - current_bare.len()];
+    Some(PlannedUpdate {
+        name: dep.name.clone(),
+        section: dep.section,
+        from: dep.current_req.clone(),
+        to: format!("{prefix}{new_bare}"),
+    })
 }
 
 /// Pad a version string to exactly three numeric segments so it can be
@@ -243,6 +303,7 @@ mod tests {
             name: name.to_owned(),
             current_req: current_req.to_owned(),
             section: DependencySection::Dependencies,
+            path_version: None,
         }
     }
 
@@ -365,6 +426,7 @@ mod tests {
                 name: "b".to_owned(),
                 current_req: "~2.0.0".to_owned(),
                 section: DependencySection::DevDependencies,
+                path_version: None,
             },
             dep("c", "^3.0.0"),
         ];
@@ -406,6 +468,7 @@ mod tests {
             name: "a".to_owned(),
             current_req: "^1.0.0".to_owned(),
             section: DependencySection::DevDependencies,
+            path_version: None,
         }];
         let resolved = vec![(
             0,
@@ -429,6 +492,7 @@ mod tests {
             name: "astral-sh/setup-uv".to_owned(),
             current_req: "v7".to_owned(),
             section: DependencySection::GitHubActions,
+            path_version: None,
         }];
         let resolved = vec![(
             0,
@@ -440,6 +504,55 @@ mod tests {
         let updates = compute_updates(&deps, &resolved, ManifestKind::GitHubWorkflow);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].to, "v8.1.0");
+    }
+
+    /// Build a single path-dependency input: `current_req` is what the manifest
+    /// declares, `local` is the version of the crate on disk (carried via
+    /// `path_version` and echoed by the short-circuiting registry as `selected`).
+    fn path_dep_input(current: &str, local: &str) -> (Vec<DependencySpec>, ResolvedInput) {
+        let deps = vec![DependencySpec {
+            name: "hwp".to_owned(),
+            current_req: current.to_owned(),
+            section: DependencySection::Dependencies,
+            path_version: Some(local.to_owned()),
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some(local.to_owned()),
+                selected: Some(local.to_owned()),
+            }),
+        )];
+        (deps, resolved)
+    }
+
+    #[rstest]
+    // current manifest version, local crate version, expected `to` (None = no update).
+    #[case::upgrade("0.2.0", "0.3.0", Some("0.3.0"))]
+    // Exact sync allows a downgrade — the never-downgrade safety net is bypassed
+    // for path deps because the local crate's version is the source of truth.
+    #[case::downgrade("0.3.0", "0.2.0", Some("0.2.0"))]
+    #[case::already_in_sync("0.3.0", "0.3.0", None)]
+    #[case::preserves_caret("^0.2.0", "0.3.0", Some("^0.3.0"))]
+    #[case::preserves_tilde("~0.2.0", "0.3.0", Some("~0.3.0"))]
+    // Pin precision preserved for plain numeric local versions.
+    #[case::preserves_two_segment_precision("0.2", "0.3.1", Some("0.3"))]
+    #[case::full_version_at_three_segments("0.2.0", "0.3.1", Some("0.3.1"))]
+    fn compute_updates_path_dep_cases(
+        #[case] current: &str,
+        #[case] local: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let (deps, resolved) = path_dep_input(current, local);
+        let updates = compute_updates(&deps, &resolved, ManifestKind::CargoToml);
+        match expected {
+            Some(to) => {
+                assert_eq!(updates.len(), 1, "expected one update, got: {updates:?}");
+                assert_eq!(updates[0].to, to);
+                assert_eq!(updates[0].from, current);
+            }
+            None => assert!(updates.is_empty(), "expected no update, got: {updates:?}"),
+        }
     }
 
     #[rstest]

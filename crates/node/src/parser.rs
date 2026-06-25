@@ -53,6 +53,7 @@ impl PackageJsonManifest {
                                 name: name.clone(),
                                 current_req: version_str.to_owned(),
                                 section,
+                                path_version: None,
                             });
                         }
                     }

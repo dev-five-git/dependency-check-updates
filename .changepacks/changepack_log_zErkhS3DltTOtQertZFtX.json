@@ -1,0 +1,1 @@
+{"changes":{"crates/core/Cargo.toml":"Patch","crates/rust/Cargo.toml":"Patch","bridge/node/package.json":"Patch","crates/node/Cargo.toml":"Patch","crates/python/Cargo.toml":"Patch","crates/cli/Cargo.toml":"Patch","bridge/python/pyproject.toml":"Patch","crates/github/Cargo.toml":"Patch"},"note":"Fix local version issue","date":"2026-06-25T14:48:49.415649700Z"}

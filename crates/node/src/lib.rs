@@ -189,6 +189,7 @@ mod tests {
             name: "pkg".to_owned(),
             current_req: "^1.0.0".to_owned(),
             section,
+            path_version: None,
         };
         assert_eq!(is_node_ecosystem(&dep), expected);
     }

@@ -21,9 +21,11 @@ pub struct RustHandler;
 
 impl ManifestHandler for RustHandler {
     fn parse(&self, text: &str, path: &Path) -> Result<ParsedManifest, DcuError> {
-        let manifest = CargoTomlManifest::parse(text).map_err(|e| DcuError::ManifestParse {
-            path: path.to_path_buf(),
-            detail: e.to_string(),
+        let manifest = CargoTomlManifest::parse_in_dir(text, path.parent()).map_err(|e| {
+            DcuError::ManifestParse {
+                path: path.to_path_buf(),
+                detail: e.to_string(),
+            }
         })?;
 
         Ok(ParsedManifest {

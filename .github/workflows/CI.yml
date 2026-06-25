@@ -35,7 +35,7 @@ jobs:
           - windows-latest
           - macos-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -72,7 +72,7 @@ jobs:
       image: xd009642/tarpaulin:develop-nightly
       options: --security-opt seccomp=unconfined
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install
         uses: dtolnay/rust-toolchain@stable
@@ -96,7 +96,7 @@ jobs:
           cargo fmt
           cargo tarpaulin --out Lcov Stdout --engine llvm --fail-under 100
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
@@ -114,7 +114,7 @@ jobs:
       - test
       - coverage-test
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: changepacks/action@main
         id: changepacks
         with:
@@ -156,7 +156,7 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "10.13"
       CARGO_INCREMENTAL: "1"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Setup node
         uses: actions/setup-node@v6
         with:
@@ -262,7 +262,7 @@ jobs:
             target: aarch64
             os: macos
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build wheels
         uses: PyO3/maturin-action@main
         with:
@@ -293,7 +293,7 @@ jobs:
       - node-build
     if: ${{ contains(needs.changepacks.outputs.changepacks, 'bridge/node/package.json') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -394,7 +394,7 @@ jobs:
             binary_name: dependency-check-updates-darwin-arm64
             dcu_binary_name: dcu-darwin-arm64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable

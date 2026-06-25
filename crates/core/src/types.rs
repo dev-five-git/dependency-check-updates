@@ -134,6 +134,14 @@ pub struct DependencySpec {
     pub current_req: String,
     /// Section the dependency was found in.
     pub section: DependencySection,
+    /// For a local **path dependency** that also declares a `version`
+    /// (e.g. Cargo's `dep = { path = "../dep", version = "0.2.0" }`), this
+    /// holds the version resolved from the local crate's own manifest — the
+    /// source of truth for what the `version` field should be synced to.
+    ///
+    /// `None` for ordinary registry dependencies, which resolve their target
+    /// version from the package registry (`crates.io`, `npm`, `PyPI`) instead.
+    pub path_version: Option<String>,
 }
 
 /// The target level for version updates.
