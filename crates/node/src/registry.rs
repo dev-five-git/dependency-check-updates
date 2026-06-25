@@ -277,12 +277,10 @@ fn newest_by_date(info: &NpmPackageInfo, all_versions: &[node_semver::Version]) 
         .iter()
         .filter_map(|v| {
             let s = v.to_string();
-            times
-                .get(&s)
-                .and_then(serde_json::Value::as_str)
-                .map(|t| (t.to_owned(), s))
+            let t = times.get(&s).and_then(serde_json::Value::as_str)?;
+            Some((t, s))
         })
-        .max_by(|a, b| a.0.cmp(&b.0))
+        .max_by(|a, b| a.0.cmp(b.0))
         .map(|(_, s)| s)
 }
 
