@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use dependency_check_updates_core::{BumpType, PlannedUpdate};
+use dependency_check_updates_core::{BumpType, PlannedUpdate, strip_range_prefix};
 use owo_colors::OwoColorize;
 
 /// Determine the type of version bump by comparing version strings.
@@ -22,7 +22,7 @@ pub fn detect_bump_type(from: &str, to: &str) -> BumpType {
 
 /// Parse major.minor.patch from a version string, stripping range prefixes.
 fn parse_version_parts(v: &str) -> (u64, u64, u64) {
-    let cleaned = v.trim_start_matches(|c: char| !c.is_ascii_digit());
+    let cleaned = strip_range_prefix(v);
     let mut parts = cleaned.splitn(3, '.');
     let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);

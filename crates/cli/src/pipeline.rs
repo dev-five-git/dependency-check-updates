@@ -1,7 +1,7 @@
 use tracing::{debug, trace, warn};
 
 use dependency_check_updates_core::{
-    DcuError, DependencySpec, ManifestKind, PlannedUpdate, ResolvedVersion,
+    DcuError, DependencySpec, ManifestKind, PlannedUpdate, ResolvedVersion, strip_range_prefix,
 };
 
 /// Filter dependencies by include/exclude patterns.
@@ -65,9 +65,7 @@ pub(crate) fn compute_updates(
         }
 
         // Strip range prefix for comparison
-        let current_bare = dep
-            .current_req
-            .trim_start_matches(|c: char| !c.is_ascii_digit());
+        let current_bare = strip_range_prefix(&dep.current_req);
 
         // Safety net: never suggest a downgrade. When both current and selected
         // can be parsed as semver (after padding short forms like `5` or `5.1`
@@ -150,9 +148,7 @@ pub(crate) fn compute_updates(
 /// local version is written (build metadata stripped, pre-release preserved).
 /// Returns `None` when the field is already in sync.
 fn sync_path_dep(dep: &DependencySpec, local_version: &str) -> Option<PlannedUpdate> {
-    let current_bare = dep
-        .current_req
-        .trim_start_matches(|c: char| !c.is_ascii_digit());
+    let current_bare = strip_range_prefix(&dep.current_req);
     if current_bare.is_empty() {
         // e.g. `version = "*"` — already matches any version, nothing to sync.
         return None;
