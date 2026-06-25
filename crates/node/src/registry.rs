@@ -1,9 +1,12 @@
 //! npm registry client for looking up package versions.
 
+use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 
 use reqwest::Client;
 use serde::Deserialize;
+use serde::de::{IgnoredAny, MapAccess, Visitor};
 use tokio::sync::Semaphore;
 use tracing::{debug, trace};
 
@@ -25,11 +28,55 @@ pub struct NpmRegistry {
 struct NpmPackageInfo {
     #[serde(rename = "dist-tags")]
     dist_tags: Option<DistTags>,
-    versions: Option<serde_json::Map<String, serde_json::Value>>,
+    versions: Option<VersionKeys>,
     /// Map of version → ISO-8601 publish time. Only present in the *full*
     /// packument (the abbreviated `install-v1` format omits it), so it is
     /// fetched on demand for `--target newest`.
     time: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Set of version-string keys extracted from a packument `versions` JSON
+/// object. Each value body (the nested per-version metadata: `dependencies`,
+/// `peerDependencies`, `dist`, ...) is walked past with `IgnoredAny` instead
+/// of being materialised into a `serde_json::Value` tree, since downstream
+/// code only ever needs the keys. Saves the per-version `Value`-tree
+/// allocation on every npm packument parse — popular packages publish
+/// hundreds of versions, each with multi-KB nested bodies. Newtype around
+/// `HashSet<String>` so the clippy `zero_sized_map_values` lint stays clean
+/// (a `HashMap<String, IgnoredAny>` would trip it).
+#[derive(Debug, Default)]
+struct VersionKeys(HashSet<String>);
+
+impl<'de> Deserialize<'de> for VersionKeys {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct VersionKeysVisitor;
+
+        impl<'de> Visitor<'de> for VersionKeysVisitor {
+            type Value = HashSet<String>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a JSON object whose keys are version strings")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut keys = HashSet::with_capacity(map.size_hint().unwrap_or(0));
+                while let Some(key) = map.next_key::<String>()? {
+                    // Skip the value body without materialising it.
+                    let _: IgnoredAny = map.next_value()?;
+                    keys.insert(key);
+                }
+                Ok(keys)
+            }
+        }
+
+        deserializer.deserialize_map(VersionKeysVisitor).map(Self)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -247,7 +294,8 @@ fn extract_sorted_versions(info: &NpmPackageInfo) -> Vec<node_semver::Version> {
     };
 
     let mut parsed: Vec<node_semver::Version> = versions
-        .keys()
+        .0
+        .iter()
         .filter_map(|v| node_semver::Version::parse(v).ok())
         .collect();
 
@@ -444,22 +492,11 @@ mod tests {
     fn test_extract_sorted_versions() {
         let info = NpmPackageInfo {
             dist_tags: None,
-            versions: Some({
-                let mut map = serde_json::Map::new();
-                map.insert(
-                    "2.0.0".to_owned(),
-                    serde_json::Value::Object(serde_json::Map::new()),
-                );
-                map.insert(
-                    "1.0.0".to_owned(),
-                    serde_json::Value::Object(serde_json::Map::new()),
-                );
-                map.insert(
-                    "1.5.0".to_owned(),
-                    serde_json::Value::Object(serde_json::Map::new()),
-                );
-                map
-            }),
+            versions: Some(VersionKeys(HashSet::from([
+                "2.0.0".to_owned(),
+                "1.0.0".to_owned(),
+                "1.5.0".to_owned(),
+            ]))),
             time: None,
         };
         let versions = extract_sorted_versions(&info);
