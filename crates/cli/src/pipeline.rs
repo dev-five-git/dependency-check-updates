@@ -78,15 +78,16 @@ pub(crate) fn compute_updates(
         if let (Ok(cur_ver), Ok(sel_ver)) = (
             semver::Version::parse(&pad_to_three_segments(current_bare)),
             semver::Version::parse(&pad_to_three_segments(selected)),
-        ) && sel_ver <= cur_ver
-        {
-            trace!(
-                package = %dep.name,
-                current = %dep.current_req,
-                selected = %selected,
-                "skipping: selected version is not newer than current"
-            );
-            continue;
+        ) {
+            if sel_ver <= cur_ver {
+                trace!(
+                    package = %dep.name,
+                    current = %dep.current_req,
+                    selected = %selected,
+                    "skipping: selected version is not newer than current"
+                );
+                continue;
+            }
         }
 
         // Preserve precision: if the user wrote "0.6" (2 segments), truncate the
