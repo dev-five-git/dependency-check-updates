@@ -379,7 +379,7 @@ fn select_from_tags(tags: &[Tag], current_req: &str, target: TargetLevel) -> Res
         current.as_ref(),
         &versions,
         target,
-        highest_stable.clone(),
+        highest_stable.as_deref(),
         None,
     );
 

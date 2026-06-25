@@ -237,8 +237,8 @@ fn select_version(
         current.as_ref(),
         all_versions,
         target,
-        latest.cloned(),
-        latest.cloned(),
+        latest.map(String::as_str),
+        latest.map(String::as_str),
     )
 }
 

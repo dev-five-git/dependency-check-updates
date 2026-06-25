@@ -92,11 +92,11 @@ pub fn select_version<V: SelectableVersion>(
     current: Option<&V>,
     all_versions: &[V],
     target: TargetLevel,
-    latest_for_stable: Option<String>,
-    unparseable_minor_patch: Option<String>,
+    latest_for_stable: Option<&str>,
+    unparseable_minor_patch: Option<&str>,
 ) -> Option<String> {
     if all_versions.is_empty() {
-        return latest_for_stable;
+        return latest_for_stable.map(ToOwned::to_owned);
     }
 
     let current_is_prerelease = current.is_some_and(SelectableVersion::is_prerelease);
@@ -125,10 +125,10 @@ pub fn select_version<V: SelectableVersion>(
             .rev()
             .find(accept)
             .map(ToString::to_string),
-        TargetLevel::Latest => latest_for_stable,
+        TargetLevel::Latest => latest_for_stable.map(ToOwned::to_owned),
         TargetLevel::Greatest | TargetLevel::Newest => all_versions.last().map(ToString::to_string),
         TargetLevel::Minor => match current {
-            None => unparseable_minor_patch,
+            None => unparseable_minor_patch.map(ToOwned::to_owned),
             Some(cur) => all_versions
                 .iter()
                 .rev()
@@ -136,7 +136,7 @@ pub fn select_version<V: SelectableVersion>(
                 .map(ToString::to_string),
         },
         TargetLevel::Patch => match current {
-            None => unparseable_minor_patch,
+            None => unparseable_minor_patch.map(ToOwned::to_owned),
             Some(cur) => all_versions
                 .iter()
                 .rev()
@@ -274,8 +274,8 @@ mod tests {
             cur.as_ref(),
             &candidates,
             target,
-            latest_for_stable.map(ToOwned::to_owned),
-            unparseable_minor_patch.map(ToOwned::to_owned),
+            latest_for_stable,
+            unparseable_minor_patch,
         );
         assert_eq!(selected, expected.map(ToOwned::to_owned));
     }

@@ -165,8 +165,8 @@ impl PyPiRegistry {
                 current.as_ref(),
                 &versions,
                 target,
-                latest.clone(),
-                latest.clone(),
+                latest.as_deref(),
+                latest.as_deref(),
             )
         };
 
