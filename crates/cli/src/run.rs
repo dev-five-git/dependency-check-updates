@@ -38,6 +38,36 @@ pub async fn main(args: &[String]) -> Result<(), DcuError> {
     Ok(())
 }
 
+/// Shared entry-point used by the `dependency-check-updates` and `dcu`
+/// binaries.
+///
+/// Parses args, runs the pipeline, and translates the outcome into an
+/// `ExitCode` so the binary `main` can return it directly. Centralising
+/// this here keeps the error-printing and `--error-level` policy in one
+/// place instead of duplicating the `match` arms in every entry point.
+#[cfg(not(tarpaulin_include))]
+pub async fn run_cli() -> std::process::ExitCode {
+    use std::process::ExitCode;
+
+    let cli = crate::cli::parse_args();
+    let error_level = cli.error_level;
+
+    match run(&cli).await {
+        Ok(has_updates) => {
+            // error_level 2: exit 1 if any updates were found (CI mode)
+            if error_level >= 2 && has_updates {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// Run the dependency-check-updates CLI with the given configuration.
 ///
 /// # Errors

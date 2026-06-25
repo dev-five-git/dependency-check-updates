@@ -10,7 +10,7 @@ mod pipeline;
 mod run;
 
 pub use cli::{Cli, OutputFormat, parse_args};
-pub use run::{main, run};
+pub use run::{main, run, run_cli};
 
 // Re-exported so bridge crates (napi, maturin) can name the unified error
 // type without depending on `dependency-check-updates-core` directly.
