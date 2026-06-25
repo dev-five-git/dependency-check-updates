@@ -49,15 +49,27 @@ pub fn pad_to_three_segments(v: &str) -> Cow<'_, str> {
     let (numeric, suffix) = v
         .find(|c: char| !c.is_ascii_digit() && c != '.')
         .map_or((v, ""), |i| v.split_at(i));
-    let parts: Vec<&str> = numeric.split('.').filter(|s| !s.is_empty()).collect();
-    match parts.len() {
-        1 => Cow::Owned(format!("{}.0.0{}", parts[0], suffix)),
-        2 => Cow::Owned(format!("{}.{}.0{}", parts[0], parts[1], suffix)),
-        // 0 (no numeric prefix) or >= 3 (already padded / over-padded): leave
-        // as-is (zero-cost borrow). Callers' parsers decide whether to accept
-        // the result.
-        _ => Cow::Borrowed(v),
+    // Walk the segment iterator directly instead of collecting into a
+    // throwaway `Vec<&str>`: this helper sits on per-tag / per-dependency hot
+    // paths (`github::registry::normalize_tag`, `cli::pipeline::compute_updates`),
+    // so every call previously allocated a small `Vec` just to read its
+    // length and the first one or two elements.
+    let mut parts = numeric.split('.').filter(|s| !s.is_empty());
+    let Some(p0) = parts.next() else {
+        // 0 numeric segments — no padding possible.
+        return Cow::Borrowed(v);
+    };
+    let Some(p1) = parts.next() else {
+        // 1 segment: pad to `<p0>.0.0<suffix>`.
+        return Cow::Owned(format!("{p0}.0.0{suffix}"));
+    };
+    if parts.next().is_none() {
+        // 2 segments: pad to `<p0>.<p1>.0<suffix>`.
+        return Cow::Owned(format!("{p0}.{p1}.0{suffix}"));
     }
+    // 3+ segments: already padded / over-padded; leave as-is (zero-cost
+    // borrow). Callers' parsers decide whether to accept the result.
+    Cow::Borrowed(v)
 }
 
 #[cfg(test)]
