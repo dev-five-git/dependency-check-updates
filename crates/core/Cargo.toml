@@ -24,6 +24,7 @@ reqwest.workspace = true
 node-semver.workspace = true
 semver = "1.0"
 pep440_rs = "0.7.3"
+futures.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

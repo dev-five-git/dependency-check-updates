@@ -22,7 +22,6 @@ tokio = { workspace = true, features = ["sync"] }
 semver = "1.0"
 tracing.workspace = true
 thiserror.workspace = true
-futures.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

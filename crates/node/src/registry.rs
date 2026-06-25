@@ -194,23 +194,19 @@ impl NpmRegistry {
     /// Resolve versions for a batch of dependencies concurrently.
     ///
     /// Returns `(index, result)` pairs preserving the original ordering.
+    /// Delegates the `join_all` pipeline to
+    /// [`dependency_check_updates_core::resolve_batch_concurrent`] so the
+    /// concurrency model — no `tokio::spawn`, no per-dep `JoinHandle` /
+    /// `DependencySpec` clones, source-order preserved — lives in exactly one
+    /// place across every per-dep registry.
     pub async fn resolve_batch(
         &self,
         deps: &[DependencySpec],
         target: TargetLevel,
     ) -> Vec<(usize, Result<ResolvedVersion, DcuError>)> {
-        // `join_all` drives all per-dep futures concurrently on the current
-        // task — no `tokio::spawn`, so no per-dep `JoinHandle` allocation and
-        // no `DependencySpec`/`Arc` clones (both are borrowed for the duration
-        // of the `.await`). Real concurrency still comes from the inner
-        // `Semaphore`-gated HTTP requests, which cooperate via `.await`.
-        // `join_all` preserves the source order of the iterator, so no
-        // post-sort is needed.
-        futures::future::join_all(
-            deps.iter()
-                .enumerate()
-                .map(|(idx, dep)| async move { (idx, self.resolve_version(dep, target).await) }),
-        )
+        dependency_check_updates_core::resolve_batch_concurrent(deps, |dep| {
+            self.resolve_version(dep, target)
+        })
         .await
     }
 }

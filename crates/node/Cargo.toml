@@ -21,7 +21,6 @@ reqwest.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 node-semver.workspace = true
 tracing.workspace = true
-futures.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
