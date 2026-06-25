@@ -3,7 +3,7 @@
 //! Each language crate (dependency-check-updates-node, dependency-check-updates-rust, dependency-check-updates-python) implements these
 //! traits for its specific manifest format and registry.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tracing::debug;
 
@@ -242,23 +242,6 @@ impl Scanner {
 
         Ok(manifests)
     }
-}
-
-// ---------------------------------------------------------------------------
-// ScanResult — output of the scan+resolve pipeline
-// ---------------------------------------------------------------------------
-
-/// Result of scanning and resolving a single manifest file.
-#[derive(Debug)]
-pub struct ScanResult {
-    /// The manifest file that was scanned.
-    pub manifest_ref: ManifestRef,
-    /// Path to the manifest.
-    pub path: PathBuf,
-    /// Updates that can be applied.
-    pub updates: Vec<PlannedUpdate>,
-    /// Whether the file was actually modified (only true after apply).
-    pub modified: bool,
 }
 
 #[cfg(test)]
