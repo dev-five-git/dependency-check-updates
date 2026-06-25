@@ -138,14 +138,6 @@ impl Scanner {
     pub fn scan_deep(root: &Path) -> Vec<ManifestRef> {
         use ignore::WalkBuilder;
 
-        let manifest_names: &[&str] = &[
-            "package.json",
-            "Cargo.toml",
-            "pyproject.toml",
-            "action.yml",
-            "action.yaml",
-        ];
-
         let walker = WalkBuilder::new(root)
             // `hidden(false)` so `.github/` is traversed. The filter_entry
             // below still skips other hidden dirs that are not interesting.
@@ -171,35 +163,22 @@ impl Scanner {
 
         let mut manifests = Vec::new();
 
+        // Single source of truth for what counts as a manifest:
+        // `ManifestKind::from_path` already encodes the full decision tree
+        // (the 5 named files + `.github/workflows/*.{yml,yaml}`). Delegating
+        // here removes the previously-duplicated `manifest_names` list and
+        // `is_workflow_yaml` parent-traversal block, and drops the per-file
+        // `to_string_lossy()` allocation in the deep-walk hot path.
         for entry in walker.flatten() {
             if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                 continue;
             }
-
-            let path = entry.path();
-            let file_name = entry.file_name().to_string_lossy();
-            let is_workflow_yaml = matches!(
-                path.extension().and_then(|s| s.to_str()),
-                Some("yml" | "yaml")
-            ) && path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str())
-                == Some("workflows")
-                && path
-                    .parent()
-                    .and_then(Path::parent)
-                    .and_then(|p| p.file_name())
-                    .and_then(|s| s.to_str())
-                    == Some(".github");
-
-            if manifest_names.contains(&file_name.as_ref()) || is_workflow_yaml {
-                let path = entry.into_path();
-                if let Some(kind) = ManifestKind::from_path(&path) {
-                    debug!(path = %path.display(), kind = %kind, "deep scan: found manifest");
-                    manifests.push(ManifestRef { path, kind });
-                }
-            }
+            let Some(kind) = ManifestKind::from_path(entry.path()) else {
+                continue;
+            };
+            let path = entry.into_path();
+            debug!(path = %path.display(), kind = %kind, "deep scan: found manifest");
+            manifests.push(ManifestRef { path, kind });
         }
 
         manifests.sort_by(|a, b| a.path.cmp(&b.path));
