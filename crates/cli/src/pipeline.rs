@@ -242,19 +242,30 @@ fn truncate_version(version: &str, segments: usize) -> String {
         return stripped.to_owned();
     }
 
-    // Split numeric.dot prefix from any trailing pre-release (`-...`)
-    let (numeric, suffix) = stripped
+    // Bare numeric `1.2.3` head — any non-digit, non-dot byte ends the
+    // numeric prefix and marks the start of a pre-release tail we drop on
+    // truncation (the comparison below decides whether truncation happens).
+    let numeric = stripped
         .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .map_or((stripped, ""), |i| stripped.split_at(i));
+        .map_or(stripped, |i| &stripped[..i]);
 
-    let parts: Vec<&str> = numeric.split('.').collect();
-    if parts.len() <= segments {
-        // Already at or below desired precision — keep as-is with any pre-release
+    if numeric.split('.').count() <= segments {
+        // Already at or below desired precision — return `stripped` so any
+        // pre-release tail survives unchanged.
         return stripped.to_owned();
     }
-    // Truncated: drop any pre-release suffix too
-    let _ = suffix;
-    parts[..segments].join(".")
+
+    // Truncating: build the result directly from the numeric head without
+    // a `Vec<&str>` middleman. Any pre-release suffix is dropped by
+    // construction because we only consume `numeric`.
+    let mut out = String::with_capacity(numeric.len());
+    for (i, part) in numeric.split('.').take(segments).enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        out.push_str(part);
+    }
+    out
 }
 
 #[cfg(test)]
