@@ -6,12 +6,16 @@ use dependency_check_updates_core::{
 };
 
 /// Filter dependencies by include/exclude patterns.
+///
+/// Consumes `deps` so kept specs move into the returned vec — no `String`
+/// clones on the default code path where neither filter is active and every
+/// dependency survives.
 pub(crate) fn filter_deps(
-    deps: &[DependencySpec],
+    deps: Vec<DependencySpec>,
     include: &[String],
     exclude: &[String],
 ) -> Vec<DependencySpec> {
-    deps.iter()
+    deps.into_iter()
         .filter(|dep| {
             if !include.is_empty() && !include.iter().any(|f| dep.name.contains(f.as_str())) {
                 return false;
@@ -21,7 +25,6 @@ pub(crate) fn filter_deps(
             }
             true
         })
-        .cloned()
         .collect()
 }
 
@@ -553,7 +556,7 @@ mod tests {
         let deps: Vec<DependencySpec> = names.iter().map(|n| dep(n, "^1.0.0")).collect();
         let include: Vec<String> = include.iter().map(|s| (*s).to_owned()).collect();
         let exclude: Vec<String> = exclude.iter().map(|s| (*s).to_owned()).collect();
-        let result = filter_deps(&deps, &include, &exclude);
+        let result = filter_deps(deps, &include, &exclude);
         let got: Vec<&str> = result.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(got, expected);
     }

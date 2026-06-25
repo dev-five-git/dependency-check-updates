@@ -130,18 +130,16 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
         };
 
         let parsed = handler.parse(&text, &manifest_ref.path)?;
-        debug!(
-            total_deps = parsed.dependencies.len(),
-            "parsed dependencies"
-        );
+        let total_deps = parsed.dependencies.len();
+        debug!(total_deps, "parsed dependencies");
         for dep in &parsed.dependencies {
             trace!(name = %dep.name, version = %dep.current_req, section = %dep.section, "found dependency");
         }
 
-        let deps = filter_deps(&parsed.dependencies, &cli.filter, &cli.reject);
-        if deps.len() != parsed.dependencies.len() {
+        let deps = filter_deps(parsed.dependencies, &cli.filter, &cli.reject);
+        if deps.len() != total_deps {
             debug!(
-                before = parsed.dependencies.len(),
+                before = total_deps,
                 after = deps.len(),
                 "filtered dependencies"
             );
