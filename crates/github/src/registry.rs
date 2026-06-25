@@ -56,18 +56,35 @@ struct PreparedTags {
 
 impl PreparedTags {
     fn new(tags: Vec<Tag>) -> Self {
-        let mut sorted_versions: Vec<node_semver::Version> =
-            tags.iter().filter_map(|t| normalize_tag(&t.name)).collect();
+        // Single pass over the tag list: build `sorted_versions` and
+        // `tag_numerics` together instead of walking `tags` twice.
+        // normalize_tag and tag_numeric_str both pivot on `is_version_ref`, so
+        // the two-pass form paid that cost twice per tag — once is enough.
+        // Capture the length before consuming `tags` in the loop below so we
+        // can pre-size both output collections and avoid grow-path reallocs.
+        let capacity = tags.len();
+        let mut sorted_versions: Vec<node_semver::Version> = Vec::with_capacity(capacity);
+        let mut tag_numerics: HashSet<String> = HashSet::with_capacity(capacity);
+        for tag in tags {
+            let Some(version) = normalize_tag(&tag.name) else {
+                // is_version_ref(&tag.name) was false, so tag_numeric_str would
+                // also yield None. Drop both for this tag.
+                continue;
+            };
+            sorted_versions.push(version);
+            // normalize_tag succeeded, so is_version_ref(&tag.name) is true,
+            // which guarantees tag_numeric_str returns Some — but pattern-match
+            // anyway to avoid an unwrap on a tested invariant.
+            if let Some(numeric) = tag_numeric_str(&tag.name) {
+                tag_numerics.insert(numeric.to_owned());
+            }
+        }
         sorted_versions.sort();
         let highest_stable = sorted_versions
             .iter()
             .rev()
             .find(|v| v.pre_release.is_empty())
             .map(node_semver::Version::to_string);
-        let tag_numerics: HashSet<String> = tags
-            .into_iter()
-            .filter_map(|t| tag_numeric_str(&t.name).map(str::to_owned))
-            .collect();
         Self {
             sorted_versions,
             highest_stable,
