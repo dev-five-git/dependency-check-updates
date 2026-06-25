@@ -31,7 +31,6 @@ impl ManifestHandler for PythonHandler {
                 path: path.to_path_buf(),
                 kind: ManifestKind::PyProjectToml,
             },
-            original_text: manifest.original_text,
             dependencies: manifest.dependencies,
         })
     }

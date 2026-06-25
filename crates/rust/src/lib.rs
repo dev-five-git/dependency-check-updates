@@ -33,7 +33,6 @@ impl ManifestHandler for RustHandler {
                 path: path.to_path_buf(),
                 kind: ManifestKind::CargoToml,
             },
-            original_text: manifest.original_text,
             dependencies: manifest.dependencies,
         })
     }

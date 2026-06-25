@@ -15,8 +15,6 @@ const CARGO_SECTIONS: &[(DependencySection, &str)] = &[
 /// A parsed Cargo.toml file.
 #[derive(Debug)]
 pub struct CargoTomlManifest {
-    /// The original raw text.
-    pub original_text: String,
     /// The `toml_edit` document (format-preserving).
     pub doc: DocumentMut,
     /// Collected dependencies.
@@ -53,11 +51,7 @@ impl CargoTomlManifest {
 
         let dependencies = Self::collect_dependencies(&doc, manifest_dir);
 
-        Ok(Self {
-            original_text: text.to_owned(),
-            doc,
-            dependencies,
-        })
+        Ok(Self { doc, dependencies })
     }
 
     fn collect_dependencies(doc: &DocumentMut, manifest_dir: Option<&Path>) -> Vec<DependencySpec> {

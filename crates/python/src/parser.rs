@@ -11,8 +11,6 @@ use toml_edit::{DocumentMut, Item};
 /// A parsed pyproject.toml file.
 #[derive(Debug)]
 pub struct PyProjectManifest {
-    /// The original raw text.
-    pub original_text: String,
     /// The `toml_edit` document (format-preserving).
     pub doc: DocumentMut,
     /// Collected dependencies.
@@ -32,11 +30,7 @@ impl PyProjectManifest {
 
         let dependencies = Self::collect_dependencies(&doc);
 
-        Ok(Self {
-            original_text: text.to_owned(),
-            doc,
-            dependencies,
-        })
+        Ok(Self { doc, dependencies })
     }
 
     fn collect_dependencies(doc: &DocumentMut) -> Vec<DependencySpec> {

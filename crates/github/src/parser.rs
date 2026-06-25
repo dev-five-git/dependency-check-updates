@@ -30,8 +30,6 @@ pub struct UsesLocation {
 /// Parsed workflow manifest.
 #[derive(Debug)]
 pub struct WorkflowManifest {
-    /// The original raw text (preserved for surgical patching).
-    pub original_text: String,
     /// Version-like `uses:` refs collected as dependency specs.
     pub dependencies: Vec<DependencySpec>,
 }
@@ -53,10 +51,7 @@ impl WorkflowManifest {
             })
             .collect();
 
-        Self {
-            original_text: text.to_owned(),
-            dependencies,
-        }
+        Self { dependencies }
     }
 }
 

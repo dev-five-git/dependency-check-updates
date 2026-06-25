@@ -17,8 +17,6 @@ pub const DEPENDENCY_SECTIONS: &[(DependencySection, &str)] = &[
 /// A parsed package.json file.
 #[derive(Debug)]
 pub struct PackageJsonManifest {
-    /// The original raw text (preserved for surgical patching).
-    pub original_text: String,
     /// All collected dependency specs.
     pub dependencies: Vec<DependencySpec>,
 }
@@ -35,10 +33,7 @@ impl PackageJsonManifest {
 
         let dependencies = Self::collect_dependencies(&parsed);
 
-        Ok(Self {
-            original_text: text.to_owned(),
-            dependencies,
-        })
+        Ok(Self { dependencies })
     }
 
     fn collect_dependencies(root: &Value) -> Vec<DependencySpec> {
@@ -284,13 +279,6 @@ mod tests {
         let manifest = PackageJsonManifest::parse(json).unwrap();
         assert_eq!(manifest.dependencies.len(), 1);
         assert_eq!(manifest.dependencies[0].name, survivor);
-    }
-
-    #[test]
-    fn test_original_text_preserved() {
-        let json = "{\n  \"name\": \"test\",\n  \"version\": \"1.0.0\"\n}\n";
-        let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.original_text, json);
     }
 
     #[test]

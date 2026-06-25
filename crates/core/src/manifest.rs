@@ -43,8 +43,6 @@ pub trait ManifestHandler {
 pub struct ParsedManifest {
     /// Reference to the manifest file.
     pub manifest_ref: ManifestRef,
-    /// The original raw text (preserved for patching).
-    pub original_text: String,
     /// Collected dependencies.
     pub dependencies: Vec<DependencySpec>,
 }

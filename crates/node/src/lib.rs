@@ -33,7 +33,6 @@ impl ManifestHandler for NodeHandler {
                 path: path.to_path_buf(),
                 kind: ManifestKind::PackageJson,
             },
-            original_text: manifest.original_text,
             dependencies: manifest.dependencies,
         })
     }

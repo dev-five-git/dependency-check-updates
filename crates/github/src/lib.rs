@@ -37,7 +37,6 @@ impl ManifestHandler for GitHubHandler {
                 path: path.to_path_buf(),
                 kind: ManifestKind::GitHubWorkflow,
             },
-            original_text: manifest.original_text,
             dependencies: manifest.dependencies,
         })
     }
