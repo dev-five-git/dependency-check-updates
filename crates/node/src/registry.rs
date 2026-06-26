@@ -218,7 +218,15 @@ impl NpmRegistry {
                 newest_by_date(&info, &all_versions)
                     .or_else(|| all_versions.last().map(ToString::to_string))
             } else {
-                select_version(&dep.current_req, latest.as_ref(), &all_versions, target)
+                // Shared strip→parse→select sequence centralised in `core`;
+                // npm's `latest` (dist-tags) doubles as the fallback for the
+                // stable-`Latest` and unparseable-`Minor`/`Patch` cases.
+                dependency_check_updates_core::parse_and_select(
+                    &dep.current_req,
+                    &all_versions,
+                    target,
+                    latest.as_deref(),
+                )
             }
         };
 
@@ -301,31 +309,12 @@ fn extract_sorted_versions(info: &NpmPackageInfo) -> Vec<node_semver::Version> {
     parsed
 }
 
-/// Select the appropriate version based on target level.
-///
-/// Thin wrapper over [`dependency_check_updates_core::select_version`]: parses
-/// the current requirement and supplies npm's fallbacks (the dist-tags latest
-/// for both the stable-`Latest` and unparseable-`Minor`/`Patch` cases).
-fn select_version(
-    current_req_str: &str,
-    latest: Option<&String>,
-    all_versions: &[node_semver::Version],
-    target: TargetLevel,
-) -> Option<String> {
-    let current = parse_base_version(current_req_str);
-    dependency_check_updates_core::select_version(
-        current.as_ref(),
-        all_versions,
-        target,
-        latest.map(String::as_str),
-        latest.map(String::as_str),
-    )
-}
-
 /// Parse a base version from a requirement string.
 ///
 /// Strips leading range operators: `^1.2.3` -> `1.2.3`, `~2.0.0` -> `2.0.0`,
-/// `>=1.0.0` -> `1.0.0`.
+/// `>=1.0.0` -> `1.0.0`. Used by [`NpmRegistry::resolve_version`]'s
+/// prerelease-detection fast path; the strip→parse→select sequence for the
+/// slow path now lives in [`dependency_check_updates_core::parse_and_select`].
 fn parse_base_version(req_str: &str) -> Option<node_semver::Version> {
     node_semver::Version::parse(strip_range_prefix(req_str)).ok()
 }
@@ -464,9 +453,15 @@ mod tests {
         #[case] target: TargetLevel,
         #[case] expected: Option<&str>,
     ) {
-        let latest = latest_str.to_owned();
         let versions = make_versions(versions);
-        let got = select_version(current_req, Some(&latest), &versions, target);
+        // Drives the same algorithm the registry now calls directly: the
+        // ecosystem-agnostic helper in `core` that fuses strip→parse→select.
+        let got = dependency_check_updates_core::parse_and_select::<node_semver::Version>(
+            current_req,
+            &versions,
+            target,
+            Some(latest_str),
+        );
         assert_eq!(got, expected.map(ToOwned::to_owned));
     }
 
@@ -475,13 +470,12 @@ mod tests {
         // Current: 4.0.0-beta.1. Unrelated 5.0.0-alpha.1 must NOT be selected.
         // Kept separate because its assertion is `assert_ne!`, not `assert_eq!`,
         // and rstest parametrization would obscure that distinction.
-        let latest = "3.5.0".to_owned();
         let versions = make_versions(&["3.5.0", "4.0.0-beta.1", "5.0.0-alpha.1"]);
-        let result = select_version(
+        let result = dependency_check_updates_core::parse_and_select::<node_semver::Version>(
             "4.0.0-beta.1",
-            Some(&latest),
             &versions,
             TargetLevel::Latest,
+            Some("3.5.0"),
         );
         assert_ne!(result, Some("5.0.0-alpha.1".to_owned()));
     }

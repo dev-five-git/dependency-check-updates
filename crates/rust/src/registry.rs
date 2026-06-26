@@ -9,7 +9,7 @@ use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, strip_range_prefix,
+    build_client,
 };
 
 /// crates.io registry client.
@@ -151,7 +151,15 @@ impl CratesIoRegistry {
             // version, so resolve it from dates rather than semver ordering.
             newest_by_date(&crate_versions).or_else(|| versions.last().map(ToString::to_string))
         } else {
-            select_version(&dep.current_req, latest.as_ref(), &versions, target)
+            // Shared strip→parse→select sequence centralised in `core`;
+            // crates.io's `latest` (highest stable) doubles as the fallback for
+            // the stable-`Latest` and unparseable-`Minor`/`Patch` cases.
+            dependency_check_updates_core::parse_and_select(
+                &dep.current_req,
+                &versions,
+                target,
+                latest.as_deref(),
+            )
         };
 
         // NOTE: we do NOT filter out versions that satisfy the current requirement.
@@ -213,32 +221,6 @@ fn newest_by_date(crate_versions: &[CrateVersion]) -> Option<String> {
         .map(|(_, parsed)| parsed.to_string())
 }
 
-/// Select the appropriate version based on target level.
-///
-/// Thin wrapper over [`dependency_check_updates_core::select_version`]. The
-/// crates.io `latest` is already the highest stable version, which doubles as
-/// the fallback for both the stable-`Latest` and unparseable-`Minor`/`Patch`
-/// cases.
-fn select_version(
-    current_req_str: &str,
-    latest: Option<&String>,
-    all_versions: &[semver::Version],
-    target: TargetLevel,
-) -> Option<String> {
-    let current = parse_base_version(current_req_str);
-    dependency_check_updates_core::select_version(
-        current.as_ref(),
-        all_versions,
-        target,
-        latest.map(String::as_str),
-        latest.map(String::as_str),
-    )
-}
-
-fn parse_base_version(req_str: &str) -> Option<semver::Version> {
-    semver::Version::parse(strip_range_prefix(req_str)).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,15 +270,7 @@ mod tests {
             .await;
     }
 
-    #[rstest]
-    #[case::caret("^1.2.3", (1, 2, 3))]
-    #[case::tilde("~1.2.3", (1, 2, 3))]
-    fn parse_base_version_cases(#[case] req: &str, #[case] expected: (u64, u64, u64)) {
-        let v = parse_base_version(req).unwrap();
-        assert_eq!((v.major, v.minor, v.patch), expected);
-    }
-
-    /// Pure-function `select_version` cases. `expected_eq` and `expected_ne`
+    /// Pure-function `parse_and_select` cases. `expected_eq` and `expected_ne`
     /// are independent: when `Some`, the assertion runs; when `None`, it is
     /// skipped. This faithfully preserves the original mix of `assert_eq!` /
     /// `assert_ne!` / both per test, with no added or dropped assertions.
@@ -330,9 +304,15 @@ mod tests {
         #[case] expected_eq: Option<&str>,
         #[case] expected_ne: Option<&str>,
     ) {
-        let latest_owned = latest.to_owned();
         let versions = make_versions(versions);
-        let result = select_version(req, Some(&latest_owned), &versions, target);
+        // Drives the same algorithm the registry now calls directly: the
+        // ecosystem-agnostic helper in `core` that fuses strip→parse→select.
+        let result = dependency_check_updates_core::parse_and_select::<semver::Version>(
+            req,
+            &versions,
+            target,
+            Some(latest),
+        );
         if let Some(eq) = expected_eq {
             assert_eq!(result.as_deref(), Some(eq), "expected_eq mismatch");
         }

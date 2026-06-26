@@ -6,7 +6,10 @@
 //! once behind the [`SelectableVersion`] trait so the three registry clients
 //! no longer carry near-identical copies of it.
 
+use std::str::FromStr;
+
 use crate::types::TargetLevel;
+use crate::util::strip_range_prefix;
 
 /// A version type the [`select_version`] algorithm can operate on.
 ///
@@ -144,6 +147,35 @@ pub fn select_version<V: SelectableVersion>(
                 .map(ToString::to_string),
         },
     }
+}
+
+/// Strip the range prefix from `current_req_str`, parse the remainder as `V`,
+/// and run [`select_version`] with the parsed current and `latest` filling
+/// BOTH the `latest_for_stable` and `unparseable_minor_patch` fallback slots.
+///
+/// The three per-language registries (`npm`, `crates.io`, `PyPI`) share this
+/// exact strip→parse→select sequence and the same identical-fallback policy
+/// (each ecosystem's `latest` field doubles as both fallbacks). Centralising
+/// it here matches the existing centralisation of [`select_version`] itself
+/// and removes a parallel block of code that had been reimplemented in each
+/// registry crate.
+///
+/// `latest` is `Option<&str>` (not `Option<&String>`) so callers can pass
+/// either an owned `Option<String>` (`x.as_deref()`) or a borrow without
+/// further allocation. Returns `None` when no candidate matches.
+#[must_use]
+pub fn parse_and_select<V>(
+    current_req_str: &str,
+    all_versions: &[V],
+    target: TargetLevel,
+    latest: Option<&str>,
+) -> Option<String>
+where
+    V: SelectableVersion + FromStr,
+{
+    let stripped = strip_range_prefix(current_req_str);
+    let current = V::from_str(stripped).ok();
+    select_version(current.as_ref(), all_versions, target, latest, latest)
 }
 
 #[cfg(test)]

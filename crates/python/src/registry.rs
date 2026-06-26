@@ -10,7 +10,7 @@ use tracing::debug;
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, select_version, strip_range_prefix,
+    build_client, parse_and_select,
 };
 
 /// `PyPI` registry client.
@@ -167,16 +167,13 @@ impl PyPiRegistry {
             // Consume `candidates` to move each parsed `Version` into the
             // selection list instead of cloning every element; the borrowed
             // upload `&str` halves are dropped with the tuples.
+            //
+            // Shared strip→parse→select sequence centralised in `core`; PyPI's
+            // `info.version` (canonical latest stable) doubles as the fallback
+            // for the stable-`Latest` and unparseable-`Minor`/`Patch` cases.
             let versions: Vec<pep440_rs::Version> =
                 candidates.into_iter().map(|(v, _)| v).collect();
-            let current = pep440_rs::Version::from_str(strip_range_prefix(&dep.current_req)).ok();
-            select_version(
-                current.as_ref(),
-                &versions,
-                target,
-                latest.as_deref(),
-                latest.as_deref(),
-            )
+            parse_and_select(&dep.current_req, &versions, target, latest.as_deref())
         };
 
         debug!(

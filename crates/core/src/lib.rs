@@ -27,4 +27,4 @@ pub use types::{
     ResolvedVersion, TargetLevel,
 };
 pub use util::{pad_to_three_segments, strip_range_prefix};
-pub use version::{SelectableVersion, select_version};
+pub use version::{SelectableVersion, parse_and_select, select_version};
