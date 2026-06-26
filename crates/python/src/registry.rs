@@ -6,11 +6,11 @@ use std::sync::Arc;
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, parse_and_select,
+    build_client, parse_and_select, strip_range_prefix,
 };
 
 /// `PyPI` registry client.
@@ -129,51 +129,80 @@ impl PyPiRegistry {
         // the fallback for `Latest`/empty-list and unparseable `Minor`/`Patch`.
         let latest = Some(info.info.version.clone());
 
-        // (parsed PEP 440 version, max upload timestamp) for every release that
-        // has at least one non-yanked file and parses cleanly. The upload
-        // timestamp is borrowed straight out of `info.releases`; the borrow is
-        // dropped together with `candidates` and never escapes this function,
-        // so we avoid the per-file `String` clone the old code did just to feed
-        // `.max()`.
-        let mut candidates: Vec<(pep440_rs::Version, &str)> = info
-            .releases
-            .iter()
-            .filter_map(|(ver_str, files)| {
-                if files.is_empty() || files.iter().all(|f| f.yanked) {
-                    return None;
-                }
-                let parsed = pep440_rs::Version::from_str(ver_str).ok()?;
-                let upload = files
-                    .iter()
-                    .map(|f| f.upload_time_iso_8601.as_str())
-                    .max()
-                    .unwrap_or("");
-                Some((parsed, upload))
-            })
-            .collect();
-        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+        // Detect if the user's current requirement is a prerelease. When it
+        // is, we cannot use the `info.version` fast path because the user may
+        // be ahead of the canonical stable version (e.g. `2.0.0rc1` while
+        // `info.version` points at `1.1.20`), and we must consider the full
+        // release list to preserve the prerelease-tail policy that
+        // `parse_and_select` encodes. An unparseable requirement (e.g. `"*"`)
+        // is treated as stable, matching the slow path's `current = None`
+        // branch which also routes through `latest_for_stable = info.version`.
+        let current_is_prerelease =
+            pep440_rs::Version::from_str(strip_range_prefix(&dep.current_req))
+                .is_ok_and(|v| v.any_prerelease());
 
-        let selected = if target == TargetLevel::Newest {
-            // Most recently uploaded by date (ISO-8601 sorts chronologically),
-            // which can differ from the highest version number. `max_by`
-            // returns `None` only on an empty iterator, which already means
-            // there are no candidates to fall back to — no extra `or_else`
-            // branch is reachable.
-            candidates
-                .iter()
-                .max_by(|a, b| a.1.cmp(b.1))
-                .map(|(v, _)| v.to_string())
+        // Fast path: Latest + current is stable → return PyPI's canonical
+        // `info.version` directly. The slow path's `parse_and_select` arm for
+        // (`Latest`, stable current) is documented to fall back to
+        // `latest_for_stable` (= `info.version`), so this is byte-equivalent —
+        // it just avoids enumerating + parsing + sorting every release.
+        // Mirrors the `dist-tags.latest` fast path in
+        // `crates/node/src/registry.rs::resolve_version`.
+        let selected = if target == TargetLevel::Latest && !current_is_prerelease {
+            trace!(
+                package = %dep.name,
+                latest = ?latest,
+                "fast path: using PyPI info.version directly"
+            );
+            latest.clone()
         } else {
-            // Consume `candidates` to move each parsed `Version` into the
-            // selection list instead of cloning every element; the borrowed
-            // upload `&str` halves are dropped with the tuples.
-            //
-            // Shared strip→parse→select sequence centralised in `core`; PyPI's
-            // `info.version` (canonical latest stable) doubles as the fallback
-            // for the stable-`Latest` and unparseable-`Minor`/`Patch` cases.
-            let versions: Vec<pep440_rs::Version> =
-                candidates.into_iter().map(|(v, _)| v).collect();
-            parse_and_select(&dep.current_req, &versions, target, latest.as_deref())
+            // (parsed PEP 440 version, max upload timestamp) for every release
+            // that has at least one non-yanked file and parses cleanly. The
+            // upload timestamp is borrowed straight out of `info.releases`;
+            // the borrow is dropped together with `candidates` and never
+            // escapes this function, so we avoid the per-file `String` clone
+            // the old code did just to feed `.max()`.
+            let mut candidates: Vec<(pep440_rs::Version, &str)> = info
+                .releases
+                .iter()
+                .filter_map(|(ver_str, files)| {
+                    if files.is_empty() || files.iter().all(|f| f.yanked) {
+                        return None;
+                    }
+                    let parsed = pep440_rs::Version::from_str(ver_str).ok()?;
+                    let upload = files
+                        .iter()
+                        .map(|f| f.upload_time_iso_8601.as_str())
+                        .max()
+                        .unwrap_or("");
+                    Some((parsed, upload))
+                })
+                .collect();
+            candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+            if target == TargetLevel::Newest {
+                // Most recently uploaded by date (ISO-8601 sorts
+                // chronologically), which can differ from the highest version
+                // number. `max_by` returns `None` only on an empty iterator,
+                // which already means there are no candidates to fall back to
+                // — no extra `or_else` branch is reachable.
+                candidates
+                    .iter()
+                    .max_by(|a, b| a.1.cmp(b.1))
+                    .map(|(v, _)| v.to_string())
+            } else {
+                // Consume `candidates` to move each parsed `Version` into the
+                // selection list instead of cloning every element; the
+                // borrowed upload `&str` halves are dropped with the tuples.
+                //
+                // Shared strip→parse→select sequence centralised in `core`;
+                // PyPI's `info.version` (canonical latest stable) doubles as
+                // the fallback for the stable-`Latest` and unparseable-
+                // `Minor`/`Patch` cases.
+                let versions: Vec<pep440_rs::Version> =
+                    candidates.into_iter().map(|(v, _)| v).collect();
+                parse_and_select(&dep.current_req, &versions, target, latest.as_deref())
+            }
         };
 
         debug!(
@@ -486,5 +515,35 @@ mod tests {
             Some("1.5.0"),
             "all-yanked 1.9.0 must be excluded; Greatest should fall back to 1.5.0"
         );
+    }
+
+    /// `Latest` + stable current must short-circuit on `info.version` without
+    /// consulting `releases`. The mock body deliberately omits the `releases`
+    /// map; the fast path returns `info.version` regardless. Without the fast
+    /// path the empty-releases slow path would still fall back to
+    /// `info.version` via `parse_and_select`'s `latest_for_stable` slot, so
+    /// the assertion holds in both worlds — but the absence of a populated
+    /// `releases` block keeps this test pinned to the public behavior the
+    /// fast path is required to preserve.
+    #[rstest]
+    #[tokio::test]
+    async fn resolve_version_latest_fast_path_uses_info_version(#[future] mock_server: MockServer) {
+        let server = mock_server.await;
+        Mock::given(method("GET"))
+            .and(path("/requests/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": "2.31.0"}
+            })))
+            .mount(&server)
+            .await;
+
+        let registry = PyPiRegistry::with_base_url(&server.uri());
+        let dep = make_dep("requests", ">=2.28.0");
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .expect("resolve_version should succeed");
+        assert_eq!(result.latest.as_deref(), Some("2.31.0"));
+        assert_eq!(result.selected.as_deref(), Some("2.31.0"));
     }
 }
