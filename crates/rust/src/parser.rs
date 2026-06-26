@@ -160,24 +160,44 @@ impl CargoTomlManifest {
 
         match item {
             Item::Value(Value::String(s)) => {
-                let decor = s.decor().clone();
-                let mut new_s = toml_edit::Formatted::new(new_version.to_owned());
-                *new_s.decor_mut() = decor;
-                *s = new_s;
+                replace_version_string_preserving_decor(s, new_version.to_owned());
             }
             Item::Value(Value::InlineTable(t)) => {
                 if let Some(v) = t.get_mut("version") {
-                    *v = Value::String(toml_edit::Formatted::new(new_version.to_owned()));
+                    if let Value::String(s) = v {
+                        replace_version_string_preserving_decor(s, new_version.to_owned());
+                    } else {
+                        *v = Value::String(toml_edit::Formatted::new(new_version.to_owned()));
+                    }
                 }
             }
             Item::Table(t) => {
-                t["version"] = toml_edit::value(new_version);
+                if let Some(v) = t.get_mut("version") {
+                    if let Item::Value(Value::String(s)) = v {
+                        replace_version_string_preserving_decor(s, new_version.to_owned());
+                    } else {
+                        *v = toml_edit::value(new_version);
+                    }
+                } else {
+                    t["version"] = toml_edit::value(new_version);
+                }
             }
             _ => {}
         }
 
         Ok(())
     }
+}
+
+/// Rewrite a `Formatted<String>` value to `new` while preserving the existing
+/// leading/trailing decor (whitespace, comments). Mirrors the equivalent
+/// helper used by the Python patcher's `apply_to_poetry_table` so the two
+/// ecosystems share the same format-preservation guarantees.
+fn replace_version_string_preserving_decor(s: &mut toml_edit::Formatted<String>, new: String) {
+    let decor = s.decor().clone();
+    let mut next = toml_edit::Formatted::new(new);
+    *next.decor_mut() = decor;
+    *s = next;
 }
 
 /// How a single dependency entry should be resolved.
@@ -877,5 +897,43 @@ serde = "1.0"
             out.contains("version = \"0.3.0\""),
             "version not synced:\n{out}"
         );
+    }
+
+    /// Inline-table form: the `version` value's surrounding decor (the space
+    /// after `=`) must survive an update, so the inline table stays
+    /// byte-for-byte identical except for the bumped version. Without decor
+    /// preservation the value collapses to `version ="1.0.228"`.
+    #[test]
+    fn apply_updates_inline_table_preserves_decor_byte_for_byte() {
+        let toml = "[dependencies]\nserde = { version = \"1.0\", features = [\"derive\"] }\n";
+        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "serde".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "1.0".to_owned(),
+            to: "1.0.228".to_owned(),
+        }];
+        let out = manifest.apply_updates(&updates).unwrap();
+        let expected =
+            "[dependencies]\nserde = { version = \"1.0.228\", features = [\"derive\"] }\n";
+        assert_eq!(out, expected);
+    }
+
+    /// Full-table form: `[dependencies.serde]\nversion = "1.0"\n…` must update
+    /// the value while preserving leading/trailing decor on the `version`
+    /// line, so the file stays byte-identical except for the bumped value.
+    #[test]
+    fn apply_updates_full_table_preserves_decor_byte_for_byte() {
+        let toml = "[dependencies.serde]\nversion = \"1.0\"\nfeatures = [\"derive\"]\n";
+        let mut manifest = CargoTomlManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "serde".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "1.0".to_owned(),
+            to: "1.0.228".to_owned(),
+        }];
+        let out = manifest.apply_updates(&updates).unwrap();
+        let expected = "[dependencies.serde]\nversion = \"1.0.228\"\nfeatures = [\"derive\"]\n";
+        assert_eq!(out, expected);
     }
 }
