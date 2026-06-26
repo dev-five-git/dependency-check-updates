@@ -12,10 +12,11 @@ mod registry;
 use std::path::Path;
 
 use dependency_check_updates_core::manifest::{ManifestHandler, ParsedManifest};
+use dependency_check_updates_core::patch::Patch;
 use dependency_check_updates_core::{DcuError, ManifestKind, ManifestRef, PlannedUpdate};
 
 use parser::PackageJsonManifest;
-use patcher::{JsonPatcher, Patch};
+use patcher::JsonPatcher;
 pub use registry::NpmRegistry;
 
 /// Node.js manifest handler for `package.json` files.

@@ -9,6 +9,7 @@
 pub mod error;
 pub mod http;
 pub mod manifest;
+pub mod patch;
 pub mod types;
 pub mod util;
 pub mod version;
@@ -20,6 +21,7 @@ pub use http::{
     resolve_batch_concurrent,
 };
 pub use manifest::{ManifestHandler, ParsedManifest, Scanner};
+pub use patch::{Patch, PatchError as BytePatchError, apply_byte_patches};
 pub use types::{
     BumpType, DependencySection, DependencySpec, ManifestKind, ManifestRef, PlannedUpdate,
     ResolvedVersion, TargetLevel,

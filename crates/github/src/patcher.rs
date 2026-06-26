@@ -4,28 +4,16 @@
 //! correspond to a version ref. Comments, indentation, anchors, blank lines,
 //! and any unrelated `uses:` directives (e.g. ones pinned to `@main` or a
 //! commit SHA) survive untouched.
+//!
+//! The actual descending-`replace_range` engine lives in
+//! [`dependency_check_updates_core::patch`]; this module only handles the
+//! workflow-specific scan-and-match step that turns a list of
+//! [`PlannedUpdate`]s into byte-range [`Patch`]es.
 
 use dependency_check_updates_core::PlannedUpdate;
+use dependency_check_updates_core::patch::{Patch, PatchError, apply_byte_patches};
 
 use crate::parser::scan;
-
-/// Errors returned by the patcher.
-#[derive(Debug, thiserror::Error)]
-pub enum PatchError {
-    /// Two updates resolved to overlapping byte ranges. Should not happen in
-    /// practice — each `uses:` ref occupies a distinct byte range — but the
-    /// check is cheap and prevents silent corruption.
-    #[error("overlapping patches detected")]
-    OverlappingPatches,
-}
-
-/// A patch: replace bytes `[start..end)` with `new_value`.
-#[derive(Debug, Clone)]
-pub struct Patch {
-    pub start: usize,
-    pub end: usize,
-    pub new_value: String,
-}
 
 /// Format-preserving workflow patcher.
 pub struct WorkflowPatcher;
@@ -72,35 +60,8 @@ impl WorkflowPatcher {
             });
         }
 
-        apply_patches(text, &patches)
+        apply_byte_patches(text, &patches)
     }
-}
-
-/// Apply raw byte-range patches to `original`.
-///
-/// Patches are applied from highest to lowest byte offset so each replacement
-/// leaves the offsets of later (i.e. earlier-in-the-list) patches intact.
-fn apply_patches(original: &str, patches: &[Patch]) -> Result<String, PatchError> {
-    if patches.is_empty() {
-        return Ok(original.to_owned());
-    }
-
-    let mut sorted: Vec<&Patch> = patches.iter().collect();
-    sorted.sort_by_key(|p| std::cmp::Reverse(p.start));
-
-    for window in sorted.windows(2) {
-        // sorted descending: window[0].start >= window[1].start, so window[1]
-        // (the lower-start patch) must end at-or-before window[0] starts.
-        if window[1].end > window[0].start {
-            return Err(PatchError::OverlappingPatches);
-        }
-    }
-
-    let mut result = original.to_owned();
-    for patch in &sorted {
-        result.replace_range(patch.start..patch.end, &patch.new_value);
-    }
-    Ok(result)
 }
 
 #[cfg(test)]
@@ -215,25 +176,5 @@ mod tests {
     ) {
         let result = WorkflowPatcher::apply(text, &make_updates(updates)).unwrap();
         assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn overlapping_patches_error() {
-        // Sentinel for parser bugs: two patches whose byte ranges overlap
-        // must surface as an error instead of silently corrupting the output.
-        let patches = vec![
-            Patch {
-                start: 0,
-                end: 5,
-                new_value: "a".to_owned(),
-            },
-            Patch {
-                start: 3,
-                end: 10,
-                new_value: "b".to_owned(),
-            },
-        ];
-        let result = apply_patches("abcdefghijk", &patches);
-        assert!(result.is_err());
     }
 }

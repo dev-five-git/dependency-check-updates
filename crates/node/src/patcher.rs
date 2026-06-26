@@ -4,6 +4,7 @@
 //! finds the exact byte positions of dependency version strings in the original
 //! text and replaces only those bytes.
 
+use dependency_check_updates_core::patch::{Patch, apply_byte_patches};
 use dependency_check_updates_core::{DependencySection, PlannedUpdate};
 
 use crate::parser::DEPENDENCY_SECTIONS;
@@ -21,14 +22,6 @@ pub struct VersionLocation {
     pub value_end: usize,
 }
 
-/// A patch to apply: replace bytes `[start..end)` with `new_value`.
-#[derive(Debug, Clone)]
-pub struct Patch {
-    pub start: usize,
-    pub end: usize,
-    pub new_value: String,
-}
-
 /// Errors from the patch engine.
 #[derive(Debug, thiserror::Error)]
 pub enum PatchError {
@@ -42,6 +35,16 @@ pub enum PatchError {
     OverlappingPatches,
     #[error("patched output is not valid JSON: {0}")]
     ValidationFailed(String),
+}
+
+impl From<dependency_check_updates_core::patch::PatchError> for PatchError {
+    fn from(value: dependency_check_updates_core::patch::PatchError) -> Self {
+        match value {
+            dependency_check_updates_core::patch::PatchError::OverlappingPatches => {
+                Self::OverlappingPatches
+            }
+        }
+    }
 }
 
 /// Format-preserving JSON patcher.
@@ -144,33 +147,20 @@ impl JsonPatcher {
 
     /// Apply patches to the original text, replacing version strings.
     ///
-    /// Patches are applied back-to-front (highest offset first) so that earlier
-    /// byte offsets are not invalidated.
+    /// Delegates the byte-range mechanics (sort-descending, overlap check,
+    /// in-place `replace_range`) to the shared
+    /// [`apply_byte_patches`] primitive, then re-validates the resulting text
+    /// as JSON — the JSON-specific check that the YAML patcher does not need.
     ///
     /// # Errors
     ///
-    /// Returns an error if patches overlap or the result is not valid JSON.
+    /// Returns [`PatchError::OverlappingPatches`] (via the `From` impl on the
+    /// core [`PatchError`](dependency_check_updates_core::patch::PatchError))
+    /// if any two patches touch the same byte range, or
+    /// [`PatchError::ValidationFailed`] if the patched output is not valid
+    /// JSON.
     pub fn apply_patches(original: &str, patches: &[Patch]) -> Result<String, PatchError> {
-        if patches.is_empty() {
-            return Ok(original.to_owned());
-        }
-
-        // Sort descending by start position
-        let mut sorted: Vec<&Patch> = patches.iter().collect();
-        sorted.sort_by_key(|p| std::cmp::Reverse(p.start));
-
-        // Check for overlapping patches
-        for window in sorted.windows(2) {
-            // sorted is descending, so window[0].start >= window[1].start
-            if window[1].end > window[0].start {
-                return Err(PatchError::OverlappingPatches);
-            }
-        }
-
-        let mut result = original.to_owned();
-        for patch in &sorted {
-            result.replace_range(patch.start..patch.end, &patch.new_value);
-        }
+        let result = apply_byte_patches(original, patches)?;
 
         // Verify the result is still valid JSON
         serde_json::from_str::<serde_json::Value>(&result)
