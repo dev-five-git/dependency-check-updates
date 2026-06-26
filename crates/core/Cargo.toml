@@ -29,6 +29,11 @@ futures.workspace = true
 [dev-dependencies]
 rstest.workspace = true
 tempfile.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "hot"
+harness = false
 
 [lints]
 workspace = true
