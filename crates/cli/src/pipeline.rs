@@ -252,8 +252,8 @@ fn count_version_segments(bare: &str) -> usize {
 }
 
 /// Whether `version` is a plain numeric version — one or more dot-separated
-/// segments that are *all* ASCII digits, with no pre-release (`-…`) or build
-/// (`+…`) suffix.
+/// segments that are *all* ASCII digits, ignoring any build-metadata tail
+/// (`+…`) but still rejecting pre-release tails (`-…`).
 ///
 /// Such versions are always safe to truncate to fewer segments (`5.1` → `5`,
 /// `4.0.0` → `4.0`): there is no pre-release tag that could be silently
@@ -261,12 +261,19 @@ fn count_version_segments(bare: &str) -> usize {
 /// two-segment stables like `5.1` (e.g. Django) — the previous
 /// exactly-three-segment check rejected them, which made `--target
 /// greatest/newest/minor/patch` silently skip such packages whenever the user
-/// pinned at <3-segment precision. Versions carrying a suffix
-/// (`4.0.0-beta.0`, `1.2.3+build`) return `false` so the caller refuses to
-/// truncate them.
+/// pinned at <3-segment precision.
+///
+/// Build metadata is stripped before the digit check so this predicate stays
+/// in lock-step with [`truncate_version`], which also drops `+…` before
+/// truncating. Without the strip, `0.7.0+build.1` would be rejected here even
+/// though the operation this gate guards is provably safe — `0.7.0+build.1`
+/// → `0.7`. Pre-release (`-…`) tails are still rejected: silently promoting
+/// a prerelease to a stable-looking pin is exactly the surprise this gate
+/// guards against.
 fn is_plain_numeric_version(version: &str) -> bool {
+    let stripped = version.split('+').next().unwrap_or(version);
     let mut any = false;
-    for segment in version.split('.') {
+    for segment in stripped.split('.') {
         if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
             return false;
         }
@@ -376,6 +383,15 @@ mod tests {
         "0.25.11+spec-1.1.0",
         "0.25.11+spec-1.1.0",
         Some("0.25.11")
+    )]
+    // 2-segment pin + selected version with build metadata: the safety gate
+    // now strips `+build.1` before checking, matching `truncate_version`, so
+    // the dep correctly truncates to `0.7` instead of being silently dropped.
+    #[case::truncates_two_segment_with_build_metadata(
+        "0.6",
+        "0.7.0+build.1",
+        "0.7.0+build.1",
+        Some("0.7")
     )]
     #[case::blocks_downgrade_prerelease_to_stable("2.0.0-rc.37", "1.1.20", "1.1.20", None)]
     #[case::blocks_downgrade_same_major("2.5.0", "2.4.0", "2.4.0", None)]
@@ -589,6 +605,11 @@ mod tests {
     #[case::preserves_tilde("~0.2.0", "0.3.0", Some("~0.3.0"))]
     // Pin precision preserved for plain numeric local versions.
     #[case::preserves_two_segment_precision("0.2", "0.3.1", Some("0.3"))]
+    // Same precision-preservation, but the local crate carries build metadata
+    // (`+build`). The safety gate now strips it before the digit check, so
+    // the manifest's 2-segment precision is preserved (`0.3` instead of the
+    // previous fall-through to the full `0.3.0`).
+    #[case::path_dep_two_segment_local_with_build_metadata("0.2", "0.3.0+build", Some("0.3"))]
     #[case::full_version_at_three_segments("0.2.0", "0.3.1", Some("0.3.1"))]
     fn compute_updates_path_dep_cases(
         #[case] current: &str,
@@ -662,10 +683,17 @@ mod tests {
     #[case("4.2", true)]
     #[case("4.0.0", true)]
     #[case("1.2.3.4", true)]
-    // Pre-release / build suffixes are NOT safe to truncate.
+    // Build metadata (`+…`) is stripped before checking — the operation this
+    // gate guards (`truncate_version`) drops it too, so these are safe.
+    #[case("1.2.3+build", true)]
+    #[case("4.0.0+build.7", true)]
+    #[case("5.1+meta-7", true)]
+    // Pre-release (`-…`) is still rejected; a prerelease must never be
+    // silently promoted to a stable-looking pin.
     #[case("4.0.0-beta.0", false)]
-    #[case("1.2.3+build", false)]
     #[case("5.1-rc.1", false)]
+    // Pre-release present even after stripping build metadata: still unsafe.
+    #[case("4.0.0-beta+build", false)]
     // Malformed / empty segments.
     #[case("", false)]
     #[case("5.", false)]
