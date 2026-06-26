@@ -23,6 +23,7 @@ node-semver.workspace = true
 semver.workspace = true
 pep440_rs.workspace = true
 futures.workspace = true
+toml_edit.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

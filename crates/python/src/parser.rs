@@ -237,7 +237,7 @@ fn apply_to_pep508_array(arr: &mut toml_edit::Array, update: &PlannedUpdate) -> 
         // carries empty decor, which would collapse a multi-line array onto a
         // single line.
         if let toml_edit::Value::String(s) = item {
-            replace_string_preserving_decor(s, new_spec);
+            dependency_check_updates_core::replace_string_preserving_decor(s, new_spec);
         }
         return true;
     }
@@ -373,7 +373,10 @@ fn apply_to_poetry_table(table: &mut toml_edit::Table, name: &str, new_version: 
     };
     match item {
         Item::Value(toml_edit::Value::String(s)) => {
-            replace_string_preserving_decor(s, new_version.to_owned());
+            dependency_check_updates_core::replace_string_preserving_decor(
+                s,
+                new_version.to_owned(),
+            );
             true
         }
         Item::Value(toml_edit::Value::InlineTable(t)) => {
@@ -381,7 +384,10 @@ fn apply_to_poetry_table(table: &mut toml_edit::Table, name: &str, new_version: 
                 return false;
             };
             if let toml_edit::Value::String(s) = v {
-                replace_string_preserving_decor(s, new_version.to_owned());
+                dependency_check_updates_core::replace_string_preserving_decor(
+                    s,
+                    new_version.to_owned(),
+                );
             } else {
                 *v = toml_edit::Value::String(toml_edit::Formatted::new(new_version.to_owned()));
             }
@@ -392,7 +398,10 @@ fn apply_to_poetry_table(table: &mut toml_edit::Table, name: &str, new_version: 
                 return false;
             };
             if let Item::Value(toml_edit::Value::String(s)) = v {
-                replace_string_preserving_decor(s, new_version.to_owned());
+                dependency_check_updates_core::replace_string_preserving_decor(
+                    s,
+                    new_version.to_owned(),
+                );
             } else {
                 *v = toml_edit::value(new_version);
             }
@@ -400,17 +409,6 @@ fn apply_to_poetry_table(table: &mut toml_edit::Table, name: &str, new_version: 
         }
         _ => false,
     }
-}
-
-/// Rewrite a `Formatted<String>` to `new` while preserving the existing
-/// leading/trailing decor (whitespace, comments). Mirrors
-/// `replace_version_string_preserving_decor` in `crates/rust/src/parser.rs`
-/// so the two TOML-backed parsers share the same format-preservation shape.
-fn replace_string_preserving_decor(s: &mut toml_edit::Formatted<String>, new: String) {
-    let decor = s.decor().clone();
-    let mut next = toml_edit::Formatted::new(new);
-    *next.decor_mut() = decor;
-    *s = next;
 }
 
 /// Errors from pyproject.toml operations.

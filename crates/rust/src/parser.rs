@@ -160,12 +160,18 @@ impl CargoTomlManifest {
 
         match item {
             Item::Value(Value::String(s)) => {
-                replace_version_string_preserving_decor(s, new_version.to_owned());
+                dependency_check_updates_core::replace_string_preserving_decor(
+                    s,
+                    new_version.to_owned(),
+                );
             }
             Item::Value(Value::InlineTable(t)) => {
                 if let Some(v) = t.get_mut("version") {
                     if let Value::String(s) = v {
-                        replace_version_string_preserving_decor(s, new_version.to_owned());
+                        dependency_check_updates_core::replace_string_preserving_decor(
+                            s,
+                            new_version.to_owned(),
+                        );
                     } else {
                         *v = Value::String(toml_edit::Formatted::new(new_version.to_owned()));
                     }
@@ -174,7 +180,10 @@ impl CargoTomlManifest {
             Item::Table(t) => {
                 if let Some(v) = t.get_mut("version") {
                     if let Item::Value(Value::String(s)) = v {
-                        replace_version_string_preserving_decor(s, new_version.to_owned());
+                        dependency_check_updates_core::replace_string_preserving_decor(
+                            s,
+                            new_version.to_owned(),
+                        );
                     } else {
                         *v = toml_edit::value(new_version);
                     }
@@ -187,17 +196,6 @@ impl CargoTomlManifest {
 
         Ok(())
     }
-}
-
-/// Rewrite a `Formatted<String>` value to `new` while preserving the existing
-/// leading/trailing decor (whitespace, comments). Mirrors the equivalent
-/// helper used by the Python patcher's `apply_to_poetry_table` so the two
-/// ecosystems share the same format-preservation guarantees.
-fn replace_version_string_preserving_decor(s: &mut toml_edit::Formatted<String>, new: String) {
-    let decor = s.decor().clone();
-    let mut next = toml_edit::Formatted::new(new);
-    *next.decor_mut() = decor;
-    *s = next;
 }
 
 /// How a single dependency entry should be resolved.
