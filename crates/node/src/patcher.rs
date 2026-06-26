@@ -162,8 +162,12 @@ impl JsonPatcher {
     pub fn apply_patches(original: &str, patches: &[Patch]) -> Result<String, PatchError> {
         let result = apply_byte_patches(original, patches)?;
 
-        // Verify the result is still valid JSON
-        serde_json::from_str::<serde_json::Value>(&result)
+        // Verify the result is still valid JSON. `IgnoredAny` drives the same
+        // `serde_json` parser as `Value` (so it catches the same structural
+        // breakage a misformed patch could introduce) but discards every
+        // token instead of materialising a transient `Value`/`Map`/`Vec`
+        // tree — saving hundreds of allocations on a multi-KB package.json.
+        serde_json::from_str::<serde::de::IgnoredAny>(&result)
             .map_err(|e| PatchError::ValidationFailed(e.to_string()))?;
 
         Ok(result)
