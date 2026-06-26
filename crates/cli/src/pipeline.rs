@@ -200,7 +200,8 @@ fn sync_path_dep(dep: &DependencySpec, local_version: &str) -> Option<PlannedUpd
 
 /// True when `current_bare` represents a compound version range — multiple
 /// clauses joined by `||` (npm OR), `,` (Cargo / `PyPI` AND), or an internal
-/// space (npm AND, e.g. `">=18.0.0 <19.0.0"`).
+/// space (npm AND, e.g. `">=18.0.0 <19.0.0"`, or the npm hyphen-range form
+/// `"1.2.3 - 1.5.0"` meaning `>=1.2.3 <=1.5.0`).
 ///
 /// Single clauses with a leading-operator space like `">= 1.0.0"` are NOT
 /// compound: `strip_range_prefix` already removed the leading non-digit run
@@ -216,16 +217,17 @@ fn is_compound_range(current_bare: &str) -> bool {
         return true;
     }
     // npm AND: a space whose left neighbour is a digit and whose right
-    // neighbour is a clause start (digit or one of `<>=~^!`). Iterating
-    // bytes is safe because every character we test against is ASCII —
-    // a non-ASCII byte cannot equal `b' '` or be a digit / operator anyway.
+    // neighbour is a clause start (digit or one of `<>=~^!`) — or `-`, the
+    // npm hyphen-range continuation (`A.B.C - X.Y.Z`). Iterating bytes is
+    // safe because every character we test against is ASCII — a non-ASCII
+    // byte cannot equal `b' '` or be a digit / operator anyway.
     let bytes = current_bare.as_bytes();
     for i in 1..bytes.len().saturating_sub(1) {
         if bytes[i] == b' '
             && bytes[i - 1].is_ascii_digit()
             && matches!(
                 bytes[i + 1],
-                b'<' | b'>' | b'=' | b'~' | b'^' | b'!' | b'0'..=b'9'
+                b'<' | b'>' | b'=' | b'~' | b'^' | b'!' | b'-' | b'0'..=b'9'
             )
         {
             return true;
@@ -404,6 +406,7 @@ mod tests {
     #[case::npm_space_and_range_skipped(">=18.0.0 <19.0.0", "18.3.1", "18.3.1", None)]
     #[case::cargo_comma_and_range_skipped(">=1.0, <2.0", "1.5.0", "1.5.0", None)]
     #[case::pypi_comma_and_range_skipped(">=2.28.0,<3.0", "2.31.0", "2.31.0", None)]
+    #[case::npm_hyphen_range_preserved("1.2.3 - 1.5.0", "2.0.0", "2.0.0", None)]
     // Single clause with a leading-operator space (`>= 1.0.0`): the space
     // sits before the digit run and `strip_range_prefix` removes it along
     // with `>=`, so the helper sees a clean `"1.0.0"` and the dep still
@@ -700,11 +703,11 @@ mod tests {
     // here as `"1.0.0"` and stays a single clause.
     #[case::leading_space_stripped("1.0.0", false)]
     #[case::empty("", false)]
-    // Hyphen ranges (`1.2.3 - 1.5.0`) are out of scope for this helper:
-    // the right-of-space byte is `-`, which is not a clause-start operator,
-    // so we deliberately do not classify them as compound. They remain a
-    // separate concern.
-    #[case::hyphen_range_not_caught("1.2.3 - 1.5.0", false)]
+    // npm hyphen ranges (`1.2.3 - 1.5.0` meaning `>=1.2.3 <=1.5.0`): the
+    // right-of-space byte is `-`, which is treated as a clause-start
+    // continuation so the dep is left byte-identical instead of being
+    // silently rewritten to a single bare version.
+    #[case::npm_hyphen_range_caught("1.2.3 - 1.5.0", true)]
     fn is_compound_range_cases(#[case] input: &str, #[case] expected: bool) {
         assert_eq!(is_compound_range(input), expected);
     }
