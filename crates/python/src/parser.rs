@@ -143,37 +143,66 @@ impl PyProjectManifest {
     }
 
     fn apply_single_update(&mut self, update: &PlannedUpdate) {
-        // Try PEP 621 project.dependencies
+        // Try PEP 621 project.dependencies (and optional-dependencies)
         if let Some(project) = self.doc.get_mut("project").and_then(Item::as_table_mut) {
             if let Some(dep_array) = project.get_mut("dependencies").and_then(Item::as_array_mut) {
-                for item in dep_array.iter_mut() {
-                    let Some(spec_str) = item.as_str() else {
-                        continue;
-                    };
-                    if !spec_str_matches_name(spec_str, &update.name) {
-                        continue;
-                    }
-                    let new_spec = replace_version_in_pep508(spec_str, &update.to);
-                    // Preserve the element's surrounding decor (leading newline +
-                    // indentation, trailing whitespace/comment) instead of
-                    // replacing the value wholesale — a fresh `Formatted::new`
-                    // carries empty decor, which collapses a multi-line
-                    // `dependencies` array onto a single line. Mirrors the
-                    // decor-preserving Poetry path below.
-                    if let toml_edit::Value::String(s) = item {
-                        let mut new_s = toml_edit::Formatted::new(new_spec);
-                        *new_s.decor_mut() = s.decor().clone();
-                        *s = new_s;
-                    }
+                if apply_to_pep508_array(dep_array, update) {
                     return;
+                }
+            }
+            // PEP 621: [project.optional-dependencies] — one named array per
+            // extra group; the matrix in 0027-analyze.md flagged this as a
+            // silent drop. Each value is a PEP 508 array, identical shape to
+            // the main `dependencies` array above.
+            if let Some(opt) = project
+                .get_mut("optional-dependencies")
+                .and_then(Item::as_table_mut)
+            {
+                for (_group, items) in opt.iter_mut() {
+                    if let Some(arr) = items.as_array_mut() {
+                        if apply_to_pep508_array(arr, update) {
+                            return;
+                        }
+                    }
                 }
             }
         }
 
-        // Try Poetry tool.poetry.dependencies
+        // PEP 735: [dependency-groups] — modern standard for dev dep groups.
+        if let Some(groups) = self
+            .doc
+            .get_mut("dependency-groups")
+            .and_then(Item::as_table_mut)
+        {
+            for (_group, items) in groups.iter_mut() {
+                if let Some(arr) = items.as_array_mut() {
+                    if apply_to_pep508_array(arr, update) {
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Try Poetry tool.poetry.dependencies (and dev-dependencies)
         if let Some(tool) = self.doc.get_mut("tool").and_then(Item::as_table_mut) {
             if let Some(poetry) = tool.get_mut("poetry").and_then(Item::as_table_mut) {
                 if let Some(deps) = poetry.get_mut("dependencies").and_then(Item::as_table_mut) {
+                    if let Some(Item::Value(toml_edit::Value::String(s))) =
+                        deps.get_mut(&update.name)
+                    {
+                        let decor = s.decor().clone();
+                        let mut new_s = toml_edit::Formatted::new(update.to.clone());
+                        *new_s.decor_mut() = decor;
+                        *s = new_s;
+                        return;
+                    }
+                }
+                // Poetry dev-dependencies — same Item::Value(String) shape as
+                // main Poetry dependencies above.
+                if let Some(deps) = poetry
+                    .get_mut("dev-dependencies")
+                    .and_then(Item::as_table_mut)
+                {
                     if let Some(Item::Value(toml_edit::Value::String(s))) =
                         deps.get_mut(&update.name)
                     {
@@ -186,8 +215,41 @@ impl PyProjectManifest {
             }
         }
 
-        // Silently skip if not found (may be in optional-deps or groups)
+        // Silently skip if the dep is truly absent from every supported
+        // section. This now only fires on real no-ops, not on the three
+        // sections this method previously dropped.
     }
+}
+
+/// Walk a PEP 508 array; on the first element whose name matches
+/// `update.name`, rewrite its version constraint via
+/// [`replace_version_in_pep508`], preserving the element's decor exactly.
+///
+/// Returns `true` if a match was found (caller should stop searching).
+///
+/// Faithful extraction of the existing PEP 621 main-array inner loop — same
+/// matching predicate, same decor preservation, no semantic drift.
+fn apply_to_pep508_array(arr: &mut toml_edit::Array, update: &PlannedUpdate) -> bool {
+    for item in arr.iter_mut() {
+        let Some(spec_str) = item.as_str() else {
+            continue;
+        };
+        if !spec_str_matches_name(spec_str, &update.name) {
+            continue;
+        }
+        let new_spec = replace_version_in_pep508(spec_str, &update.to);
+        // Preserve the element's surrounding decor (leading newline +
+        // indentation, trailing whitespace/comment) — a fresh `Formatted::new`
+        // carries empty decor, which would collapse a multi-line array onto a
+        // single line.
+        if let toml_edit::Value::String(s) = item {
+            let mut new_s = toml_edit::Formatted::new(new_spec);
+            *new_s.decor_mut() = s.decor().clone();
+            *s = new_s;
+        }
+        return true;
+    }
+    false
 }
 
 /// Parse a PEP 508 dependency spec like `"requests>=2.28.0"` or `"flask~=2.0"`.
@@ -624,5 +686,82 @@ dependencies = [
         // 4-space indentation of every element are preserved.
         let expected = "[project]\nname = \"demo\"\ndependencies = [\n    \"pytz>=2026.2\",\n    \"requests>=2.30.0\",\n]\n";
         assert_eq!(result, expected);
+    }
+
+    // ---------- 0027: previously-dropped sections now patched ----------
+    //
+    // Before this iteration, `apply_single_update` only patched PEP 621 main
+    // `dependencies` and Poetry main `dependencies`. The four tests below lock
+    // in the fix for the three sections that were silently dropped, plus a
+    // pure no-op guard so the new branches cannot accidentally panic or
+    // mutate when the dep is truly absent.
+
+    #[test]
+    fn apply_updates_patches_pep621_optional_dependencies() {
+        // [project.optional-dependencies] dev = [...] — F1 in 0027-analyze.md.
+        let toml = "[project]\nname = \"demo\"\n\n[project.optional-dependencies]\ndev = [\n    \"pytest>=7.0\",\n    \"black>=23.0\",\n]\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "pytest".to_owned(),
+            section: DependencySection::OptionalDependencies,
+            from: ">=7.0".to_owned(),
+            to: ">=8.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        // Newlines + 4-space indentation of every element preserved exactly.
+        let expected = "[project]\nname = \"demo\"\n\n[project.optional-dependencies]\ndev = [\n    \"pytest>=8.0\",\n    \"black>=23.0\",\n]\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn apply_updates_patches_pep735_dependency_groups() {
+        // PEP 735 [dependency-groups] — the modern standard for dev deps in
+        // PEP 621 projects. F1 in 0027-analyze.md.
+        let toml =
+            "[dependency-groups]\ntest = [\n    \"pytest>=7.0\",\n    \"coverage>=7.0\",\n]\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "coverage".to_owned(),
+            section: DependencySection::DevDependencies,
+            from: ">=7.0".to_owned(),
+            to: ">=7.5".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        let expected =
+            "[dependency-groups]\ntest = [\n    \"pytest>=7.0\",\n    \"coverage>=7.5\",\n]\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn apply_updates_patches_poetry_dev_dependencies() {
+        // [tool.poetry.dev-dependencies] string-form dep. F1 in 0027-analyze.md.
+        let toml = "[tool.poetry.dev-dependencies]\npytest = \"^7.0\"\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "pytest".to_owned(),
+            section: DependencySection::DevDependencies,
+            from: "^7.0".to_owned(),
+            to: "^8.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        let expected = "[tool.poetry.dev-dependencies]\npytest = \"^8.0\"\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn apply_updates_unknown_dep_remains_a_silent_noop() {
+        // Guard the new branches: an update for a name that exists in NO
+        // section must remain a pure silent no-op (no panic, no mutation,
+        // byte-equal output).
+        let toml = "[project]\nname = \"demo\"\ndependencies = [\n    \"requests>=2.28.0\",\n]\n\n[project.optional-dependencies]\ndev = [\"pytest>=7.0\"]\n\n[dependency-groups]\ntest = [\"coverage>=7.0\"]\n\n[tool.poetry.dev-dependencies]\nblack = \"^23.0\"\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "totally-not-here".to_owned(),
+            section: DependencySection::ProjectDependencies,
+            from: ">=1.0".to_owned(),
+            to: ">=2.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        assert_eq!(result, toml);
     }
 }
