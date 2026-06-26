@@ -183,34 +183,25 @@ impl PyProjectManifest {
             }
         }
 
-        // Try Poetry tool.poetry.dependencies (and dev-dependencies)
+        // Try Poetry tool.poetry.dependencies (and dev-dependencies). All
+        // three Poetry value shapes that `extract_poetry_version` recognises
+        // (string, inline-table, full-table) are handled by the shared
+        // `apply_to_poetry_table` helper — the previous string-only path
+        // silently dropped inline/full-table updates that `compute_updates`
+        // had already planned, so `dcu -u` printed the row but left the file
+        // unchanged. See 0036-analyze.md F1.
         if let Some(tool) = self.doc.get_mut("tool").and_then(Item::as_table_mut) {
             if let Some(poetry) = tool.get_mut("poetry").and_then(Item::as_table_mut) {
                 if let Some(deps) = poetry.get_mut("dependencies").and_then(Item::as_table_mut) {
-                    if let Some(Item::Value(toml_edit::Value::String(s))) =
-                        deps.get_mut(&update.name)
-                    {
-                        let decor = s.decor().clone();
-                        let mut new_s = toml_edit::Formatted::new(update.to.clone());
-                        *new_s.decor_mut() = decor;
-                        *s = new_s;
+                    if apply_to_poetry_table(deps, &update.name, &update.to) {
                         return;
                     }
                 }
-                // Poetry dev-dependencies — same Item::Value(String) shape as
-                // main Poetry dependencies above.
                 if let Some(deps) = poetry
                     .get_mut("dev-dependencies")
                     .and_then(Item::as_table_mut)
                 {
-                    if let Some(Item::Value(toml_edit::Value::String(s))) =
-                        deps.get_mut(&update.name)
-                    {
-                        let decor = s.decor().clone();
-                        let mut new_s = toml_edit::Formatted::new(update.to.clone());
-                        *new_s.decor_mut() = decor;
-                        *s = new_s;
-                    }
+                    apply_to_poetry_table(deps, &update.name, &update.to);
                 }
             }
         }
@@ -358,6 +349,64 @@ fn extract_poetry_version(item: &Item) -> Option<String> {
             .map(String::from),
         Item::Table(t) => t.get("version").and_then(Item::as_str).map(String::from),
         _ => None,
+    }
+}
+
+/// Patch a single Poetry dep entry across all three value shapes that
+/// [`extract_poetry_version`] collects from:
+///
+/// 1. `foo = "^2.0"`                          → `Item::Value(String)`
+/// 2. `foo = {version = "^2.0", extras=[…]}`  → `Item::Value(InlineTable)`
+/// 3. `[tool.poetry.dependencies.foo]`/`version = …` → `Item::Table`
+///
+/// Returns `true` when the name was found AND a `version` field existed to
+/// rewrite (caller should stop searching). For shapes 2 and 3 the entry's
+/// sibling keys (`extras`, `optional`, `source`, …) are left untouched, and
+/// the `version` value's surrounding decor (leading whitespace, trailing
+/// comments) is preserved byte-for-byte so format-preservation guarantees
+/// hold. Mirrors the cargo-side [`update_dep_in_table`](../../../rust/src/parser.rs)
+/// triple-shape `match` for behavioural parity.
+fn apply_to_poetry_table(table: &mut toml_edit::Table, name: &str, new_version: &str) -> bool {
+    let Some(item) = table.get_mut(name) else {
+        return false;
+    };
+    match item {
+        Item::Value(toml_edit::Value::String(s)) => {
+            let decor = s.decor().clone();
+            let mut new_s = toml_edit::Formatted::new(new_version.to_owned());
+            *new_s.decor_mut() = decor;
+            *s = new_s;
+            true
+        }
+        Item::Value(toml_edit::Value::InlineTable(t)) => {
+            let Some(v) = t.get_mut("version") else {
+                return false;
+            };
+            if let toml_edit::Value::String(s) = v {
+                let decor = s.decor().clone();
+                let mut new_s = toml_edit::Formatted::new(new_version.to_owned());
+                *new_s.decor_mut() = decor;
+                *s = new_s;
+            } else {
+                *v = toml_edit::Value::String(toml_edit::Formatted::new(new_version.to_owned()));
+            }
+            true
+        }
+        Item::Table(t) => {
+            let Some(v) = t.get_mut("version") else {
+                return false;
+            };
+            if let Item::Value(toml_edit::Value::String(s)) = v {
+                let decor = s.decor().clone();
+                let mut new_s = toml_edit::Formatted::new(new_version.to_owned());
+                *new_s.decor_mut() = decor;
+                *s = new_s;
+            } else {
+                *v = toml_edit::value(new_version);
+            }
+            true
+        }
+        _ => false,
     }
 }
 
@@ -763,5 +812,70 @@ dependencies = [
         }];
         let result = manifest.apply_updates(&updates);
         assert_eq!(result, toml);
+    }
+
+    // ---------- 0036: Poetry inline-table / full-table dep updates ----------
+    //
+    // Before this iteration, `apply_single_update` only patched the
+    // `Item::Value(String)` shape of Poetry deps even though
+    // `extract_poetry_version` (and therefore `compute_updates`) also
+    // recognises inline-table and full-table forms. The three tests below
+    // lock in the fix for those two previously-dropped shapes across both
+    // `[tool.poetry.dependencies]` and `[tool.poetry.dev-dependencies]`,
+    // and prove that sibling keys (`extras`, `optional`) are preserved
+    // byte-for-byte. See 0036-analyze.md F1.
+
+    #[test]
+    fn apply_updates_patches_poetry_inline_table_in_dependencies() {
+        // `flask = {version = "^2.0", extras = ["async"], optional = true}` —
+        // only the `version` value bumps; every sibling key survives intact.
+        let toml = "[tool.poetry.dependencies]\npython = \"^3.8\"\nflask = {version = \"^2.0\", extras = [\"async\"], optional = true}\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "flask".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^2.0".to_owned(),
+            to: "^3.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        let expected = "[tool.poetry.dependencies]\npython = \"^3.8\"\nflask = {version = \"^3.0\", extras = [\"async\"], optional = true}\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn apply_updates_patches_poetry_inline_table_in_dev_dependencies() {
+        // Same inline-table shape but under `[tool.poetry.dev-dependencies]`,
+        // proving the dev-deps Poetry branch now also handles inline tables.
+        let toml =
+            "[tool.poetry.dev-dependencies]\npytest = {version = \"^7.0\", extras = [\"toml\"]}\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "pytest".to_owned(),
+            section: DependencySection::DevDependencies,
+            from: "^7.0".to_owned(),
+            to: "^8.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        let expected =
+            "[tool.poetry.dev-dependencies]\npytest = {version = \"^8.0\", extras = [\"toml\"]}\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn apply_updates_patches_poetry_full_table_form() {
+        // `[tool.poetry.dependencies.sqlalchemy]` with `version` + `extras`
+        // sub-keys — the version bumps, `extras = ["asyncio"]` survives, and
+        // the section header / blank line layout is preserved.
+        let toml = "[tool.poetry.dependencies]\npython = \"^3.8\"\n\n[tool.poetry.dependencies.sqlalchemy]\nversion = \"^2.0\"\nextras = [\"asyncio\"]\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "sqlalchemy".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^2.0".to_owned(),
+            to: "^3.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        let expected = "[tool.poetry.dependencies]\npython = \"^3.8\"\n\n[tool.poetry.dependencies.sqlalchemy]\nversion = \"^3.0\"\nextras = [\"asyncio\"]\n";
+        assert_eq!(result, expected);
     }
 }
