@@ -252,23 +252,33 @@ fn apply_to_pep508_array(arr: &mut toml_edit::Array, update: &PlannedUpdate) -> 
     false
 }
 
+/// Split a PEP 508 dependency spec into `(name, rest)` at the PEP 503 name
+/// boundary. The first character outside `[A-Za-z0-9._-]` ends the name;
+/// `rest` is everything from that offset onwards (extras, version, marker).
+///
+/// Borrow-only; no allocation. Single source of truth for "where does the
+/// package-name head stop and the rest of the PEP 508 spec begin" — every
+/// other helper in this module that needs that split calls this function
+/// instead of open-coding the boundary scan again, so adding any future
+/// PEP 508 / PEP 685 edge case (tightening quoting in environment markers,
+/// accepting unicode-normalised names) only has to land here.
+fn split_pep508_name(spec: &str) -> (&str, &str) {
+    let spec = spec.trim();
+    let name_end = spec
+        .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
+        .unwrap_or(spec.len());
+    spec.split_at(name_end)
+}
+
 /// Parse a PEP 508 dependency spec like `"requests>=2.28.0"` or `"flask~=2.0"`.
 ///
 /// Returns `None` for specs without version constraints (e.g., bare `"requests"`).
 fn parse_pep508_spec(spec: &str, section: DependencySection) -> Option<DependencySpec> {
-    let spec = spec.trim();
-
-    // Find where the version constraint starts (first non-alphanumeric, non-hyphen, non-dot, non-underscore)
-    let name_end = spec
-        .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
-        .unwrap_or(spec.len());
-
-    let name = spec[..name_end].trim();
+    let (name, rest) = split_pep508_name(spec);
     if name.is_empty() {
         return None;
     }
-
-    let rest = spec[name_end..].trim();
+    let rest = rest.trim();
 
     // Remove extras like [security] before version
     let rest = if rest.starts_with('[') {
@@ -298,11 +308,7 @@ fn parse_pep508_spec(spec: &str, section: DependencySection) -> Option<Dependenc
 
 /// Check if a PEP 508 spec string matches a given package name.
 fn spec_str_matches_name(spec: &str, name: &str) -> bool {
-    let spec = spec.trim();
-    let name_end = spec
-        .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
-        .unwrap_or(spec.len());
-    let spec_name = &spec[..name_end];
+    let (spec_name, _) = split_pep508_name(spec);
 
     // PEP 503 normalized comparison (case-insensitive, treat - _ . as equivalent)
     normalize_pep503(spec_name) == normalize_pep503(name)
@@ -314,15 +320,9 @@ fn normalize_pep503(name: &str) -> String {
 
 /// Replace the version constraint in a PEP 508 spec string.
 fn replace_version_in_pep508(spec: &str, new_version: &str) -> String {
-    let spec = spec.trim();
-    let name_end = spec
-        .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
-        .unwrap_or(spec.len());
-
-    let name = &spec[..name_end];
+    let (name, rest) = split_pep508_name(spec);
 
     // Check for extras
-    let rest = &spec[name_end..];
     let (extras, rest) = if rest.starts_with('[') {
         rest.find(']')
             .map_or(("", rest), |i| (&rest[..=i], rest[i + 1..].trim_start()))
