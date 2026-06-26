@@ -39,15 +39,7 @@ impl PyProjectManifest {
         // PEP 621: [project] dependencies = ["requests>=2.0", ...]
         if let Some(project) = doc.get("project").and_then(Item::as_table) {
             if let Some(dep_array) = project.get("dependencies").and_then(Item::as_array) {
-                for item in dep_array {
-                    if let Some(spec_str) = item.as_str() {
-                        if let Some(dep) =
-                            parse_pep508_spec(spec_str, DependencySection::ProjectDependencies)
-                        {
-                            deps.push(dep);
-                        }
-                    }
-                }
+                collect_pep508_array(dep_array, DependencySection::ProjectDependencies, &mut deps);
             }
 
             // [project.optional-dependencies]
@@ -57,16 +49,11 @@ impl PyProjectManifest {
             {
                 for (_group, items) in opt_deps {
                     if let Some(arr) = items.as_array() {
-                        for item in arr {
-                            if let Some(spec_str) = item.as_str() {
-                                if let Some(dep) = parse_pep508_spec(
-                                    spec_str,
-                                    DependencySection::OptionalDependencies,
-                                ) {
-                                    deps.push(dep);
-                                }
-                            }
-                        }
+                        collect_pep508_array(
+                            arr,
+                            DependencySection::OptionalDependencies,
+                            &mut deps,
+                        );
                     }
                 }
             }
@@ -114,15 +101,7 @@ impl PyProjectManifest {
         if let Some(groups) = doc.get("dependency-groups").and_then(Item::as_table) {
             for (_group_name, items) in groups {
                 if let Some(arr) = items.as_array() {
-                    for item in arr {
-                        if let Some(spec_str) = item.as_str() {
-                            if let Some(dep) =
-                                parse_pep508_spec(spec_str, DependencySection::DevDependencies)
-                            {
-                                deps.push(dep);
-                            }
-                        }
-                    }
+                    collect_pep508_array(arr, DependencySection::DevDependencies, &mut deps);
                 }
             }
         }
@@ -209,6 +188,30 @@ impl PyProjectManifest {
         // Silently skip if the dep is truly absent from every supported
         // section. This now only fires on real no-ops, not on the three
         // sections this method previously dropped.
+    }
+}
+
+/// Walk a PEP 508 array, parsing each string element via
+/// [`parse_pep508_spec`] and pushing every successfully-parsed
+/// [`DependencySpec`] into `deps` under the given `section`.
+///
+/// Mirrors the patch-side [`apply_to_pep508_array`] so the parse and patch
+/// sides share the same shape: both walk the array, both skip non-string
+/// elements, both delegate the per-element work to a single helper. The
+/// three PEP 508 array sites in [`PyProjectManifest::collect_dependencies`]
+/// (PEP 621 `[project].dependencies`, PEP 621 `[project.optional-dependencies]`
+/// groups, PEP 735 `[dependency-groups]` groups) all funnel through here.
+fn collect_pep508_array(
+    arr: &toml_edit::Array,
+    section: DependencySection,
+    deps: &mut Vec<DependencySpec>,
+) {
+    for item in arr {
+        if let Some(spec_str) = item.as_str() {
+            if let Some(dep) = parse_pep508_spec(spec_str, section) {
+                deps.push(dep);
+            }
+        }
     }
 }
 
