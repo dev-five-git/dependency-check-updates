@@ -58,27 +58,34 @@ struct PreparedTags {
 impl PreparedTags {
     fn new(tags: Vec<Tag>) -> Self {
         // Single pass over the tag list: build `sorted_versions` and
-        // `tag_numerics` together instead of walking `tags` twice.
-        // normalize_tag and tag_numeric_str both pivot on `is_version_ref`, so
-        // the two-pass form paid that cost twice per tag — once is enough.
+        // `tag_numerics` together AND inline the per-tag upfront work so
+        // `is_version_ref` and `strip_prefix('v')` each run exactly once
+        // per tag. The previous form delegated to `normalize_tag` AND
+        // `tag_numeric_str`, which each repeated `is_version_ref` + the
+        // `v`-strip — paying that cost twice per tag. The two helpers
+        // are kept intact for their other callers (`parse_current_ref`
+        // and `pick_existing_ref` respectively).
         // Capture the length before consuming `tags` in the loop below so we
         // can pre-size both output collections and avoid grow-path reallocs.
         let capacity = tags.len();
         let mut sorted_versions: Vec<node_semver::Version> = Vec::with_capacity(capacity);
         let mut tag_numerics: HashSet<String> = HashSet::with_capacity(capacity);
         for tag in tags {
-            let Some(version) = normalize_tag(&tag.name) else {
-                // is_version_ref(&tag.name) was false, so tag_numeric_str would
-                // also yield None. Drop both for this tag.
+            // Mirror `normalize_tag` + `tag_numeric_str` semantics exactly,
+            // but share the up-front work between them. Skip both pushes when
+            // either `is_version_ref` is false OR `Version::parse` refuses
+            // (e.g. 4+-segment numerics) — same as `normalize_tag = None`.
+            if !is_version_ref(&tag.name) {
+                continue;
+            }
+            let stripped = tag.name.strip_prefix('v').unwrap_or(&tag.name);
+            let numeric_str = split_numeric_head(stripped).0.trim_end_matches('.');
+            let padded = pad_to_three_segments(stripped);
+            let Ok(version) = node_semver::Version::parse(&padded) else {
                 continue;
             };
             sorted_versions.push(version);
-            // normalize_tag succeeded, so is_version_ref(&tag.name) is true,
-            // which guarantees tag_numeric_str returns Some — but pattern-match
-            // anyway to avoid an unwrap on a tested invariant.
-            if let Some(numeric) = tag_numeric_str(&tag.name) {
-                tag_numerics.insert(numeric.to_owned());
-            }
+            tag_numerics.insert(numeric_str.to_owned());
         }
         sorted_versions.sort();
         let highest_stable = sorted_versions
