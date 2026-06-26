@@ -407,7 +407,6 @@ dependencies = [
  "dependency-check-updates-python",
  "dependency-check-updates-rust",
  "futures",
- "miette",
  "owo-colors",
  "rstest",
  "rustls",
@@ -435,7 +434,6 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
 ]
 
@@ -451,7 +449,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "wiremock",

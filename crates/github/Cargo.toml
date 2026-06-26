@@ -22,7 +22,6 @@ reqwest.workspace = true
 serde.workspace = true
 tokio.workspace = true
 node-semver.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 futures.workspace = true
 

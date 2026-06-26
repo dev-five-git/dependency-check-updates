@@ -33,7 +33,6 @@ dependency-check-updates-github.workspace = true
 rustls.workspace = true
 clap.workspace = true
 serde_json.workspace = true
-miette.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
