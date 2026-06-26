@@ -71,6 +71,20 @@ pub(crate) fn compute_updates(
         // Strip range prefix for comparison
         let current_bare = strip_range_prefix(&dep.current_req);
 
+        // Compound ranges (`^17 || ^18`, `>=1.0, <2.0`, `>=18 <19`) carry
+        // multiple clauses; the prefix-reuse rewrite below would keep only
+        // the first clause and silently drop the rest, violating the
+        // manifest's format-preservation contract. Leave them untouched.
+        if is_compound_range(current_bare) {
+            trace!(
+                package = %dep.name,
+                current = %dep.current_req,
+                selected = %selected,
+                "skipping: compound version range (OR/AND clauses not supported)"
+            );
+            continue;
+        }
+
         // Safety net: never suggest a downgrade. When both current and selected
         // can be parsed as semver (after padding short forms like `5` or `5.1`
         // to `5.0.0` / `5.1.0`), skip this dependency if selected <= current.
@@ -182,6 +196,42 @@ fn sync_path_dep(dep: &DependencySpec, local_version: &str) -> Option<PlannedUpd
         from: dep.current_req.clone(),
         to: format!("{prefix}{new_bare}"),
     })
+}
+
+/// True when `current_bare` represents a compound version range — multiple
+/// clauses joined by `||` (npm OR), `,` (Cargo / `PyPI` AND), or an internal
+/// space (npm AND, e.g. `">=18.0.0 <19.0.0"`).
+///
+/// Single clauses with a leading-operator space like `">= 1.0.0"` are NOT
+/// compound: `strip_range_prefix` already removed the leading non-digit run
+/// (including the space), so this helper sees `"1.0.0"` and returns `false`.
+///
+/// `compute_updates` cannot rewrite compound ranges without losing user
+/// intent — every clause beyond the first would be silently dropped when
+/// the registry-resolved version is reprefixed onto the original spec. The
+/// safe answer is to leave the manifest byte-identical until a real
+/// multi-clause rewriter exists.
+fn is_compound_range(current_bare: &str) -> bool {
+    if current_bare.contains("||") || current_bare.contains(',') {
+        return true;
+    }
+    // npm AND: a space whose left neighbour is a digit and whose right
+    // neighbour is a clause start (digit or one of `<>=~^!`). Iterating
+    // bytes is safe because every character we test against is ASCII —
+    // a non-ASCII byte cannot equal `b' '` or be a digit / operator anyway.
+    let bytes = current_bare.as_bytes();
+    for i in 1..bytes.len().saturating_sub(1) {
+        if bytes[i] == b' '
+            && bytes[i - 1].is_ascii_digit()
+            && matches!(
+                bytes[i + 1],
+                b'<' | b'>' | b'=' | b'~' | b'^' | b'!' | b'0'..=b'9'
+            )
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Count the number of version segments in a bare version string.
@@ -346,6 +396,25 @@ mod tests {
     )]
     #[case::allows_prerelease_to_stable("2.0.0-rc.37", "2.0.0", "2.0.0", Some("2.0.0"))]
     #[case::equal_semver_skipped("1.2.3", "1.2.3", "1.2.3", None)]
+    // Compound ranges (multiple clauses joined by `||`, `,`, or an internal
+    // space) are skipped: rewriting them would drop every clause beyond the
+    // first, silently mangling the user's intent. The manifest stays
+    // byte-identical until a real multi-clause rewriter exists.
+    #[case::npm_or_range_skipped("^17.0.0 || ^18.0.0", "18.3.1", "18.3.1", None)]
+    #[case::npm_space_and_range_skipped(">=18.0.0 <19.0.0", "18.3.1", "18.3.1", None)]
+    #[case::cargo_comma_and_range_skipped(">=1.0, <2.0", "1.5.0", "1.5.0", None)]
+    #[case::pypi_comma_and_range_skipped(">=2.28.0,<3.0", "2.31.0", "2.31.0", None)]
+    // Single clause with a leading-operator space (`>= 1.0.0`): the space
+    // sits before the digit run and `strip_range_prefix` removes it along
+    // with `>=`, so the helper sees a clean `"1.0.0"` and the dep still
+    // updates. The prefix on the rewritten value preserves the original
+    // operator + space exactly.
+    #[case::single_clause_with_leading_space_still_updates(
+        ">= 1.0.0",
+        "1.5.0",
+        "1.5.0",
+        Some(">= 1.5.0")
+    )]
     fn compute_updates_single(
         #[case] current: &str,
         #[case] latest: &str,
@@ -606,5 +675,37 @@ mod tests {
     #[case("v5", false)]
     fn is_plain_numeric_version_cases(#[case] input: &str, #[case] expected: bool) {
         assert_eq!(is_plain_numeric_version(input), expected);
+    }
+
+    #[rstest]
+    // Compound — multiple clauses joined by `||`, `,`, or an internal space.
+    #[case::or_clauses_with_spaces("17.0.0 || ^18.0.0", true)]
+    #[case::or_clauses_tight("17.0.0||18.0.0", true)]
+    #[case::cargo_comma_and("1.0, <2.0", true)]
+    #[case::pypi_comma_and("2.28.0,<3.0", true)]
+    #[case::npm_space_and_lt("18.0.0 <19.0.0", true)]
+    #[case::npm_space_and_caret("18.0.0 ^19.0.0", true)]
+    #[case::npm_space_and_tilde("18.0.0 ~19.0.0", true)]
+    #[case::npm_space_and_eq("18.0.0 =19.0.0", true)]
+    #[case::npm_space_and_bang("18.0.0 !=19.0.0", true)]
+    #[case::npm_space_and_digit("18.0.0 19.0.0", true)]
+    // Single clauses — must NOT be classified as compound.
+    #[case::single_full("1.2.3", false)]
+    #[case::single_two("1.2", false)]
+    #[case::single_major("1", false)]
+    #[case::single_prerelease("1.2.3-rc.1", false)]
+    #[case::single_with_build("1.2.3+build.7", false)]
+    // After `strip_range_prefix` the leading operator (and any space that
+    // follows it) is already gone, so a permissive `">= 1.0.0"` arrives
+    // here as `"1.0.0"` and stays a single clause.
+    #[case::leading_space_stripped("1.0.0", false)]
+    #[case::empty("", false)]
+    // Hyphen ranges (`1.2.3 - 1.5.0`) are out of scope for this helper:
+    // the right-of-space byte is `-`, which is not a clause-start operator,
+    // so we deliberately do not classify them as compound. They remain a
+    // separate concern.
+    #[case::hyphen_range_not_caught("1.2.3 - 1.5.0", false)]
+    fn is_compound_range_cases(#[case] input: &str, #[case] expected: bool) {
+        assert_eq!(is_compound_range(input), expected);
     }
 }
