@@ -19,6 +19,7 @@ use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
     DcuError, DependencySpec, ResolvedVersion, TargetLevel, build_client, pad_to_three_segments,
+    split_numeric_head,
 };
 
 use crate::parser::is_version_ref;
@@ -448,23 +449,15 @@ fn tag_numeric_str(tag: &str) -> Option<&str> {
         return None;
     }
     let stripped = tag.strip_prefix('v').unwrap_or(tag);
-    Some(
-        stripped
-            .split(|c: char| !c.is_ascii_digit() && c != '.')
-            .next()
-            .unwrap_or("")
-            .trim_end_matches('.'),
-    )
+    Some(split_numeric_head(stripped).0.trim_end_matches('.'))
 }
 
 /// Count the segment precision of the user's current ref (`v7` → 1,
 /// `v7.6` → 2, `v7.6.0` → 3). Always at least 1.
 fn ref_precision(req: &str) -> usize {
     let stripped = req.strip_prefix('v').unwrap_or(req);
-    stripped
-        .split(|c: char| !c.is_ascii_digit() && c != '.')
-        .next()
-        .unwrap_or("")
+    split_numeric_head(stripped)
+        .0
         .split('.')
         .filter(|s| !s.is_empty())
         .count()
@@ -490,9 +483,7 @@ fn ref_precision(req: &str) -> usize {
 /// would be wrongly escalated to `v2.81.6`, surfacing a spurious update even
 /// though `@v2` already floats to that version.
 fn pick_existing_ref(selected: &str, current_req: &str, tag_numerics: &HashSet<String>) -> String {
-    let (numeric, suffix) = selected
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .map_or((selected, ""), |i| selected.split_at(i));
+    let (numeric, suffix) = split_numeric_head(selected);
     if !suffix.is_empty() {
         return selected.to_owned();
     }

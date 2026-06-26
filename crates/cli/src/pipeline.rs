@@ -2,7 +2,7 @@ use tracing::{debug, trace, warn};
 
 use dependency_check_updates_core::{
     DcuError, DependencySpec, ManifestKind, PlannedUpdate, ResolvedVersion, pad_to_three_segments,
-    strip_range_prefix,
+    split_numeric_head, strip_range_prefix,
 };
 
 /// Filter dependencies by include/exclude patterns.
@@ -244,10 +244,7 @@ fn is_compound_range(current_bare: &str) -> bool {
 /// "1.0.0-beta.1" → 3 (pre-release suffix ignored)
 fn count_version_segments(bare: &str) -> usize {
     // Stop at the first non-digit, non-dot character (e.g., '-' for pre-release)
-    let numeric_part = bare
-        .split(|c: char| !c.is_ascii_digit() && c != '.')
-        .next()
-        .unwrap_or("");
+    let numeric_part = split_numeric_head(bare).0;
     if numeric_part.is_empty() {
         return 0;
     }
@@ -300,9 +297,7 @@ fn truncate_version(version: &str, segments: usize) -> String {
     // Bare numeric `1.2.3` head — any non-digit, non-dot byte ends the
     // numeric prefix and marks the start of a pre-release tail we drop on
     // truncation (the comparison below decides whether truncation happens).
-    let numeric = stripped
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .map_or(stripped, |i| &stripped[..i]);
+    let numeric = split_numeric_head(stripped).0;
 
     if numeric.split('.').count() <= segments {
         // Already at or below desired precision — return `stripped` so any

@@ -24,6 +24,31 @@ pub fn strip_range_prefix(req_str: &str) -> &str {
     req_str.trim_start_matches(|c: char| !c.is_ascii_digit())
 }
 
+/// Split `v` between its numeric head (ASCII digits + `.`) and the rest.
+///
+/// Returns `(numeric, rest)`. Borrow-only; no allocation. Used by every site
+/// that needs to find where the bare numeric prefix of a version string ends
+/// (`1.2.3-beta` → `("1.2.3", "-beta")`, `v5` → `("", "v5")`, `5` →
+/// `("5", "")`). Centralises the predicate previously duplicated across
+/// `pad_to_three_segments`, `cli::pipeline::{count_version_segments,
+/// truncate_version}`, and `github::registry::{tag_numeric_str, ref_precision,
+/// pick_existing_ref}` so future tightenings (Unicode digit handling, treating
+/// `+` build-metadata bytes as part of the head, etc.) land in one place.
+///
+/// ```
+/// use dependency_check_updates_core::split_numeric_head;
+/// assert_eq!(split_numeric_head("1.2.3"), ("1.2.3", ""));
+/// assert_eq!(split_numeric_head("1.2.3-beta"), ("1.2.3", "-beta"));
+/// assert_eq!(split_numeric_head("1.2.3+build"), ("1.2.3", "+build"));
+/// assert_eq!(split_numeric_head("v5"), ("", "v5"));
+/// assert_eq!(split_numeric_head(""), ("", ""));
+/// ```
+#[must_use]
+pub fn split_numeric_head(v: &str) -> (&str, &str) {
+    v.find(|c: char| !c.is_ascii_digit() && c != '.')
+        .map_or((v, ""), |i| v.split_at(i))
+}
+
 /// Pad a numeric version prefix to exactly three segments while preserving any
 /// pre-release / build-metadata suffix.
 ///
@@ -46,9 +71,7 @@ pub fn pad_to_three_segments(v: &str) -> Cow<'_, str> {
     if v.is_empty() {
         return Cow::Borrowed(v);
     }
-    let (numeric, suffix) = v
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .map_or((v, ""), |i| v.split_at(i));
+    let (numeric, suffix) = split_numeric_head(v);
     // Walk the segment iterator directly instead of collecting into a
     // throwaway `Vec<&str>`: this helper sits on per-tag / per-dependency hot
     // paths (`github::registry::normalize_tag`, `cli::pipeline::compute_updates`),
@@ -100,5 +123,28 @@ mod tests {
     #[case("", "")]
     fn pad_to_three_segments_cases(#[case] input: &str, #[case] expected: &str) {
         assert_eq!(pad_to_three_segments(input), expected);
+    }
+
+    #[rstest]
+    // Pure numeric — entire string is the head.
+    #[case::pure_numeric_three("1.2.3", "1.2.3", "")]
+    #[case::pure_numeric_two("1.2", "1.2", "")]
+    #[case::pure_numeric_one("5", "5", "")]
+    // Pre-release tail starts at `-`.
+    #[case::pre_release("1.2.3-beta.1", "1.2.3", "-beta.1")]
+    #[case::pre_release_short("1.2-beta", "1.2", "-beta")]
+    // Build-metadata tail starts at `+`.
+    #[case::build_metadata("1.2.3+build.7", "1.2.3", "+build.7")]
+    // Leading non-digit (e.g. `v5` GitHub tag) → empty head.
+    #[case::leading_non_digit("v5", "", "v5")]
+    #[case::all_non_digit("main", "", "main")]
+    // Empty input → empty halves.
+    #[case::empty("", "", "")]
+    fn split_numeric_head_cases(
+        #[case] input: &str,
+        #[case] expected_numeric: &str,
+        #[case] expected_rest: &str,
+    ) {
+        assert_eq!(split_numeric_head(input), (expected_numeric, expected_rest));
     }
 }
