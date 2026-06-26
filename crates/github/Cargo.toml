@@ -20,7 +20,6 @@ path = "src/lib.rs"
 dependency-check-updates-core.workspace = true
 reqwest.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 tokio.workspace = true
 node-semver.workspace = true
 thiserror.workspace = true
@@ -29,6 +28,7 @@ futures.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 wiremock.workspace = true
 rustls.workspace = true
