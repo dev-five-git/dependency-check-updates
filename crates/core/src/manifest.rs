@@ -95,11 +95,15 @@ impl Scanner {
                     manifests.push(ManifestRef { path, kind });
                 }
             }
-            // Stable order so output is reproducible across platforms — `read_dir`
-            // is OS-dependent (NTFS vs ext4 give different orderings).
-            manifests.sort_by(|a, b| a.path.cmp(&b.path));
         }
 
+        // Stable order so output is reproducible across platforms regardless
+        // of whether `.github/workflows/` exists. The static `candidates`
+        // array order (package.json → Cargo.toml → pyproject.toml → action.{yml,yaml})
+        // is NOT alphabetical, and `read_dir` ordering is OS-dependent (NTFS
+        // vs ext4 give different orderings), so we sort unconditionally here
+        // to match `scan_deep`'s already-unconditional sort below.
+        manifests.sort_by(|a, b| a.path.cmp(&b.path));
         manifests
     }
 
@@ -386,6 +390,38 @@ mod tests {
         let result = Scanner::discover(dir.path(), None, true);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 2);
+    }
+
+    /// Regression: `scan_dir`'s sort used to fire only when
+    /// `.github/workflows/` existed, leaving non-workflow projects on the
+    /// static `candidates` array order
+    /// (`package.json` → `Cargo.toml` → `pyproject.toml` → `action.{yml,yaml}`)
+    /// — which is NOT alphabetical. `scan_deep` always sorted, so the same
+    /// layout produced different ordering between `dcu` and `dcu -d`. The
+    /// CI-consumable `--format json` inherited that inconsistency. This test
+    /// fails on the pre-fix code (Cargo.toml appears at index 1, package.json
+    /// at index 0) and passes after the sort moves out of the `if let`.
+    #[test]
+    fn test_scan_dir_sorts_when_no_workflows_dir() {
+        let dir = TempDir::new().unwrap();
+        create_temp_manifest(dir.path(), "package.json", "{}");
+        create_temp_manifest(dir.path(), "Cargo.toml", "[package]");
+        // No `.github/workflows/` directory — the sort must still fire.
+        assert!(!dir.path().join(".github").join("workflows").exists());
+
+        let manifests = Scanner::scan_dir(dir.path());
+        assert_eq!(manifests.len(), 2);
+        // Alphabetical: 'C' (0x43) < 'p' (0x70), so Cargo.toml sorts first.
+        assert!(
+            manifests[0].path.ends_with("Cargo.toml"),
+            "Cargo.toml should sort first: {:?}",
+            manifests.iter().map(|m| &m.path).collect::<Vec<_>>()
+        );
+        assert!(
+            manifests[1].path.ends_with("package.json"),
+            "package.json should sort second: {:?}",
+            manifests.iter().map(|m| &m.path).collect::<Vec<_>>()
+        );
     }
 
     #[test]

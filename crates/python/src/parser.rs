@@ -82,6 +82,9 @@ impl PyProjectManifest {
                 // Poetry dev-dependencies
                 if let Some(dev_deps) = poetry.get("dev-dependencies").and_then(Item::as_table) {
                     for (name, item) in dev_deps {
+                        if name == "python" {
+                            continue; // Skip python version constraint (mirrors main-deps guard above)
+                        }
                         if let Some(version) = extract_poetry_version(item) {
                             if !is_wildcard_req(&version) {
                                 deps.push(DependencySpec {
@@ -520,6 +523,20 @@ mod tests {
         "\n[tool.poetry.dev-dependencies]\npytest = \"^7.0\"\n",
         1,
         Some((None, None, Some(DependencySection::DevDependencies))),
+    )]
+    // Regression: `python` is the interpreter version constraint Poetry
+    // tracks, not a PyPI package. The main-deps loop has always skipped it;
+    // the dev-deps loop now mirrors that guard so a `python = "^3.11"` pin
+    // under `[tool.poetry.dev-dependencies]` no longer leaks into the
+    // resolve pipeline (`pytest` remains the only surviving spec).
+    #[case::poetry_dev_dependencies_skips_python(
+        "\n[tool.poetry.dev-dependencies]\npython = \"^3.11\"\npytest = \"^7.0\"\n",
+        1,
+        Some((
+            Some("pytest"),
+            Some("^7.0"),
+            Some(DependencySection::DevDependencies),
+        )),
     )]
     #[case::dependency_groups(
         "\n[dependency-groups]\ntest = [\"pytest>=7.0\", \"coverage>=7.0\"]\n",
