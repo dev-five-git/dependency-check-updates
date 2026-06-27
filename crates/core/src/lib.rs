@@ -17,10 +17,7 @@ pub mod version;
 
 // Re-export commonly used types
 pub use error::DcuError;
-pub use http::{
-    DEFAULT_MAX_CONCURRENT_REQUESTS, DEFAULT_REQUEST_TIMEOUT_SECS, build_client,
-    resolve_batch_concurrent,
-};
+pub use http::{DEFAULT_MAX_CONCURRENT_REQUESTS, build_client, resolve_batch_concurrent};
 pub use manifest::{ManifestHandler, ParsedManifest, Scanner};
 pub use patch::{Patch, PatchError as BytePatchError, apply_byte_patches};
 pub use toml_decor::replace_string_preserving_decor;

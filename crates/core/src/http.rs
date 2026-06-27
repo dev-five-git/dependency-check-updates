@@ -21,7 +21,7 @@ use crate::types::{DependencySpec, ResolvedVersion};
 pub const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 10;
 
 /// Default per-request timeout, in seconds.
-pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Build the shared `reqwest::Client` used by every registry.
 ///

@@ -45,6 +45,17 @@ struct PyPiFile {
     yanked: bool,
 }
 
+/// Predicate for a release with at least one non-yanked file.
+///
+/// Centralises the filter used by both the `Newest` arm and the
+/// version-sorted arm of [`PyPiRegistry::resolve_version`]'s slow path so
+/// the two stay in sync without re-introducing the wasted
+/// `(Version, &str)` tuple `Vec` the old code paid for on every non-Newest
+/// lookup.
+fn is_usable_release(files: &[PyPiFile]) -> bool {
+    !files.is_empty() && files.iter().any(|f| !f.yanked)
+}
+
 impl PyPiRegistry {
     /// Create a new `PyPI` registry client.
     #[must_use]
@@ -155,18 +166,19 @@ impl PyPiRegistry {
                 "fast path: using PyPI info.version directly"
             );
             latest.clone()
-        } else {
-            // (parsed PEP 440 version, max upload timestamp) for every release
-            // that has at least one non-yanked file and parses cleanly. The
-            // upload timestamp is borrowed straight out of `info.releases`;
-            // the borrow is dropped together with `candidates` and never
-            // escapes this function, so we avoid the per-file `String` clone
-            // the old code did just to feed `.max()`.
-            let mut candidates: Vec<(pep440_rs::Version, &str)> = info
-                .releases
+        } else if target == TargetLevel::Newest {
+            // Most recently uploaded by date (ISO-8601 sorts chronologically),
+            // which can differ from the highest version number. Stream the
+            // releases straight into `max_by` — no intermediate `Vec`, no
+            // sort, since the version ordering the old slow path computed
+            // was thrown away in this arm anyway. The upload `&str` is
+            // borrowed out of `info.releases` and dies with the iterator.
+            // `max_by` returns `None` only on an empty iterator, which
+            // already means there is nothing to fall back to.
+            info.releases
                 .iter()
                 .filter_map(|(ver_str, files)| {
-                    if files.is_empty() || files.iter().all(|f| f.yanked) {
+                    if !is_usable_release(files) {
                         return None;
                     }
                     let parsed = pep440_rs::Version::from_str(ver_str).ok()?;
@@ -177,32 +189,29 @@ impl PyPiRegistry {
                         .unwrap_or("");
                     Some((parsed, upload))
                 })
+                .max_by(|a, b| a.1.cmp(b.1))
+                .map(|(v, _)| v.to_string())
+        } else {
+            // `parse_and_select` still wants an ascending list, so we sort
+            // — but we sort plain `pep440_rs::Version`s instead of
+            // `(Version, &str)` tuples whose `&str` half this arm never
+            // reads, dropping one allocation pass and a wider comparator.
+            // Shared strip→parse→select sequence centralised in `core`;
+            // PyPI's `info.version` (canonical latest stable) doubles as
+            // the fallback for the stable-`Latest` and unparseable-
+            // `Minor`/`Patch` cases.
+            let mut versions: Vec<pep440_rs::Version> = info
+                .releases
+                .iter()
+                .filter_map(|(ver_str, files)| {
+                    if !is_usable_release(files) {
+                        return None;
+                    }
+                    pep440_rs::Version::from_str(ver_str).ok()
+                })
                 .collect();
-            candidates.sort_by(|a, b| a.0.cmp(&b.0));
-
-            if target == TargetLevel::Newest {
-                // Most recently uploaded by date (ISO-8601 sorts
-                // chronologically), which can differ from the highest version
-                // number. `max_by` returns `None` only on an empty iterator,
-                // which already means there are no candidates to fall back to
-                // — no extra `or_else` branch is reachable.
-                candidates
-                    .iter()
-                    .max_by(|a, b| a.1.cmp(b.1))
-                    .map(|(v, _)| v.to_string())
-            } else {
-                // Consume `candidates` to move each parsed `Version` into the
-                // selection list instead of cloning every element; the
-                // borrowed upload `&str` halves are dropped with the tuples.
-                //
-                // Shared strip→parse→select sequence centralised in `core`;
-                // PyPI's `info.version` (canonical latest stable) doubles as
-                // the fallback for the stable-`Latest` and unparseable-
-                // `Minor`/`Patch` cases.
-                let versions: Vec<pep440_rs::Version> =
-                    candidates.into_iter().map(|(v, _)| v).collect();
-                parse_and_select(&dep.current_req, &versions, target, latest.as_deref())
-            }
+            versions.sort();
+            parse_and_select(&dep.current_req, &versions, target, latest.as_deref())
         };
 
         debug!(
