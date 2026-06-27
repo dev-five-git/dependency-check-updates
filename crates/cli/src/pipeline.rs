@@ -28,6 +28,18 @@ pub(crate) fn filter_deps(
         .collect()
 }
 
+/// Re-attach the range prefix from `current_req` onto a new bare version.
+///
+/// `current_bare` MUST be the result of `strip_range_prefix(current_req)` — the
+/// length difference is the leading non-digit prefix (`^`, `~`, `>=`,
+/// `">= "`, …) that needs to be re-glued onto `new_bare`. Centralises the
+/// expression previously duplicated in `compute_updates` and `sync_path_dep`,
+/// so future range-prefix tightenings land in exactly one place.
+fn rewrite_with_range_prefix(current_req: &str, current_bare: &str, new_bare: &str) -> String {
+    let prefix = &current_req[..current_req.len() - current_bare.len()];
+    format!("{prefix}{new_bare}")
+}
+
 /// Compute planned updates from resolved versions.
 pub(crate) fn compute_updates(
     deps: &[DependencySpec],
@@ -139,9 +151,8 @@ pub(crate) fn compute_updates(
         }
 
         // Preserve the range prefix from the original spec
-        let prefix_len = dep.current_req.len() - current_bare.len();
-        let prefix = &dep.current_req[..prefix_len];
-        let new_version = format!("{prefix}{selected_truncated}");
+        let new_version =
+            rewrite_with_range_prefix(&dep.current_req, current_bare, &selected_truncated);
 
         updates.push(PlannedUpdate {
             name: dep.name.clone(),
@@ -189,12 +200,11 @@ fn sync_path_dep(dep: &DependencySpec, local_version: &str) -> Option<PlannedUpd
         return None;
     }
 
-    let prefix = &dep.current_req[..dep.current_req.len() - current_bare.len()];
     Some(PlannedUpdate {
         name: dep.name.clone(),
         section: dep.section,
         from: dep.current_req.clone(),
-        to: format!("{prefix}{new_bare}"),
+        to: rewrite_with_range_prefix(&dep.current_req, current_bare, &new_bare),
     })
 }
 

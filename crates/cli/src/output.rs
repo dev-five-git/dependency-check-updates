@@ -2,7 +2,9 @@
 
 use std::fmt::Write;
 
-use dependency_check_updates_core::{BumpType, PlannedUpdate, strip_range_prefix};
+use dependency_check_updates_core::{
+    BumpType, PlannedUpdate, split_numeric_head, strip_range_prefix,
+};
 use owo_colors::OwoColorize;
 
 /// Determine the type of version bump by comparing version strings.
@@ -21,19 +23,18 @@ pub fn detect_bump_type(from: &str, to: &str) -> BumpType {
 }
 
 /// Parse major.minor.patch from a version string, stripping range prefixes.
+///
+/// Uses [`split_numeric_head`] to peel the borrowed numeric prefix once
+/// (`"1.2.3-beta.1"` → `"1.2.3"`), then a uniform `.parse()` over the first
+/// three dot-segments. No throwaway `String` allocation for the patch scan —
+/// the previous hand-rolled `take_while(is_ascii_digit).collect::<String>()`
+/// is subsumed by the shared utility the rest of the workspace already uses.
 fn parse_version_parts(v: &str) -> (u64, u64, u64) {
-    let cleaned = strip_range_prefix(v);
-    let mut parts = cleaned.splitn(3, '.');
+    let numeric = split_numeric_head(strip_range_prefix(v)).0;
+    let mut parts = numeric.split('.');
     let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let patch = parts
-        .next()
-        .and_then(|s| {
-            // Handle "3-beta.1" -> take digits only
-            let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
-            digits.parse().ok()
-        })
-        .unwrap_or(0);
+    let patch = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     (major, minor, patch)
 }
 

@@ -405,11 +405,6 @@ fn normalize_tag(tag: &str) -> Option<node_semver::Version> {
     node_semver::Version::parse(&padded).ok()
 }
 
-/// Parse the user's current ref so we can compare against tag versions.
-fn parse_current_ref(req: &str) -> Option<node_semver::Version> {
-    normalize_tag(req)
-}
-
 /// Select a tag for the dep based on the target level.
 ///
 /// Parses + sorts the tag list, then delegates the target-match algorithm to
@@ -431,7 +426,7 @@ fn select_from_tags(
     // Parsing + sorting + highest-stable extraction live on `PreparedTags`,
     // built once per unique repo by `resolve_batch`. This function is now
     // only the per-dep `current_req` parse + `select_version` dispatch.
-    let current = parse_current_ref(current_req);
+    let current = normalize_tag(current_req);
 
     let selected = dependency_check_updates_core::select_version(
         current.as_ref(),
