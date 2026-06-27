@@ -258,8 +258,7 @@ impl GitHubActionsRegistry {
 
         // Step 2: fan out fetches in parallel.
         let mut fetch_futures = Vec::with_capacity(unique_repos.len());
-        for repo in &unique_repos {
-            let repo = repo.clone();
+        for repo in unique_repos {
             let me = self.clone();
             fetch_futures.push(async move {
                 let result = me.fetch_tags(&repo).await;

@@ -71,9 +71,11 @@ pub fn render_table(updates: &[PlannedUpdate], use_color: bool) -> String {
     let unique = dedupe_updates(updates);
 
     // Calculate column widths against the deduped set so columns stay tight.
-    let max_name = unique.iter().map(|u| u.name.len()).max().unwrap_or(0);
-    let max_from = unique.iter().map(|u| u.from.len()).max().unwrap_or(0);
-    let max_to = unique.iter().map(|u| u.to.len()).max().unwrap_or(0);
+    let (max_name, max_from, max_to) = unique
+        .iter()
+        .fold((0usize, 0usize, 0usize), |(n, f, t), u| {
+            (n.max(u.name.len()), f.max(u.from.len()), t.max(u.to.len()))
+        });
 
     let mut output = String::new();
 
@@ -101,7 +103,7 @@ pub fn render_table(updates: &[PlannedUpdate], use_color: bool) -> String {
 /// Lifted out of [`render_table`] so [`render_json`] can apply the same dedup
 /// without duplicating logic. Returns references so we avoid cloning.
 fn dedupe_updates(updates: &[PlannedUpdate]) -> Vec<&PlannedUpdate> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::with_capacity(updates.len());
     updates
         .iter()
         .filter(|u| seen.insert((u.name.as_str(), u.from.as_str(), u.to.as_str())))
