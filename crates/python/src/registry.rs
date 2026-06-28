@@ -210,7 +210,11 @@ impl PyPiRegistry {
                     pep440_rs::Version::from_str(ver_str).ok()
                 })
                 .collect();
-            versions.sort();
+            // Unstable sort matches the cargo/npm registry convention for
+            // these final, already-unique version lists; `pdqsort` skips
+            // `Timsort`'s auxiliary buffer for the same observable ordering.
+            // See 0007-analyze.md F2.
+            versions.sort_unstable();
             parse_and_select(&dep.current_req, &versions, target, latest.as_deref())
         };
 

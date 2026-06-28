@@ -87,7 +87,11 @@ impl PreparedTags {
             sorted_versions.push(version);
             tag_numerics.insert(numeric_str.to_owned());
         }
-        sorted_versions.sort();
+        // Unstable sort matches the cargo/npm registry convention for these
+        // final, already-unique version lists; `pdqsort` skips `Timsort`'s
+        // auxiliary buffer for the same observable ordering. See
+        // 0007-analyze.md F2.
+        sorted_versions.sort_unstable();
         let highest_stable = sorted_versions
             .iter()
             .rev()

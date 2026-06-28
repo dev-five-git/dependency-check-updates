@@ -59,43 +59,19 @@ impl PyProjectManifest {
             }
         }
 
-        // Poetry: [tool.poetry.dependencies]
+        // Poetry: [tool.poetry.dependencies] and [tool.poetry.dev-dependencies]
+        // funnel through one shared `collect_poetry_table` helper — the two
+        // loops were previously byte-for-byte identical except for the
+        // `DependencySection` literal, and the dev-loop's `python` skip
+        // comment already mirrored the main-loop guard, signalling the
+        // duplication. See 0007-analyze.md F1.
         if let Some(tool) = doc.get("tool").and_then(Item::as_table) {
             if let Some(poetry) = tool.get("poetry").and_then(Item::as_table) {
-                if let Some(poetry_deps) = poetry.get("dependencies").and_then(Item::as_table) {
-                    for (name, item) in poetry_deps {
-                        if name == "python" {
-                            continue; // Skip python version constraint
-                        }
-                        if let Some(version) = extract_poetry_version(item) {
-                            if !is_wildcard_req(&version) {
-                                deps.push(DependencySpec {
-                                    name: name.to_owned(),
-                                    current_req: version,
-                                    section: DependencySection::Dependencies,
-                                    path_version: None,
-                                });
-                            }
-                        }
-                    }
+                if let Some(t) = poetry.get("dependencies").and_then(Item::as_table) {
+                    collect_poetry_table(t, DependencySection::Dependencies, &mut deps);
                 }
-                // Poetry dev-dependencies
-                if let Some(dev_deps) = poetry.get("dev-dependencies").and_then(Item::as_table) {
-                    for (name, item) in dev_deps {
-                        if name == "python" {
-                            continue; // Skip python version constraint (mirrors main-deps guard above)
-                        }
-                        if let Some(version) = extract_poetry_version(item) {
-                            if !is_wildcard_req(&version) {
-                                deps.push(DependencySpec {
-                                    name: name.to_owned(),
-                                    current_req: version,
-                                    section: DependencySection::DevDependencies,
-                                    path_version: None,
-                                });
-                            }
-                        }
-                    }
+                if let Some(t) = poetry.get("dev-dependencies").and_then(Item::as_table) {
+                    collect_poetry_table(t, DependencySection::DevDependencies, &mut deps);
                 }
             }
         }
@@ -215,6 +191,45 @@ fn collect_pep508_array(
                 deps.push(dep);
             }
         }
+    }
+}
+
+/// Walk a Poetry dependency table (`[tool.poetry.dependencies]` or
+/// `[tool.poetry.dev-dependencies]`), pushing every collected
+/// [`DependencySpec`] into `deps` under the given `section`.
+///
+/// Funnels the two previously-duplicated inner loops in
+/// [`PyProjectManifest::collect_dependencies`] through one shared body so
+/// the `python = "^…"` interpreter guard, the
+/// [`extract_poetry_version`] extraction, the [`is_wildcard_req`] skip, and
+/// the [`DependencySpec`] shape (including `path_version: None`) all live in
+/// exactly one place. The `section` parameter is the only piece that
+/// differed between the main- and dev-dep loops, mirroring the analyze
+/// report's `collect_pep508_array` parallel.
+fn collect_poetry_table(
+    table: &toml_edit::Table,
+    section: DependencySection,
+    deps: &mut Vec<DependencySpec>,
+) {
+    for (name, item) in table {
+        // `python` here is the interpreter version constraint Poetry tracks,
+        // not a PyPI package; both the main- and dev-dep loops have always
+        // skipped it (see 0004-analyze.md for the dev-loop addition).
+        if name == "python" {
+            continue;
+        }
+        let Some(version) = extract_poetry_version(item) else {
+            continue;
+        };
+        if is_wildcard_req(&version) {
+            continue;
+        }
+        deps.push(DependencySpec {
+            name: name.to_owned(),
+            current_req: version,
+            section,
+            path_version: None,
+        });
     }
 }
 

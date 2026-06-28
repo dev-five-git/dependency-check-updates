@@ -122,12 +122,20 @@ impl CratesIoRegistry {
 
         let crate_versions = self.fetch_versions(&dep.name).await?;
 
-        let yanked_count = crate_versions.iter().filter(|v| v.yanked).count();
-        let mut versions: Vec<semver::Version> = crate_versions
-            .iter()
-            .filter(|v| !v.yanked)
-            .filter_map(|v| semver::Version::parse(&v.num).ok())
-            .collect();
+        // One pass instead of two: the previous form walked
+        // `crate_versions` once to count yanked entries (purely for the
+        // `trace!` diagnostic below) and once more to parse the non-yanked
+        // ones. Pre-size `versions` to skip the grow-loop reallocations on
+        // long version lists. See 0007-analyze.md F3.
+        let mut yanked_count = 0usize;
+        let mut versions: Vec<semver::Version> = Vec::with_capacity(crate_versions.len());
+        for v in &crate_versions {
+            if v.yanked {
+                yanked_count += 1;
+            } else if let Ok(parsed) = semver::Version::parse(&v.num) {
+                versions.push(parsed);
+            }
+        }
         versions.sort_unstable();
 
         trace!(
