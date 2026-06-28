@@ -45,8 +45,11 @@ pub fn strip_range_prefix(req_str: &str) -> &str {
 /// ```
 #[must_use]
 pub fn split_numeric_head(v: &str) -> (&str, &str) {
-    v.find(|c: char| !c.is_ascii_digit() && c != '.')
-        .map_or((v, ""), |i| v.split_at(i))
+    let i = v
+        .bytes()
+        .position(|b| !(b.is_ascii_digit() || b == b'.'))
+        .unwrap_or(v.len());
+    v.split_at(i)
 }
 
 /// Pad a numeric version prefix to exactly three segments while preserving any

@@ -23,8 +23,7 @@ use toml_edit::Formatted;
 /// `apply_updates_pep621_preserves_multiline_format`,
 /// `apply_updates_patches_pep621_optional_dependencies`, …).
 pub fn replace_string_preserving_decor(s: &mut Formatted<String>, new: String) {
-    let decor = s.decor().clone();
     let mut next = Formatted::new(new);
-    *next.decor_mut() = decor;
+    std::mem::swap(next.decor_mut(), s.decor_mut());
     *s = next;
 }

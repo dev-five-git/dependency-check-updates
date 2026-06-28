@@ -44,7 +44,7 @@ struct NpmPackageInfo {
 /// hundreds of versions, each with multi-KB nested bodies. Newtype around
 /// `HashSet<String>` so the clippy `zero_sized_map_values` lint stays clean
 /// (a `HashMap<String, IgnoredAny>` would trip it).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct VersionKeys(HashSet<String>);
 
 impl<'de> Deserialize<'de> for VersionKeys {
