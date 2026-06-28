@@ -200,16 +200,13 @@ impl PyPiRegistry {
             // PyPI's `info.version` (canonical latest stable) doubles as
             // the fallback for the stable-`Latest` and unparseable-
             // `Minor`/`Patch` cases.
-            let mut versions: Vec<pep440_rs::Version> = info
-                .releases
-                .iter()
-                .filter_map(|(ver_str, files)| {
-                    if !is_usable_release(files) {
-                        return None;
-                    }
-                    pep440_rs::Version::from_str(ver_str).ok()
-                })
-                .collect();
+            let mut versions: Vec<pep440_rs::Version> = Vec::with_capacity(info.releases.len());
+            versions.extend(info.releases.iter().filter_map(|(ver_str, files)| {
+                if !is_usable_release(files) {
+                    return None;
+                }
+                pep440_rs::Version::from_str(ver_str).ok()
+            }));
             // Unstable sort matches the cargo/npm registry convention for
             // these final, already-unique version lists; `pdqsort` skips
             // `Timsort`'s auxiliary buffer for the same observable ordering.

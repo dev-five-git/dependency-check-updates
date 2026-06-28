@@ -300,11 +300,13 @@ fn extract_sorted_versions(info: &NpmPackageInfo) -> Vec<node_semver::Version> {
         return Vec::new();
     };
 
-    let mut parsed: Vec<node_semver::Version> = versions
-        .0
-        .iter()
-        .filter_map(|v| node_semver::Version::parse(v).ok())
-        .collect();
+    let mut parsed: Vec<node_semver::Version> = Vec::with_capacity(versions.0.len());
+    parsed.extend(
+        versions
+            .0
+            .iter()
+            .filter_map(|v| node_semver::Version::parse(v).ok()),
+    );
 
     parsed.sort_unstable();
     parsed
