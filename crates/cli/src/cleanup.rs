@@ -105,9 +105,13 @@ pub(crate) fn cleanup_manifest_siblings(
 /// it unconditionally without producing a stray blank line.
 #[must_use]
 pub(crate) fn render_removed(removed: &[String]) -> String {
-    let mut out = String::new();
+    // Exact upper bound: `" Removed "` (9 bytes) + name + `"\n"` (1 byte) = name.len() + 10.
+    let cap = removed.iter().map(|n| n.len() + 10).sum();
+    let mut out = String::with_capacity(cap);
     for name in removed {
-        let _ = std::fmt::Write::write_fmt(&mut out, format_args!(" Removed {name}\n"));
+        out.push_str(" Removed ");
+        out.push_str(name);
+        out.push('\n');
     }
     out
 }

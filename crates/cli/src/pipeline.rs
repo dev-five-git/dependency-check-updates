@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use tracing::{debug, trace, warn};
 
 use dependency_check_updates_core::{
@@ -127,8 +129,8 @@ pub(crate) fn compute_updates(
         // the exact, tag-validated ref form (`pick_existing_ref`), so re-running
         // the generic truncation here could re-shorten an escalated ref
         // (`v8.1.0` → `v8`) back into a dangling tag.
-        let selected_truncated = if kind == ManifestKind::GitHubWorkflow {
-            selected.clone()
+        let selected_truncated: Cow<'_, str> = if kind == ManifestKind::GitHubWorkflow {
+            Cow::Borrowed(selected)
         } else {
             let precision = count_version_segments(current_bare);
 
@@ -142,10 +144,10 @@ pub(crate) fn compute_updates(
                 continue;
             }
 
-            truncate_version(selected, precision)
+            Cow::Owned(truncate_version(selected, precision))
         };
 
-        if current_bare == selected_truncated {
+        if current_bare == selected_truncated.as_ref() {
             trace!(package = %dep.name, version = %dep.current_req, "already up to date");
             continue;
         }
