@@ -162,9 +162,10 @@ impl GitHubActionsRegistry {
     /// `not-a-valid-name` → `None`
     ///
     /// Returns a borrowed prefix of `name` (the formatted output was always
-    /// byte-equivalent to such a prefix). The `HashSet` build site upgrades to
-    /// owned via `.to_owned()` so a workflow with N deps over R unique repos
-    /// allocates R times — once per unique repo — instead of `2N` times.
+    /// byte-equivalent to such a prefix). The dedup site in `resolve_batch`
+    /// upgrades to owned via `.to_owned()` only when the borrowed key is newly
+    /// seen, so a workflow with N deps over R unique repos allocates exactly
+    /// R `String`s — once per unique repo — instead of N times.
     fn repo_key(name: &str) -> Option<&str> {
         // First '/' separates owner from repo. An owner of zero length
         // (`/foo`, `/`) is rejected so we never emit `/repos//repo/tags`.
@@ -271,11 +272,17 @@ impl GitHubActionsRegistry {
         target: TargetLevel,
     ) -> Vec<(usize, Result<ResolvedVersion, DcuError>)> {
         // Step 1: collect unique repos. Sub-actions (`owner/repo/sub`) collapse
-        // to the same key as `owner/repo`.
-        let mut unique_repos: HashSet<String> = HashSet::new();
+        // to the same key as `owner/repo`. Dedup on a borrowed `&str` so the
+        // owned `String` is allocated EXACTLY ONCE per unique repo — the prior
+        // `HashSet<String>` form took ownership before the dedup check and
+        // therefore allocated on every iteration only to drop the duplicates.
+        let mut seen: HashSet<&str> = HashSet::with_capacity(deps.len());
+        let mut unique_repos: Vec<String> = Vec::new();
         for dep in deps {
             if let Some(key) = Self::repo_key(&dep.name) {
-                unique_repos.insert(key.to_owned());
+                if seen.insert(key) {
+                    unique_repos.push(key.to_owned());
+                }
             }
         }
 

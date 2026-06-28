@@ -1,6 +1,5 @@
 //! npm registry client for looking up package versions.
 
-use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -35,17 +34,19 @@ struct NpmPackageInfo {
     time: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-/// Set of version-string keys extracted from a packument `versions` JSON
+/// List of version-string keys extracted from a packument `versions` JSON
 /// object. Each value body (the nested per-version metadata: `dependencies`,
 /// `peerDependencies`, `dist`, ...) is walked past with `IgnoredAny` instead
 /// of being materialised into a `serde_json::Value` tree, since downstream
 /// code only ever needs the keys. Saves the per-version `Value`-tree
 /// allocation on every npm packument parse — popular packages publish
-/// hundreds of versions, each with multi-KB nested bodies. Newtype around
-/// `HashSet<String>` so the clippy `zero_sized_map_values` lint stays clean
-/// (a `HashMap<String, IgnoredAny>` would trip it).
+/// hundreds of versions, each with multi-KB nested bodies. The container is a
+/// `Vec<String>` (not a `HashSet`) because JSON object keys are unique by
+/// spec — the downstream consumer (`extract_sorted_versions`) only iterates
+/// the keys and sorts them, never probing membership, so the per-key hashing
+/// cost of a `HashSet` was pure overhead.
 #[derive(Debug)]
-struct VersionKeys(HashSet<String>);
+struct VersionKeys(Vec<String>);
 
 impl<'de> Deserialize<'de> for VersionKeys {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -55,7 +56,7 @@ impl<'de> Deserialize<'de> for VersionKeys {
         struct VersionKeysVisitor;
 
         impl<'de> Visitor<'de> for VersionKeysVisitor {
-            type Value = HashSet<String>;
+            type Value = Vec<String>;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("a JSON object whose keys are version strings")
@@ -65,11 +66,11 @@ impl<'de> Deserialize<'de> for VersionKeys {
             where
                 A: MapAccess<'de>,
             {
-                let mut keys = HashSet::with_capacity(map.size_hint().unwrap_or(0));
+                let mut keys = Vec::with_capacity(map.size_hint().unwrap_or(0));
                 while let Some(key) = map.next_key::<String>()? {
                     // Skip the value body without materialising it.
                     let _: IgnoredAny = map.next_value()?;
-                    keys.insert(key);
+                    keys.push(key);
                 }
                 Ok(keys)
             }
@@ -484,11 +485,11 @@ mod tests {
     fn test_extract_sorted_versions() {
         let info = NpmPackageInfo {
             dist_tags: None,
-            versions: Some(VersionKeys(HashSet::from([
+            versions: Some(VersionKeys(vec![
                 "2.0.0".to_owned(),
                 "1.0.0".to_owned(),
                 "1.5.0".to_owned(),
-            ]))),
+            ])),
             time: None,
         };
         let versions = extract_sorted_versions(&info);
