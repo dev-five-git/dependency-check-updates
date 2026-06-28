@@ -156,14 +156,33 @@ impl GitHubActionsRegistry {
     /// `actions/checkout/sub/path` → `Some("actions/checkout")` (sub-action;
     ///   tags still live on the parent repo)
     /// `not-a-valid-name` → `None`
-    fn repo_key(name: &str) -> Option<String> {
-        let mut parts = name.splitn(3, '/');
-        let owner = parts.next()?;
-        let repo = parts.next()?;
-        if owner.is_empty() || repo.is_empty() {
+    ///
+    /// Returns a borrowed prefix of `name` (the formatted output was always
+    /// byte-equivalent to such a prefix). The `HashSet` build site upgrades to
+    /// owned via `.to_owned()` so a workflow with N deps over R unique repos
+    /// allocates R times — once per unique repo — instead of `2N` times.
+    fn repo_key(name: &str) -> Option<&str> {
+        // First '/' separates owner from repo. An owner of zero length
+        // (`/foo`, `/`) is rejected so we never emit `/repos//repo/tags`.
+        let first = name.find('/')?;
+        if first == 0 {
             return None;
         }
-        Some(format!("{owner}/{repo}"))
+        let after = first + 1;
+        // Trailing slash (`foo/`) — no repo segment at all.
+        if after >= name.len() {
+            return None;
+        }
+        // End of the repo segment is either the next '/' or end-of-string.
+        // `'/'` is ASCII single-byte so every returned index sits on a UTF-8
+        // char boundary, keeping the final `&name[..end]` slice valid.
+        let end = name[after..].find('/').map_or(name.len(), |i| after + i);
+        // Empty repo segment (`foo//bar`) — same guard as the old
+        // `repo.is_empty()` check.
+        if end == after {
+            return None;
+        }
+        Some(&name[..end])
     }
 
     /// Fetch tags for a single repo.
@@ -252,7 +271,7 @@ impl GitHubActionsRegistry {
         let mut unique_repos: HashSet<String> = HashSet::new();
         for dep in deps {
             if let Some(key) = Self::repo_key(&dep.name) {
-                unique_repos.insert(key);
+                unique_repos.insert(key.to_owned());
             }
         }
 
@@ -295,7 +314,7 @@ impl GitHubActionsRegistry {
             // `prepared_by_repo`) above. Using `.expect()` documents the
             // invariant and keeps the code path linear for coverage.
             match prepared_by_repo
-                .get(&key)
+                .get(key)
                 .expect("tags cache must contain every unique repo key")
             {
                 Ok(prepared) => {
@@ -785,7 +804,10 @@ mod tests {
     #[case::leading_slash("/foo", None)]
     #[case::just_slash("/", None)]
     fn repo_key_cases(#[case] input: &str, #[case] expected: Option<&str>) {
-        assert_eq!(GitHubActionsRegistry::repo_key(input).as_deref(), expected);
+        // `repo_key` now returns `Option<&str>` directly — `.as_deref()` would
+        // be a no-op (`Option<&str>::as_deref()` returns the same `Option<&str>`)
+        // and trips `clippy::needless_option_as_deref`.
+        assert_eq!(GitHubActionsRegistry::repo_key(input), expected);
     }
 
     #[rstest]

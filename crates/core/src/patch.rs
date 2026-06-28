@@ -50,7 +50,13 @@ pub fn apply_byte_patches(original: &str, patches: &[Patch]) -> Result<String, P
     }
 
     let mut sorted: Vec<&Patch> = patches.iter().collect();
-    sorted.sort_by_key(|p| std::cmp::Reverse(p.start));
+    // Unstable sort is safe here: two patches with the same `start` are
+    // necessarily overlapping (every patch has `end > start`), so the
+    // immediately-following overlap check rejects the only case where
+    // stable-vs-unstable ordering would be observable. The stable sort's
+    // auxiliary-array allocation and slightly larger constant factor buy
+    // nothing in that scenario.
+    sorted.sort_unstable_by_key(|p| std::cmp::Reverse(p.start));
 
     for window in sorted.windows(2) {
         // sorted descending: window[0].start >= window[1].start, so window[1]

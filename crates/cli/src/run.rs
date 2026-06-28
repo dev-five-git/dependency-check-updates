@@ -17,6 +17,17 @@ use crate::logging::init_tracing;
 use crate::output;
 use crate::pipeline::{compute_updates, filter_deps};
 
+// Per-kind handlers are stateless zero-sized unit structs, so a single
+// `&'static` reference per kind suffices for the whole process. The previous
+// `Box::new(XHandler)` per manifest performed a heap allocation per discovered
+// manifest (boxing even ZSTs round-trips through the global allocator under
+// the current `Box<dyn Trait>` lowering); the static ref keeps the dispatch
+// pointer-sized while removing that allocation.
+static NODE_HANDLER: NodeHandler = NodeHandler;
+static RUST_HANDLER: RustHandler = RustHandler;
+static PYTHON_HANDLER: PythonHandler = PythonHandler;
+static GITHUB_HANDLER: GitHubHandler = GitHubHandler;
+
 /// Entry point for bridge crates (napi, maturin).
 ///
 /// Parses CLI args from the given slice and runs the full pipeline.
@@ -122,11 +133,11 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
 
         info!(path = %display_path, kind = %manifest_ref.kind, "processing manifest");
 
-        let handler: Box<dyn ManifestHandler + Send + Sync> = match manifest_ref.kind {
-            ManifestKind::PackageJson => Box::new(NodeHandler),
-            ManifestKind::CargoToml => Box::new(RustHandler),
-            ManifestKind::PyProjectToml => Box::new(PythonHandler),
-            ManifestKind::GitHubWorkflow => Box::new(GitHubHandler),
+        let handler: &'static (dyn ManifestHandler + Send + Sync) = match manifest_ref.kind {
+            ManifestKind::PackageJson => &NODE_HANDLER,
+            ManifestKind::CargoToml => &RUST_HANDLER,
+            ManifestKind::PyProjectToml => &PYTHON_HANDLER,
+            ManifestKind::GitHubWorkflow => &GITHUB_HANDLER,
         };
 
         let parsed = handler.parse(&text, &manifest_ref.path)?;
@@ -274,6 +285,6 @@ pub(crate) struct ManifestJob {
     pub(crate) manifest_ref: dependency_check_updates_core::ManifestRef,
     pub(crate) display_path: String,
     pub(crate) text: String,
-    pub(crate) handler: Box<dyn ManifestHandler + Send + Sync>,
+    pub(crate) handler: &'static (dyn ManifestHandler + Send + Sync),
     pub(crate) deps: Vec<DependencySpec>,
 }
