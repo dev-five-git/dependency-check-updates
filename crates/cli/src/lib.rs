@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 mod cleanup;
+mod cleanup_progress;
 mod cli;
 mod logging;
 mod output;

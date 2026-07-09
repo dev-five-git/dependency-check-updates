@@ -11,7 +11,7 @@ use dependency_check_updates_node::{NodeHandler, NpmRegistry};
 use dependency_check_updates_python::{PyPiRegistry, PythonHandler};
 use dependency_check_updates_rust::{CratesIoRegistry, RustHandler};
 
-use crate::cleanup::cleanup_and_render;
+use crate::cleanup_progress::{cleanup_with_progress, targets_for_job};
 use crate::cli::{Cli, OutputFormat};
 use crate::logging::init_tracing;
 use crate::output;
@@ -210,12 +210,15 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
 
     // 4. Print results and apply updates (sequential — needs ordered output)
     let mut any_updates = false;
+    let mut cleanup_targets = Vec::new();
+    let remove_lockfile = cli.remove_lockfile_requested();
+    let remove_installed = cli.remove_installed_requested();
 
     for (job_idx, job) in manifest_jobs.iter().enumerate() {
+        cleanup_targets.extend(targets_for_job(job, remove_lockfile, remove_installed));
         print!("{}", output::render_header(&job.display_path, cli.upgrade));
 
         if job.deps.is_empty() {
-            print!("{}", cleanup_and_render(job, cli));
             print!(
                 "{}",
                 output::render_footer(&job.display_path, cli.upgrade, false, use_color)
@@ -242,7 +245,6 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
 
         if updates.is_empty() {
             info!(path = %job.display_path, "all dependencies up to date");
-            print!("{}", cleanup_and_render(job, cli));
             print!(
                 "{}",
                 output::render_footer(&job.display_path, cli.upgrade, false, use_color)
@@ -267,12 +269,13 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
             info!(path = %job.display_path, "manifest updated successfully");
         }
 
-        print!("{}", cleanup_and_render(job, cli));
         print!(
             "{}",
             output::render_footer(&job.display_path, cli.upgrade, true, use_color)
         );
     }
+
+    print!("{}", cleanup_with_progress(&cleanup_targets).await);
 
     Ok(any_updates)
 }

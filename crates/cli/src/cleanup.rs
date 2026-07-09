@@ -1,11 +1,10 @@
+#[cfg(test)]
 use std::path::Path;
 
+#[cfg(test)]
 use tracing::warn;
 
 use dependency_check_updates_core::ManifestKind;
-
-use crate::cli::Cli;
-use crate::run::ManifestJob;
 
 /// Lockfiles that sit next to a manifest of the given kind.
 ///
@@ -55,6 +54,7 @@ pub(crate) fn installed_dirs_for(kind: ManifestKind) -> &'static [&'static str] 
 /// Returns the display names (lockfiles as-is, directories with a trailing
 /// `/`) of every entry actually removed, in the order they were processed.
 /// The caller uses this list to print a per-manifest summary.
+#[cfg(test)]
 pub(crate) fn cleanup_manifest_siblings(
     manifest_path: &Path,
     kind: ManifestKind,
@@ -104,6 +104,7 @@ pub(crate) fn cleanup_manifest_siblings(
 /// Returns an empty string when nothing was removed so the caller can print
 /// it unconditionally without producing a stray blank line.
 #[must_use]
+#[cfg(test)]
 pub(crate) fn render_removed(removed: &[String]) -> String {
     // Exact upper bound: `" Removed "` (9 bytes) + name + `"\n"` (1 byte) = name.len() + 10.
     let cap = removed.iter().map(|n| n.len() + 10).sum();
@@ -114,23 +115,6 @@ pub(crate) fn render_removed(removed: &[String]) -> String {
         out.push('\n');
     }
     out
-}
-
-/// Convenience wrapper: run the sibling cleanup for a job and render the
-/// resulting summary string in one call.
-///
-/// Reads the effective removal flags via [`Cli::remove_lockfile_requested`]
-/// and [`Cli::remove_installed_requested`] so the `--rm` shortcut and the
-/// granular flags share one OR-semantics implementation.
-#[cfg(not(tarpaulin_include))]
-pub(crate) fn cleanup_and_render(job: &ManifestJob, cli: &Cli) -> String {
-    let removed = cleanup_manifest_siblings(
-        &job.manifest_ref.path,
-        job.manifest_ref.kind,
-        cli.remove_lockfile_requested(),
-        cli.remove_installed_requested(),
-    );
-    render_removed(&removed)
 }
 
 #[cfg(test)]

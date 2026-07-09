@@ -58,6 +58,7 @@ ignore = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml_edit = "0.25"
+indicatif = "0.18"
 
 napi = { version = "3.9", features = ["tokio_rt"] }
 napi-derive = "3.5"

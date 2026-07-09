@@ -39,6 +39,7 @@ tracing-subscriber.workspace = true
 futures.workspace = true
 owo-colors.workspace = true
 semver.workspace = true
+indicatif.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
