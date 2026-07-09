@@ -132,7 +132,8 @@ impl Scanner {
     /// Recursively find manifest files using the `ignore` crate.
     ///
     /// Respects `.gitignore`, `.ignore`, and skips common directories
-    /// (`node_modules`, `target`, `.venv`, `dist`, `build`, `vendor`).
+    /// (`node_modules`, `target`, Python local env/package dirs, `dist`,
+    /// `build`, `vendor`).
     /// Walks INTO `.github` even though it is a hidden directory because
     /// workflow YAMLs live there; without this exception deep scan would miss
     /// every GitHub Actions manifest.
@@ -158,7 +159,13 @@ impl Scanner {
                 }
                 !matches!(
                     name.as_ref(),
-                    "node_modules" | "target" | "dist" | "build" | "vendor" | "__pycache__"
+                    "node_modules"
+                        | "target"
+                        | "__pypackages__"
+                        | "dist"
+                        | "build"
+                        | "vendor"
+                        | "__pycache__"
                 )
             })
             .build();
@@ -491,7 +498,7 @@ mod tests {
         assert!(manifests[0].path.ends_with("CI.yml"));
     }
 
-    /// Deep scan must prune `node_modules` (and friends) yet still descend
+    /// Deep scan must prune installed/generated directories yet still descend
     /// into normal nested directories. Exercises the `!matches!` filter
     /// closure on both branches: `node_modules` → false (pruned),
     /// `pkgs`/`app` → true (kept).
@@ -499,10 +506,13 @@ mod tests {
     fn test_scan_deep_prunes_excluded_dirs_but_keeps_nested() {
         let dir = TempDir::new().unwrap();
 
-        // Excluded: node_modules with a manifest inside that must NOT surface.
-        let nm = dir.path().join("node_modules").join("foo");
-        std::fs::create_dir_all(&nm).unwrap();
-        create_temp_manifest(&nm, "package.json", "{}");
+        // Excluded: dependency/env directories with manifests inside that must
+        // NOT surface.
+        for rel in ["node_modules/foo", "__pypackages__/3.13/lib/pkg"] {
+            let excluded = dir.path().join(rel);
+            std::fs::create_dir_all(&excluded).unwrap();
+            create_temp_manifest(&excluded, "package.json", "{}");
+        }
 
         // Kept: normal nested workspace member.
         let app = dir.path().join("pkgs").join("app");
@@ -520,12 +530,13 @@ mod tests {
             "expected pkgs/app/Cargo.toml in results: {:?}",
             manifests.iter().map(|m| &m.path).collect::<Vec<_>>()
         );
-        // The excluded node_modules manifest must NOT be found.
+        // The excluded dependency/env manifests must NOT be found.
         assert!(
-            !manifests
-                .iter()
-                .any(|m| m.path.to_string_lossy().contains("node_modules")),
-            "node_modules must be pruned: {:?}",
+            !manifests.iter().any(|m| matches!(
+                m.path.to_string_lossy().as_ref(),
+                p if p.contains("node_modules") || p.contains("__pypackages__")
+            )),
+            "dependency/env dirs must be pruned: {:?}",
             manifests.iter().map(|m| &m.path).collect::<Vec<_>>()
         );
     }

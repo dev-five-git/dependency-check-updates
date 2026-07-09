@@ -31,8 +31,8 @@ pub(crate) fn lockfiles_for(kind: ManifestKind) -> &'static [&'static str] {
     }
 }
 
-/// Installed-dependency directories that sit next to a manifest of the given
-/// kind.
+/// Installed-dependency or generated environment directories that sit next to a
+/// manifest of the given kind.
 ///
 /// `--remove-installed` wipes these so the package manager performs a clean
 /// install. Without this step, an already-installed copy of a transitive
@@ -43,7 +43,7 @@ pub(crate) fn installed_dirs_for(kind: ManifestKind) -> &'static [&'static str] 
     match kind {
         ManifestKind::PackageJson => &["node_modules"],
         ManifestKind::CargoToml => &["target"],
-        ManifestKind::PyProjectToml => &[".venv", "venv"],
+        ManifestKind::PyProjectToml => &[".venv", "venv", "__pypackages__", ".tox", ".nox"],
         ManifestKind::GitHubWorkflow => &[],
     }
 }
@@ -168,7 +168,10 @@ mod tests {
     #[rstest]
     #[case::package_json(ManifestKind::PackageJson, &["node_modules"])]
     #[case::cargo_toml(ManifestKind::CargoToml, &["target"])]
-    #[case::pyproject_toml(ManifestKind::PyProjectToml, &[".venv", "venv"])]
+    #[case::pyproject_toml(
+        ManifestKind::PyProjectToml,
+        &[".venv", "venv", "__pypackages__", ".tox", ".nox"]
+    )]
     #[case::github_workflow(ManifestKind::GitHubWorkflow, &[])]
     fn installed_dirs_for_cases(#[case] kind: ManifestKind, #[case] expected: &[&str]) {
         let got = installed_dirs_for(kind);
@@ -239,6 +242,16 @@ mod tests {
         &["bun.lock", "yarn.lock"], &["node_modules"],
         (true, true),
         &["bun.lock", "yarn.lock", "node_modules/"], &[],
+    )]
+    // Python cleanup removes the common project-local virtualenv and package
+    // install directories, but intentionally does not remove `env` / `.env` —
+    // those names are often config/secrets rather than disposable environments.
+    #[case::python_removes_project_local_envs(
+        ManifestKind::PyProjectToml, "pyproject.toml",
+        &["uv.lock"], &[".venv", "venv", "__pypackages__", ".tox", ".nox", "env", ".env"],
+        (true, true),
+        &["uv.lock", ".venv/", "venv/", "__pypackages__/", ".tox/", ".nox/"],
+        &["env", ".env"],
     )]
     // Cargo cleanup must NEVER delete foreign (node) lockfiles or dirs.
     #[case::cargo_does_not_touch_unrelated_lockfiles(

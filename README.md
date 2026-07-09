@@ -250,7 +250,8 @@ dcu -u --remove-installed                        # installed only, keep lockfile
 #   package.json   → bun.lock, bun.lockb, package-lock.json, pnpm-lock.yaml,
 #                    yarn.lock, node_modules/
 #   Cargo.toml     → Cargo.lock, target/
-#   pyproject.toml → uv.lock, poetry.lock, Pipfile.lock, .venv/, venv/
+#   pyproject.toml → uv.lock, poetry.lock, Pipfile.lock, .venv/, venv/,
+#                    __pypackages__/, .tox/, .nox/
 
 # GitHub Actions: pin a higher rate limit by exporting a token
 GITHUB_TOKEN=ghp_xxx dcu -d -u
