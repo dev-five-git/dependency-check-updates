@@ -22,20 +22,19 @@ pub fn detect_bump_type(from: &str, to: &str) -> BumpType {
     }
 }
 
-/// Parse major.minor.patch from a version string, stripping range prefixes.
+/// Parse major.minor from a version string, stripping range prefixes.
 ///
 /// Uses [`split_numeric_head`] to peel the borrowed numeric prefix once
 /// (`"1.2.3-beta.1"` → `"1.2.3"`), then a uniform `.parse()` over the first
-/// three dot-segments. No throwaway `String` allocation for the patch scan —
-/// the previous hand-rolled `take_while(is_ascii_digit).collect::<String>()`
-/// is subsumed by the shared utility the rest of the workspace already uses.
-fn parse_version_parts(v: &str) -> (u64, u64, u64) {
+/// two dot-segments. [`detect_bump_type`] only compares major and minor —
+/// anything past those classifies as a patch bump — so the patch segment is
+/// never parsed.
+fn parse_version_parts(v: &str) -> (u64, u64) {
     let numeric = split_numeric_head(strip_range_prefix(v)).0;
     let mut parts = numeric.split('.');
     let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let patch = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    (major, minor, patch)
+    (major, minor)
 }
 
 /// Colorize a version string based on bump type.
@@ -153,7 +152,7 @@ pub fn render_footer(path: &str, upgrading: bool, has_updates: bool, use_color: 
 #[must_use]
 pub fn render_json(updates: &[PlannedUpdate]) -> String {
     let mut map = serde_json::Map::new();
-    for update in dedupe_updates(updates) {
+    for update in updates {
         map.insert(
             update.name.clone(),
             serde_json::Value::String(update.to.clone()),
@@ -295,10 +294,9 @@ mod tests {
     #[test]
     fn test_parse_version_parts_with_prerelease() {
         // "3-beta.1" should parse major=3
-        let (major, minor, patch) = parse_version_parts("3.0.0-beta.1");
+        let (major, minor) = parse_version_parts("3.0.0-beta.1");
         assert_eq!(major, 3);
         assert_eq!(minor, 0);
-        assert_eq!(patch, 0);
     }
 
     #[test]

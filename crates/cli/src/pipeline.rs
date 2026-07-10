@@ -294,11 +294,13 @@ fn is_plain_numeric_version(version: &str) -> bool {
 /// Returns a borrowed reference when no truncation is needed (segments == 0
 /// or already at/below precision), or an owned string when truncation occurs.
 ///
-/// `truncate_version("1.2.3`", 2)             → "1.2"
-/// `truncate_version("1.2.3`", 3)             → "1.2.3"
-/// `truncate_version("1.2.3+build.1`", 3)     → "1.2.3"
-/// truncate_version("1.2.3-rc.1", 3)        → "1.2.3-rc.1"
-/// truncate_version("1.2.3-rc.1", 2)        → "1.2"
+/// ```text
+/// truncate_version("1.2.3", 2)           → "1.2"
+/// truncate_version("1.2.3", 3)           → "1.2.3"
+/// truncate_version("1.2.3+build.1", 3)   → "1.2.3"
+/// truncate_version("1.2.3-rc.1", 3)      → "1.2.3-rc.1"
+/// truncate_version("1.2.3-rc.1", 2)      → "1.2"
+/// ```
 fn truncate_version(version: &str, segments: usize) -> Cow<'_, str> {
     // Strip build metadata unconditionally (`+...`)
     let stripped = strip_build_metadata(version);
