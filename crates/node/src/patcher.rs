@@ -10,7 +10,7 @@ use dependency_check_updates_core::{DependencySection, PlannedUpdate};
 use crate::parser::DEPENDENCY_SECTIONS;
 
 /// A located version string within the JSON text.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct VersionLocation {
     /// The dependency section this belongs to.
     pub section: DependencySection,

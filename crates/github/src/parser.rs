@@ -12,7 +12,7 @@
 use dependency_check_updates_core::{DependencySection, DependencySpec};
 
 /// A located `uses:` directive in the workflow text.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct UsesLocation {
     /// `owner/repo` or `owner/repo/sub/path` — preserved verbatim from the
     /// source so output matches what the user wrote.

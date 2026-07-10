@@ -34,7 +34,7 @@ const MAX_CONCURRENT_REQUESTS: usize = 5;
 const TAGS_PER_PAGE: u32 = 100;
 
 /// One tag entry from the GitHub API.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 struct Tag {
     name: String,
 }
