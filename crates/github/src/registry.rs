@@ -63,7 +63,7 @@ impl PreparedTags {
         // per tag. The previous form delegated to `normalize_tag` AND
         // `tag_numeric_str`, which each repeated `is_version_ref` + the
         // `v`-strip — paying that cost twice per tag. The two helpers
-        // are kept intact for their other callers (`parse_current_ref`
+        // are kept intact for their other callers (`select_from_tags`
         // and `pick_existing_ref` respectively).
         // Capture the length before consuming `tags` in the loop below so we
         // can pre-size both output collections and avoid grow-path reallocs.

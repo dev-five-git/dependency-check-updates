@@ -20,7 +20,7 @@ path = "src/lib.rs"
 dependency-check-updates-core.workspace = true
 reqwest.workspace = true
 serde.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 node-semver.workspace = true
 tracing.workspace = true
 futures.workspace = true
