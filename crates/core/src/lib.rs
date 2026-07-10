@@ -19,7 +19,7 @@ pub mod version;
 pub use error::DcuError;
 pub use http::{DEFAULT_MAX_CONCURRENT_REQUESTS, build_client, resolve_batch_concurrent};
 pub use manifest::{ManifestHandler, ParsedManifest, Scanner};
-pub use patch::{Patch, PatchError as BytePatchError, apply_byte_patches};
+pub use patch::{Patch, apply_byte_patches};
 pub use toml_decor::replace_string_preserving_decor;
 pub use types::{
     BumpType, DependencySection, DependencySpec, ManifestKind, ManifestRef, PlannedUpdate,

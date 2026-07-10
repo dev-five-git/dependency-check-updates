@@ -72,15 +72,15 @@ fn is_version_spec(value: &str) -> bool {
     if matches!(trimmed, "latest" | "*" | "x" | "X" | "") {
         return false;
     }
-    !value.starts_with("workspace:")
-        && !value.starts_with("npm:")
-        && !value.starts_with("git+")
-        && !value.starts_with("git:")
-        && !value.starts_with("github:")
-        && !value.starts_with("http:")
-        && !value.starts_with("https:")
-        && !value.starts_with("file:")
-        && !value.starts_with("link:")
+    !trimmed.starts_with("workspace:")
+        && !trimmed.starts_with("npm:")
+        && !trimmed.starts_with("git+")
+        && !trimmed.starts_with("git:")
+        && !trimmed.starts_with("github:")
+        && !trimmed.starts_with("http:")
+        && !trimmed.starts_with("https:")
+        && !trimmed.starts_with("file:")
+        && !trimmed.starts_with("link:")
 }
 
 /// Errors from package.json parsing.
@@ -270,6 +270,21 @@ mod tests {
   "dependencies": {
     "tarball-pkg": "https://example.com/pkg.tgz",
     "http-pkg": "http://example.com/pkg.tgz",
+    "react": "^18.0.0"
+  }
+}"#,
+        "react"
+    )]
+    #[case::whitespace_led_protocols(
+        r#"{
+  "dependencies": {
+    "ws-workspace": " workspace:*",
+    "ws-npm": "  npm:react@^18.0.0",
+    "ws-git": "   git+https://github.com/user/repo.git",
+    "ws-github": " github:user/repo",
+    "ws-http": "  https://example.com/pkg.tgz",
+    "ws-file": " file:../local",
+    "ws-link": "  link:../linked",
     "react": "^18.0.0"
   }
 }"#,

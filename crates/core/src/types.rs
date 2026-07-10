@@ -34,17 +34,14 @@ impl ManifestKind {
             "pyproject.toml" => Some(Self::PyProjectToml),
             "action.yml" | "action.yaml" => Some(Self::GitHubWorkflow),
             _ => {
+                let parent = path.parent();
                 // Workflow YAMLs live in `.github/workflows/`.
                 if matches!(
                     path.extension().and_then(|s| s.to_str()),
                     Some("yml" | "yaml")
-                ) && path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|s| s.to_str())
+                ) && parent.and_then(|p| p.file_name()).and_then(|s| s.to_str())
                     == Some("workflows")
-                    && path
-                        .parent()
+                    && parent
                         .and_then(std::path::Path::parent)
                         .and_then(|p| p.file_name())
                         .and_then(|s| s.to_str())

@@ -119,7 +119,7 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
     // 2. Parse all manifests and collect deps (sync — fast, no I/O wait)
     let mut manifest_jobs: Vec<ManifestJob> = Vec::new();
 
-    for manifest_ref in &manifests {
+    for manifest_ref in manifests {
         let text = std::fs::read_to_string(&manifest_ref.path).map_err(|e| DcuError::Io {
             path: manifest_ref.path.clone(),
             source: e,
@@ -157,7 +157,7 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
         }
 
         manifest_jobs.push(ManifestJob {
-            manifest_ref: manifest_ref.clone(),
+            manifest_ref,
             display_path,
             text,
             handler,
