@@ -192,15 +192,13 @@ fn find_section_bounds(text: &str, section_key: &str) -> Option<(usize, usize)> 
 /// Searches for `"key"` as a JSON key (followed by `:`), starting from `from`.
 fn find_json_key_position(text: &str, key: &str, from: usize) -> Option<usize> {
     let needle = format!("\"{key}\"");
-    let bytes = text.as_bytes();
-    let needle_bytes = needle.as_bytes();
     let mut pos = from;
 
-    while pos + needle_bytes.len() <= bytes.len() {
+    while pos + needle.len() <= text.len() {
         if let Some(found) = text[pos..].find(&needle) {
             let abs_pos = pos + found;
             // Verify this is a key (followed by optional whitespace then `:`)
-            let after = abs_pos + needle_bytes.len();
+            let after = abs_pos + needle.len();
             if let Some(colon_pos) = find_char_skipping_whitespace(text, ':', after) {
                 if colon_pos < text.len() {
                     return Some(abs_pos);
