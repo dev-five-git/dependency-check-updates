@@ -1,5 +1,6 @@
 //! npm registry client for looking up package versions.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
@@ -110,11 +111,11 @@ impl NpmRegistry {
     ///
     /// Scoped packages like `@scope/name` need the `/` encoded as `%2F`.
     #[must_use]
-    pub fn encode_package_name(name: &str) -> String {
+    pub fn encode_package_name(name: &str) -> Cow<'_, str> {
         if name.starts_with('@') {
-            name.replacen('/', "%2F", 1)
+            Cow::Owned(name.replacen('/', "%2F", 1))
         } else {
-            name.to_owned()
+            Cow::Borrowed(name)
         }
     }
 
@@ -395,7 +396,7 @@ mod tests {
     #[case::scoped_types("@types/react", "@types%2Freact")]
     #[case::scoped_babel("@babel/core", "@babel%2Fcore")]
     fn encode_package_name_cases(#[case] input: &str, #[case] expected: &str) {
-        assert_eq!(NpmRegistry::encode_package_name(input), expected);
+        assert_eq!(NpmRegistry::encode_package_name(input).as_ref(), expected);
     }
 
     #[rstest]

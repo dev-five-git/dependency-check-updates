@@ -287,16 +287,11 @@ impl GitHubActionsRegistry {
         }
 
         // Step 2: fan out fetches in parallel.
-        let mut fetch_futures = Vec::with_capacity(unique_repos.len());
-        for repo in unique_repos {
-            let me = self.clone();
-            fetch_futures.push(async move {
-                let result = me.fetch_tags(&repo).await;
-                (repo, result)
-            });
-        }
-
-        let fetched = futures::future::join_all(fetch_futures).await;
+        let fetched = futures::future::join_all(unique_repos.into_iter().map(|repo| async move {
+            let result = self.fetch_tags(&repo).await;
+            (repo, result)
+        }))
+        .await;
         // Build prepared tag data ONCE per unique repo (parse + sort +
         // highest-stable). A workflow that uses the same repo across N jobs
         // now pays this cost once instead of N times.

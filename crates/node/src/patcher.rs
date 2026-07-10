@@ -199,10 +199,8 @@ fn find_json_key_position(text: &str, key: &str, from: usize) -> Option<usize> {
             let abs_pos = pos + found;
             // Verify this is a key (followed by optional whitespace then `:`)
             let after = abs_pos + needle.len();
-            if let Some(colon_pos) = find_char_skipping_whitespace(text, ':', after) {
-                if colon_pos < text.len() {
-                    return Some(abs_pos);
-                }
+            if find_char_skipping_whitespace(text, ':', after).is_some() {
+                return Some(abs_pos);
             }
             pos = abs_pos + 1;
         } else {
