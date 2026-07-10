@@ -37,6 +37,15 @@ fn parse_version_parts(v: &str) -> (u64, u64) {
     (major, minor)
 }
 
+/// Whether colored output is enabled given the raw `NO_COLOR` value.
+///
+/// Follows <https://no-color.org>: color is disabled only when `NO_COLOR`
+/// is present with a *non-empty* value. Unset or empty keeps color on.
+#[must_use]
+pub fn color_enabled(no_color: Option<std::ffi::OsString>) -> bool {
+    no_color.is_none_or(|value| value.is_empty())
+}
+
 /// Colorize a version string based on bump type.
 fn colorize_version(version: &str, bump: BumpType, use_color: bool) -> String {
     if !use_color {
@@ -70,11 +79,11 @@ pub fn render_table(updates: &[PlannedUpdate], use_color: bool) -> String {
     let unique = dedupe_updates(updates);
 
     // Calculate column widths against the deduped set so columns stay tight.
-    let (max_name, max_from, max_to) = unique
-        .iter()
-        .fold((0usize, 0usize, 0usize), |(n, f, t), u| {
-            (n.max(u.name.len()), f.max(u.from.len()), t.max(u.to.len()))
-        });
+    // The final `to` column is never padded — padding it only adds trailing
+    // whitespace since nothing follows it on the line.
+    let (max_name, max_from) = unique.iter().fold((0usize, 0usize), |(n, f), u| {
+        (n.max(u.name.len()), f.max(u.from.len()))
+    });
 
     let mut output = String::new();
 
@@ -84,13 +93,12 @@ pub fn render_table(updates: &[PlannedUpdate], use_color: bool) -> String {
 
         let _ = writeln!(
             output,
-            " {:<name_w$}  {:>from_w$}  ->  {:<to_w$}",
+            " {:<name_w$}  {:>from_w$}  ->  {}",
             update.name,
             update.from,
             colored_to,
             name_w = max_name,
             from_w = max_from,
-            to_w = max_to,
         );
     }
 
@@ -187,6 +195,15 @@ mod tests {
             from: from.to_owned(),
             to: to.to_owned(),
         }
+    }
+
+    #[rstest]
+    // no-color.org: only a *non-empty* NO_COLOR value disables color.
+    #[case::unset(None, true)]
+    #[case::empty(Some(std::ffi::OsString::new()), true)]
+    #[case::non_empty(Some(std::ffi::OsString::from("1")), false)]
+    fn color_enabled_cases(#[case] no_color: Option<std::ffi::OsString>, #[case] expected: bool) {
+        assert_eq!(color_enabled(no_color), expected);
     }
 
     #[rstest]
@@ -333,6 +350,20 @@ mod tests {
         assert_eq!(occurrences, 2, "got: {output}");
         assert!(output.contains("v4"));
         assert!(output.contains("v5"));
+    }
+
+    #[test]
+    fn test_render_table_rows_have_no_trailing_spaces() {
+        // Destination versions of different lengths: padding the last column
+        // to the widest `to` would leave trailing spaces on the shorter row.
+        let updates = vec![
+            upd("react", "^17.0.0", "^18.2.0"),
+            upd("lodash", "^4.17.0", "^4.17.21"),
+        ];
+        let output = render_table(&updates, false);
+        for line in output.lines() {
+            assert!(!line.ends_with(' '), "line has trailing space(s): {line:?}");
+        }
     }
 
     #[test]

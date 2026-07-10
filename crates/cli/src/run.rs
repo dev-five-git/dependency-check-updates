@@ -93,7 +93,7 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
 
     init_tracing(cli.verbose);
 
-    let use_color = std::env::var("NO_COLOR").is_err();
+    let use_color = output::color_enabled(std::env::var_os("NO_COLOR"));
     let root = std::env::current_dir().map_err(|e| DcuError::Io {
         path: PathBuf::from("."),
         source: e,
