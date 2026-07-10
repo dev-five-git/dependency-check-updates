@@ -15,7 +15,6 @@ categories.workspace = true
 [dependencies]
 thiserror.workspace = true
 miette.workspace = true
-serde.workspace = true
 ignore.workspace = true
 tracing.workspace = true
 reqwest.workspace = true

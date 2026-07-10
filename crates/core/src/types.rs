@@ -2,7 +2,6 @@
 //! dependency sections, version targets, and the parsed/resolved/planned
 //! value objects that flow through the scan → resolve → patch pipeline.
 
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// The kind of package manifest file.
@@ -81,8 +80,7 @@ pub struct ManifestRef {
 }
 
 /// Which dependency section a dependency belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DependencySection {
     /// Node.js `dependencies` and Poetry `[tool.poetry.dependencies]`.
     Dependencies,
@@ -126,7 +124,7 @@ impl std::fmt::Display for DependencySection {
 }
 
 /// A dependency found in a manifest file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct DependencySpec {
     /// Package name as written in the manifest.
     pub name: String,

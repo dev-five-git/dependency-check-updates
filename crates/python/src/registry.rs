@@ -53,7 +53,7 @@ struct PyPiFile {
 /// `(Version, &str)` tuple `Vec` the old code paid for on every non-Newest
 /// lookup.
 fn is_usable_release(files: &[PyPiFile]) -> bool {
-    !files.is_empty() && files.iter().any(|f| !f.yanked)
+    files.iter().any(|f| !f.yanked)
 }
 
 impl PyPiRegistry {
