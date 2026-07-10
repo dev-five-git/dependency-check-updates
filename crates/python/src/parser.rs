@@ -47,15 +47,11 @@ impl PyProjectManifest {
                 .get("optional-dependencies")
                 .and_then(Item::as_table)
             {
-                for (_group, items) in opt_deps {
-                    if let Some(arr) = items.as_array() {
-                        collect_pep508_array(
-                            arr,
-                            DependencySection::OptionalDependencies,
-                            &mut deps,
-                        );
-                    }
-                }
+                collect_pep508_array_table(
+                    opt_deps,
+                    DependencySection::OptionalDependencies,
+                    &mut deps,
+                );
             }
         }
 
@@ -78,11 +74,7 @@ impl PyProjectManifest {
 
         // PEP 735: [dependency-groups]
         if let Some(groups) = doc.get("dependency-groups").and_then(Item::as_table) {
-            for (_group_name, items) in groups {
-                if let Some(arr) = items.as_array() {
-                    collect_pep508_array(arr, DependencySection::DevDependencies, &mut deps);
-                }
-            }
+            collect_pep508_array_table(groups, DependencySection::DevDependencies, &mut deps);
         }
 
         deps
@@ -190,6 +182,20 @@ fn collect_pep508_array(
             if let Some(dep) = parse_pep508_spec(spec_str, section) {
                 deps.push(dep);
             }
+        }
+    }
+}
+
+/// Iterate a table of PEP 508 arrays (e.g., `[project.optional-dependencies]`
+/// or `[dependency-groups]`), calling `collect_pep508_array` for each array value.
+fn collect_pep508_array_table(
+    table: &toml_edit::Table,
+    section: DependencySection,
+    deps: &mut Vec<DependencySpec>,
+) {
+    for (_group, items) in table {
+        if let Some(arr) = items.as_array() {
+            collect_pep508_array(arr, section, deps);
         }
     }
 }
