@@ -138,7 +138,7 @@ impl PyPiRegistry {
 
         // PyPI's `info.version` is the canonical latest stable; it doubles as
         // the fallback for `Latest`/empty-list and unparseable `Minor`/`Patch`.
-        let latest = Some(info.info.version.clone());
+        let latest = Some(info.info.version);
 
         // Detect if the user's current requirement is a prerelease. When it
         // is, we cannot use the `info.version` fast path because the user may
