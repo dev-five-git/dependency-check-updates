@@ -18,8 +18,8 @@ use tokio::sync::Semaphore;
 use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
-    DcuError, DependencySpec, ResolvedVersion, TargetLevel, build_client, pad_to_three_segments,
-    split_numeric_head,
+    DcuError, DependencySpec, ResolvedVersion, TargetLevel, build_client, count_numeric_segments,
+    pad_to_three_segments, split_numeric_head,
 };
 
 use crate::parser::is_version_ref;
@@ -92,11 +92,7 @@ impl PreparedTags {
         // auxiliary buffer for the same observable ordering. See
         // 0007-analyze.md F2.
         sorted_versions.sort_unstable();
-        let highest_stable = sorted_versions
-            .iter()
-            .rev()
-            .find(|v| v.pre_release.is_empty())
-            .map(node_semver::Version::to_string);
+        let highest_stable = dependency_check_updates_core::highest_stable(&sorted_versions);
         Self {
             sorted_versions,
             highest_stable,
@@ -483,13 +479,7 @@ fn tag_numeric_str(tag: &str) -> Option<&str> {
 /// Count the segment precision of the user's current ref (`v7` → 1,
 /// `v7.6` → 2, `v7.6.0` → 3). Always at least 1.
 fn ref_precision(req: &str) -> usize {
-    let stripped = req.strip_prefix('v').unwrap_or(req);
-    split_numeric_head(stripped)
-        .0
-        .split('.')
-        .filter(|s| !s.is_empty())
-        .count()
-        .max(1)
+    count_numeric_segments(req.strip_prefix('v').unwrap_or(req)).max(1)
 }
 
 /// Collapse a resolved full version to the shortest tag form that an actual

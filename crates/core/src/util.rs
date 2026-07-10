@@ -52,6 +52,16 @@ pub fn split_numeric_head(v: &str) -> (&str, &str) {
     v.split_at(i)
 }
 
+/// Count non-empty dot-separated segments in the numeric head of a version.
+#[must_use]
+pub fn count_numeric_segments(v: &str) -> usize {
+    split_numeric_head(v)
+        .0
+        .split('.')
+        .filter(|s| !s.is_empty())
+        .count()
+}
+
 /// Pad a numeric version prefix to exactly three segments while preserving any
 /// pre-release / build-metadata suffix.
 ///
@@ -149,5 +159,15 @@ mod tests {
         #[case] expected_rest: &str,
     ) {
         assert_eq!(split_numeric_head(input), (expected_numeric, expected_rest));
+    }
+
+    #[rstest]
+    #[case::empty("", 0)]
+    #[case::simple("5", 1)]
+    #[case::dotted("1.2.3", 3)]
+    #[case::prefix("v5", 0)]
+    #[case::suffix("1.2.3-beta.1", 3)]
+    fn count_numeric_segments_cases(#[case] input: &str, #[case] expected: usize) {
+        assert_eq!(count_numeric_segments(input), expected);
     }
 }

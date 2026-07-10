@@ -75,6 +75,21 @@ impl SelectableVersion for pep440_rs::Version {
     }
 }
 
+/// Return the highest stable version from an ascending sorted version slice.
+///
+/// Registry clients use this for their shared "latest stable" fallback after
+/// filtering and sorting concrete ecosystem versions. Pre-release versions are
+/// skipped; returns `None` when the list is empty or contains only
+/// pre-releases.
+#[must_use]
+pub fn highest_stable<V: SelectableVersion>(sorted_asc: &[V]) -> Option<String> {
+    sorted_asc
+        .iter()
+        .rev()
+        .find(|v| !v.is_prerelease())
+        .map(ToString::to_string)
+}
+
 /// Select the best candidate for `target` from a pre-sorted (ascending)
 /// `all_versions` list.
 ///
@@ -310,6 +325,21 @@ mod tests {
             unparseable_minor_patch,
         );
         assert_eq!(selected, expected.map(ToOwned::to_owned));
+    }
+
+    #[rstest]
+    #[case::empty(&[], None)]
+    #[case::stable_prerelease_mix(
+        &["1.0.0", "2.0.0-alpha.1", "2.0.0", "3.0.0-rc.1"],
+        Some("2.0.0"),
+    )]
+    #[case::all_prerelease(&["1.0.0-alpha.1", "2.0.0-rc.1"], None)]
+    fn highest_stable_cases(#[case] version_strs: &[&str], #[case] expected: Option<&str>) {
+        let candidates = vers(version_strs);
+
+        let selected = highest_stable(&candidates);
+
+        assert_eq!(selected.as_deref(), expected);
     }
 
     #[test]

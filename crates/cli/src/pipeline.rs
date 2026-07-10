@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use tracing::{debug, trace, warn};
 
 use dependency_check_updates_core::{
-    DcuError, DependencySpec, ManifestKind, PlannedUpdate, ResolvedVersion, pad_to_three_segments,
-    split_numeric_head, strip_range_prefix,
+    DcuError, DependencySpec, ManifestKind, PlannedUpdate, ResolvedVersion, count_numeric_segments,
+    pad_to_three_segments, split_numeric_head, strip_range_prefix,
 };
 
 /// Filter dependencies by include/exclude patterns.
@@ -148,7 +148,7 @@ pub(crate) fn compute_updates(
         let selected_truncated: Cow<'_, str> = if kind == ManifestKind::GitHubWorkflow {
             Cow::Borrowed(selected)
         } else {
-            let precision = count_version_segments(current_bare);
+            let precision = count_numeric_segments(current_bare);
 
             if precision < 3 && !is_plain_numeric_version(selected) {
                 trace!(
@@ -202,7 +202,7 @@ fn sync_path_dep(dep: &DependencySpec, local_version: &str) -> Option<PlannedUpd
         return None;
     }
 
-    let precision = count_version_segments(current_bare);
+    let precision = count_numeric_segments(current_bare);
     let new_bare = if precision < 3 && is_plain_numeric_version(local_version) {
         truncate_version(local_version, precision)
     } else {
@@ -258,21 +258,6 @@ fn is_compound_range(current_bare: &str) -> bool {
         }
     }
     false
-}
-
-/// Count the number of version segments in a bare version string.
-///
-/// "1"      → 1 (major only)
-/// "1.0"    → 2 (major.minor)
-/// "1.0.0"  → 3 (major.minor.patch)
-/// "1.0.0-beta.1" → 3 (pre-release suffix ignored)
-fn count_version_segments(bare: &str) -> usize {
-    // Stop at the first non-digit, non-dot character (e.g., '-' for pre-release)
-    let numeric_part = split_numeric_head(bare).0;
-    if numeric_part.is_empty() {
-        return 0;
-    }
-    numeric_part.split('.').filter(|s| !s.is_empty()).count()
 }
 
 /// Whether `version` is a plain numeric version — one or more dot-separated
@@ -678,7 +663,7 @@ mod tests {
     #[case("1.0.0-beta.1", 3)]
     #[case("", 0)]
     fn count_version_segments_cases(#[case] input: &str, #[case] expected: usize) {
-        assert_eq!(count_version_segments(input), expected);
+        assert_eq!(count_numeric_segments(input), expected);
     }
 
     #[rstest]

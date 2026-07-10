@@ -146,11 +146,7 @@ impl CratesIoRegistry {
             "fetched version list"
         );
 
-        let latest = versions
-            .iter()
-            .rev()
-            .find(|v| v.pre.is_empty())
-            .map(std::string::ToString::to_string);
+        let latest = dependency_check_updates_core::highest_stable(&versions);
 
         let selected = if target == TargetLevel::Newest {
             // "Newest" = most recently published by date, which can differ from

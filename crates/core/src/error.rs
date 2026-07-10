@@ -66,7 +66,8 @@ pub enum DcuError {
     #[diagnostic(
         code(dependency_check_updates::no_manifest),
         help(
-            "run dependency-check-updates in a directory containing package.json, or use --manifest"
+            "run dependency-check-updates in a directory containing package.json, Cargo.toml, \
+             pyproject.toml, or .github/workflows/*.yml, or use --manifest"
         )
     )]
     NoManifest {
