@@ -9,7 +9,7 @@ use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client,
+    build_client, send_checked,
 };
 
 /// crates.io registry client.
@@ -70,23 +70,8 @@ impl CratesIoRegistry {
         let url = format!("{}/crates/{name}/versions", self.base_url);
         debug!(crate_name = name, %url, "fetching crate versions");
 
-        let response =
-            self.client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| DcuError::RegistryLookup {
-                    package: name.to_owned(),
-                    detail: e.to_string(),
-                })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            return Err(DcuError::RegistryLookup {
-                package: name.to_owned(),
-                detail: format!("HTTP {status}"),
-            });
-        }
+        let request = self.client.get(&url);
+        let response = send_checked(request, name).await?;
 
         let resp: CratesIoResponse =
             response

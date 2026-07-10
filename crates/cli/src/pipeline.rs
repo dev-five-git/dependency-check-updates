@@ -57,7 +57,7 @@ pub(crate) fn compute_updates(
     resolved: &[(usize, Result<ResolvedVersion, DcuError>)],
     kind: ManifestKind,
 ) -> Vec<PlannedUpdate> {
-    let mut updates = Vec::new();
+    let mut updates = Vec::with_capacity(resolved.len());
 
     for (idx, result) in resolved {
         let dep = &deps[*idx];

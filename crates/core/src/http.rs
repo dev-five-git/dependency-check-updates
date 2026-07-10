@@ -45,6 +45,42 @@ pub fn build_client() -> Client {
         .expect("failed to create HTTP client")
 }
 
+/// Send a pre-built request and verify the HTTP status in one step.
+///
+/// Centralises the two-step pattern that every registry repeats:
+///
+/// 1. `.send().await` — maps a network error to
+///    `DcuError::RegistryLookup { package, detail: e.to_string() }`.
+/// 2. `!response.status().is_success()` — maps a non-2xx status to
+///    `DcuError::RegistryLookup { package, detail: "HTTP <status>" }`.
+///
+/// URL construction, headers, and semaphore acquisition remain in each
+/// registry's own `fetch_*` method; only the send + status-check is shared.
+///
+/// # Errors
+///
+/// Returns `DcuError::RegistryLookup` on a network failure or a non-2xx
+/// HTTP status.
+pub async fn send_checked(
+    request: reqwest::RequestBuilder,
+    package: &str,
+) -> Result<reqwest::Response, DcuError> {
+    let response = request.send().await.map_err(|e| DcuError::RegistryLookup {
+        package: package.to_owned(),
+        detail: e.to_string(),
+    })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(DcuError::RegistryLookup {
+            package: package.to_owned(),
+            detail: format!("HTTP {status}"),
+        });
+    }
+
+    Ok(response)
+}
+
 /// Drive a batch of per-dependency resolutions concurrently while preserving
 /// the input ordering.
 ///

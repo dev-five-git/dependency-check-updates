@@ -10,7 +10,7 @@ use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, parse_and_select, strip_range_prefix,
+    build_client, parse_and_select, send_checked, strip_range_prefix,
 };
 
 /// `PyPI` registry client.
@@ -93,23 +93,8 @@ impl PyPiRegistry {
         let url = format!("{}/{normalized}/json", self.base_url);
         debug!(package = name, %url, "fetching PyPI package info");
 
-        let response =
-            self.client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| DcuError::RegistryLookup {
-                    package: name.to_owned(),
-                    detail: e.to_string(),
-                })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            return Err(DcuError::RegistryLookup {
-                package: name.to_owned(),
-                detail: format!("HTTP {status}"),
-            });
-        }
+        let request = self.client.get(&url);
+        let response = send_checked(request, name).await?;
 
         response.json().await.map_err(|e| DcuError::RegistryLookup {
             package: name.to_owned(),

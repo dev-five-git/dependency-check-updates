@@ -12,7 +12,7 @@ use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, strip_range_prefix,
+    build_client, send_checked, strip_range_prefix,
 };
 
 /// npm registry client for looking up package versions.
@@ -146,24 +146,8 @@ impl NpmRegistry {
             "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*"
         };
 
-        let response = self
-            .client
-            .get(&url)
-            .header("Accept", accept)
-            .send()
-            .await
-            .map_err(|e| DcuError::RegistryLookup {
-                package: name.to_owned(),
-                detail: e.to_string(),
-            })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            return Err(DcuError::RegistryLookup {
-                package: name.to_owned(),
-                detail: format!("HTTP {status}"),
-            });
-        }
+        let request = self.client.get(&url).header("Accept", accept);
+        let response = send_checked(request, name).await?;
 
         response.json().await.map_err(|e| DcuError::RegistryLookup {
             package: name.to_owned(),
