@@ -111,7 +111,7 @@ pub(crate) async fn cleanup_with_progress(targets: &[CleanupTarget]) -> String {
     }
 
     pb.finish_and_clear();
-    render_cleanup_summary(&removed, total_bytes)
+    render_cleanup_summary(&mut removed, total_bytes)
 }
 
 fn remove_target(target: &CleanupTarget) -> Option<Result<RemovalOutcome, io::Error>> {
@@ -157,10 +157,12 @@ fn dir_size(path: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-fn render_cleanup_summary(removed: &[RemovalOutcome], total_bytes: u64) -> String {
+fn render_cleanup_summary(removed: &mut [RemovalOutcome], total_bytes: u64) -> String {
     if removed.is_empty() {
         return String::new();
     }
+
+    removed.sort_by(|a, b| a.label.cmp(&b.label));
 
     let mut output = String::new();
     for outcome in removed {
@@ -240,5 +242,35 @@ mod tests {
                 .iter()
                 .any(|target| target.label == "package.json:package-lock.json")
         );
+    }
+
+    #[test]
+    fn render_cleanup_summary_sorts_removal_outcomes_lexicographically() {
+        // Given: removal outcomes in non-alphabetical order
+        let mut outcomes = vec![
+            RemovalOutcome {
+                label: "zebra.lock".to_owned(),
+                bytes: 1024,
+            },
+            RemovalOutcome {
+                label: "apple.lock".to_owned(),
+                bytes: 2048,
+            },
+            RemovalOutcome {
+                label: "middle.lock".to_owned(),
+                bytes: 512,
+            },
+        ];
+
+        // When: rendering the cleanup summary
+        let output = render_cleanup_summary(&mut outcomes, 3584);
+
+        // Then: the output lines are sorted lexicographically by label
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 4); // 3 removal lines + 1 total line
+        assert!(lines[0].contains("apple.lock"));
+        assert!(lines[1].contains("middle.lock"));
+        assert!(lines[2].contains("zebra.lock"));
+        assert!(lines[3].contains("Total removed"));
     }
 }

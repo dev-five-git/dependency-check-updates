@@ -241,17 +241,18 @@ fn is_compound_range(current_bare: &str) -> bool {
         return true;
     }
     // npm AND: a space whose left neighbour is a digit and whose right
-    // neighbour is a clause start (digit or one of `<>=~^!`) — or `-`, the
-    // npm hyphen-range continuation (`A.B.C - X.Y.Z`). Iterating bytes is
-    // safe because every character we test against is ASCII — a non-ASCII
-    // byte cannot equal `b' '` or be a digit / operator anyway.
+    // neighbour is a clause start (digit or one of `<>=~^!xX*`) — or `-`, the
+    // npm hyphen-range continuation (`A.B.C - X.Y.Z`). The x/X/* additions
+    // catch x-range (`1.2 x`) and wildcard (`1.0.0 *`) clause starts.
+    // Iterating bytes is safe because every character we test against is
+    // ASCII — a non-ASCII byte cannot equal `b' '` or be a digit / operator anyway.
     let bytes = current_bare.as_bytes();
     for i in 1..bytes.len().saturating_sub(1) {
         if bytes[i] == b' '
             && bytes[i - 1].is_ascii_digit()
             && matches!(
                 bytes[i + 1],
-                b'<' | b'>' | b'=' | b'~' | b'^' | b'!' | b'-' | b'0'..=b'9'
+                b'<' | b'>' | b'=' | b'~' | b'^' | b'!' | b'-' | b'x' | b'X' | b'*' | b'0'..=b'9'
             )
         {
             return true;
@@ -727,6 +728,9 @@ mod tests {
     #[case::npm_space_and_eq("18.0.0 =19.0.0", true)]
     #[case::npm_space_and_bang("18.0.0 !=19.0.0", true)]
     #[case::npm_space_and_digit("18.0.0 19.0.0", true)]
+    #[case::npm_space_and_lowercase_x("1.2 x 2.3 x", true)]
+    #[case::npm_space_and_uppercase_x("1.2 X 2.3 X", true)]
+    #[case::npm_space_and_wildcard("1.0.0 *", true)]
     // Single clauses — must NOT be classified as compound.
     #[case::single_full("1.2.3", false)]
     #[case::single_two("1.2", false)]
