@@ -42,6 +42,15 @@ fn rewrite_with_range_prefix(current_req: &str, current_bare: &str, new_bare: &s
     format!("{prefix}{new_bare}")
 }
 
+/// Strip build metadata (`+…` suffix) from a version string.
+///
+/// Build metadata has no meaning in version requirements and is dropped by
+/// both `truncate_version` and the safety gate in `is_plain_numeric_version`.
+/// This helper centralises the extraction so the three callers stay in sync.
+fn strip_build_metadata(v: &str) -> &str {
+    v.split_once('+').map_or(v, |(head, _)| head)
+}
+
 /// Compute planned updates from resolved versions.
 pub(crate) fn compute_updates(
     deps: &[DependencySpec],
@@ -191,10 +200,7 @@ fn sync_path_dep(dep: &DependencySpec, local_version: &str) -> Option<PlannedUpd
         truncate_version(local_version, precision)
     } else {
         // Full version: strip build metadata (`+...`), keep any pre-release.
-        local_version
-            .split_once('+')
-            .map_or(local_version, |(head, _)| head)
-            .to_owned()
+        strip_build_metadata(local_version).to_owned()
     };
 
     if current_bare == new_bare {
@@ -282,7 +288,7 @@ fn count_version_segments(bare: &str) -> usize {
 /// a prerelease to a stable-looking pin is exactly the surprise this gate
 /// guards against.
 fn is_plain_numeric_version(version: &str) -> bool {
-    let stripped = version.split_once('+').map_or(version, |(head, _)| head);
+    let stripped = strip_build_metadata(version);
     let mut any = false;
     for segment in stripped.split('.') {
         if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
@@ -306,7 +312,7 @@ fn is_plain_numeric_version(version: &str) -> bool {
 /// truncate_version("1.2.3-rc.1", 2)        → "1.2"
 fn truncate_version(version: &str, segments: usize) -> String {
     // Strip build metadata unconditionally (`+...`)
-    let stripped = version.split_once('+').map_or(version, |(head, _)| head);
+    let stripped = strip_build_metadata(version);
 
     if segments == 0 {
         return stripped.to_owned();

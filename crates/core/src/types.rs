@@ -84,13 +84,13 @@ pub struct ManifestRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DependencySection {
-    /// Node.js `dependencies`.
+    /// Node.js `dependencies` and Poetry `[tool.poetry.dependencies]`.
     Dependencies,
-    /// Node.js `devDependencies`.
+    /// Node.js `devDependencies`, Poetry `[tool.poetry.dev-dependencies]`, and PEP 735 `[dependency-groups]`.
     DevDependencies,
     /// Node.js `peerDependencies`.
     PeerDependencies,
-    /// Node.js `optionalDependencies`.
+    /// Node.js `optionalDependencies` and PEP 621 `[project.optional-dependencies]`.
     OptionalDependencies,
     /// Rust `[build-dependencies]`.
     BuildDependencies,
