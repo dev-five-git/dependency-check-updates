@@ -294,8 +294,10 @@ impl GitHubActionsRegistry {
         .await;
         // Build prepared tag data ONCE per unique repo (parse + sort +
         // highest-stable). A workflow that uses the same repo across N jobs
-        // now pays this cost once instead of N times.
-        let mut prepared_by_repo: HashMap<String, Result<PreparedTags, String>> = HashMap::new();
+        // now pays this cost once instead of N times. Pre-size to avoid
+        // reallocation as we insert each repo's prepared data.
+        let mut prepared_by_repo: HashMap<String, Result<PreparedTags, String>> =
+            HashMap::with_capacity(fetched.len());
         for (repo, result) in fetched {
             prepared_by_repo.insert(repo, result.map(PreparedTags::new));
         }

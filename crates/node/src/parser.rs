@@ -81,6 +81,9 @@ fn is_version_spec(value: &str) -> bool {
         && !trimmed.starts_with("https:")
         && !trimmed.starts_with("file:")
         && !trimmed.starts_with("link:")
+        && !trimmed.starts_with("catalog:")
+        && !trimmed.starts_with("portal:")
+        && !trimmed.starts_with("patch:")
 }
 
 /// Errors from package.json parsing.
@@ -287,6 +290,17 @@ mod tests {
     "ws-link": "  link:../linked",
     "react": "^18.0.0"
   }
+}"#,
+        "react"
+    )]
+    #[case::pnpm_catalog_yarn_portal_patch(
+        r#"{
+   "dependencies": {
+     "pnpm-dep": "catalog:react",
+     "yarn-portal": "portal:../local-pkg",
+     "yarn-patch": "patch:left-pad@1.0.0#./p.patch",
+     "react": "^18.0.0"
+   }
 }"#,
         "react"
     )]

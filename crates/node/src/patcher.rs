@@ -225,19 +225,6 @@ fn find_char_skipping_whitespace(text: &str, ch: char, from: usize) -> Option<us
         .map(|(i, _)| from + i)
 }
 
-/// Find the next `"` character after skipping whitespace, starting from `from`.
-fn find_next_quote(text: &str, from: usize) -> Option<usize> {
-    for (i, c) in text[from..].char_indices() {
-        if c == '"' {
-            return Some(from + i);
-        }
-        if !c.is_whitespace() {
-            return None; // Non-whitespace, non-quote character found
-        }
-    }
-    None
-}
-
 /// Find the next occurrence of `ch` outside of JSON strings, starting from `from`.
 fn find_char_skipping_strings(text: &str, ch: char, from: usize) -> Option<usize> {
     let bytes = text.as_bytes();
@@ -329,7 +316,7 @@ fn find_dep_value_position(
 
     // Find the opening quote of the value string after the colon.
     // Skip whitespace then expect `"`.
-    let value_quote_start = find_next_quote(text, colon_pos + 1)?;
+    let value_quote_start = find_char_skipping_whitespace(text, '"', colon_pos + 1)?;
 
     // The value content starts after the opening quote
     let value_start = value_quote_start + 1;
@@ -837,18 +824,6 @@ mod tests {
         #[case] expected: Option<usize>,
     ) {
         assert_eq!(find_char_skipping_whitespace(text, ch, from), expected);
-    }
-
-    #[rstest]
-    #[case::non_quote_char_first("abc\"", 0, None)]
-    #[case::leading_whitespace("  \"hello\"", 0, Some(2))]
-    #[case::empty_slice_from_end("abc", 3, None)]
-    fn find_next_quote_cases(
-        #[case] text: &str,
-        #[case] from: usize,
-        #[case] expected: Option<usize>,
-    ) {
-        assert_eq!(find_next_quote(text, from), expected);
     }
 
     #[rstest]

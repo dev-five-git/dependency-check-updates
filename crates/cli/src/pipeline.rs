@@ -94,6 +94,13 @@ pub(crate) fn compute_updates(
         // Strip range prefix for comparison
         let current_bare = strip_range_prefix(&dep.current_req);
 
+        // Skip requirements with no numeric version (e.g., pnpm `catalog:`,
+        // yarn `portal:`, a stray `^`). These have no resolvable version and
+        // would corrupt the manifest if rewritten (e.g., `catalog:` → `catalog:18.2.0`).
+        if current_bare.is_empty() {
+            continue;
+        }
+
         // Compound ranges (`^17 || ^18`, `>=1.0, <2.0`, `>=18 <19`) carry
         // multiple clauses; the prefix-reuse rewrite below would keep only
         // the first clause and silently drop the rest, violating the
@@ -288,15 +295,9 @@ fn count_version_segments(bare: &str) -> usize {
 /// a prerelease to a stable-looking pin is exactly the surprise this gate
 /// guards against.
 fn is_plain_numeric_version(version: &str) -> bool {
-    let stripped = strip_build_metadata(version);
-    let mut any = false;
-    for segment in stripped.split('.') {
-        if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
-            return false;
-        }
-        any = true;
-    }
-    any
+    strip_build_metadata(version)
+        .split('.')
+        .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Truncate a version string to the given number of segments.
@@ -446,6 +447,10 @@ mod tests {
         "1.5.0",
         Some(">= 1.5.0")
     )]
+    // pnpm `catalog:` protocol has no numeric version; `strip_range_prefix`
+    // returns empty string. The guard must skip this to avoid corrupting the
+    // manifest (e.g., `"catalog:"` → `"catalog:18.2.0"`).
+    #[case::skips_pnpm_catalog_protocol("catalog:", "18.2.0", "18.2.0", None)]
     fn compute_updates_single(
         #[case] current: &str,
         #[case] latest: &str,

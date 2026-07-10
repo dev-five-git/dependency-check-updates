@@ -310,6 +310,11 @@ fn parse_pep508_spec(spec: &str, section: DependencySection) -> Option<Dependenc
         return None; // No version constraint
     }
 
+    // Reject PEP 508 direct references (name @ url) — they have no resolvable version
+    if rest.starts_with('@') {
+        return None;
+    }
+
     if is_wildcard_req(rest) {
         return None; // `*`, `==*`, etc. already mean "any version"
     }
@@ -505,6 +510,7 @@ mod tests {
     #[case::empty_string("")]
     #[case::equals_wildcard("requests==*")]
     #[case::bare_star("requests *")]
+    #[case::direct_reference("requests @ https://example.com/requests-2.31.0.zip")]
     fn parse_pep508_spec_without_constraint_cases(#[case] spec: &str) {
         assert!(parse_pep508_spec(spec, DependencySection::ProjectDependencies).is_none());
     }
