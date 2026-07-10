@@ -160,7 +160,7 @@ pub(crate) fn compute_updates(
                 continue;
             }
 
-            Cow::Owned(truncate_version(selected, precision))
+            truncate_version(selected, precision)
         };
 
         if current_bare == selected_truncated.as_ref() {
@@ -203,11 +203,11 @@ fn sync_path_dep(dep: &DependencySpec, local_version: &str) -> Option<PlannedUpd
     }
 
     let precision = count_numeric_segments(current_bare);
-    let new_bare = if precision < 3 && is_plain_numeric_version(local_version) {
+    let new_bare: Cow<'_, str> = if precision < 3 && is_plain_numeric_version(local_version) {
         truncate_version(local_version, precision)
     } else {
         // Full version: strip build metadata (`+...`), keep any pre-release.
-        strip_build_metadata(local_version).to_owned()
+        Cow::Borrowed(strip_build_metadata(local_version))
     };
 
     if current_bare == new_bare {
@@ -291,17 +291,20 @@ fn is_plain_numeric_version(version: &str) -> bool {
 /// in version requirements and causes warnings in Cargo.toml. Pre-release
 /// suffix (`-beta.1`) is preserved when not truncating patch level.
 ///
+/// Returns a borrowed reference when no truncation is needed (segments == 0
+/// or already at/below precision), or an owned string when truncation occurs.
+///
 /// `truncate_version("1.2.3`", 2)             → "1.2"
 /// `truncate_version("1.2.3`", 3)             → "1.2.3"
 /// `truncate_version("1.2.3+build.1`", 3)     → "1.2.3"
 /// truncate_version("1.2.3-rc.1", 3)        → "1.2.3-rc.1"
 /// truncate_version("1.2.3-rc.1", 2)        → "1.2"
-fn truncate_version(version: &str, segments: usize) -> String {
+fn truncate_version(version: &str, segments: usize) -> Cow<'_, str> {
     // Strip build metadata unconditionally (`+...`)
     let stripped = strip_build_metadata(version);
 
     if segments == 0 {
-        return stripped.to_owned();
+        return Cow::Borrowed(stripped);
     }
 
     // Bare numeric `1.2.3` head — any non-digit, non-dot byte ends the
@@ -312,7 +315,7 @@ fn truncate_version(version: &str, segments: usize) -> String {
     if numeric.split('.').count() <= segments {
         // Already at or below desired precision — return `stripped` so any
         // pre-release tail survives unchanged.
-        return stripped.to_owned();
+        return Cow::Borrowed(stripped);
     }
 
     // Truncating: build the result directly from the numeric head without
@@ -325,7 +328,7 @@ fn truncate_version(version: &str, segments: usize) -> String {
         }
         out.push_str(part);
     }
-    out
+    Cow::Owned(out)
 }
 
 #[cfg(test)]
