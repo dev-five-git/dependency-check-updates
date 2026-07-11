@@ -173,26 +173,55 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
         total_deps, "resolving all versions concurrently"
     );
 
-    let npm_registry = NpmRegistry::new();
-    let crates_registry = CratesIoRegistry::new();
-    let pypi_registry = PyPiRegistry::new();
-    let github_registry = GitHubActionsRegistry::new();
+    // Construct each registry only when at least one non-empty job of the
+    // matching kind exists, so a scan touching only (say) Cargo.toml never
+    // builds the npm/PyPI/GitHub HTTP clients. Each registry is still created
+    // at most once and shared by reference across every manifest of its kind.
+    let npm_registry = manifest_jobs
+        .iter()
+        .any(|job| !job.deps.is_empty() && job.manifest_ref.kind == ManifestKind::PackageJson)
+        .then(NpmRegistry::new);
+    let crates_registry = manifest_jobs
+        .iter()
+        .any(|job| !job.deps.is_empty() && job.manifest_ref.kind == ManifestKind::CargoToml)
+        .then(CratesIoRegistry::new);
+    let pypi_registry = manifest_jobs
+        .iter()
+        .any(|job| !job.deps.is_empty() && job.manifest_ref.kind == ManifestKind::PyProjectToml)
+        .then(PyPiRegistry::new);
+    let github_registry = manifest_jobs
+        .iter()
+        .any(|job| !job.deps.is_empty() && job.manifest_ref.kind == ManifestKind::GitHubWorkflow)
+        .then(GitHubActionsRegistry::new);
 
     let mut resolve_futures = Vec::new();
     for (job_idx, job) in manifest_jobs.iter().enumerate() {
         if !job.deps.is_empty() {
-            let npm = &npm_registry;
-            let crates_io = &crates_registry;
-            let pypi = &pypi_registry;
-            let github = &github_registry;
+            let npm = npm_registry.as_ref();
+            let crates_io = crates_registry.as_ref();
+            let pypi = pypi_registry.as_ref();
+            let github = github_registry.as_ref();
             resolve_futures.push(async move {
+                // The gating above guarantees the registry matching this job's
+                // kind is `Some`; the `None` arms are unreachable for a
+                // non-empty job and return an empty batch without panicking.
                 let resolved = match job.manifest_ref.kind {
-                    ManifestKind::PackageJson => npm.resolve_batch(&job.deps, cli.target).await,
-                    ManifestKind::CargoToml => crates_io.resolve_batch(&job.deps, cli.target).await,
-                    ManifestKind::PyProjectToml => pypi.resolve_batch(&job.deps, cli.target).await,
-                    ManifestKind::GitHubWorkflow => {
-                        github.resolve_batch(&job.deps, cli.target).await
-                    }
+                    ManifestKind::PackageJson => match npm {
+                        Some(npm) => npm.resolve_batch(&job.deps, cli.target).await,
+                        None => Vec::new(),
+                    },
+                    ManifestKind::CargoToml => match crates_io {
+                        Some(crates_io) => crates_io.resolve_batch(&job.deps, cli.target).await,
+                        None => Vec::new(),
+                    },
+                    ManifestKind::PyProjectToml => match pypi {
+                        Some(pypi) => pypi.resolve_batch(&job.deps, cli.target).await,
+                        None => Vec::new(),
+                    },
+                    ManifestKind::GitHubWorkflow => match github {
+                        Some(github) => github.resolve_batch(&job.deps, cli.target).await,
+                        None => Vec::new(),
+                    },
                 };
                 (job_idx, resolved)
             });

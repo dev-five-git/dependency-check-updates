@@ -61,6 +61,24 @@ impl PackageJsonManifest {
     }
 }
 
+const SKIP_PREFIXES: &[&str] = &[
+    "workspace:",
+    "npm:",
+    "git+",
+    "git:",
+    "github:",
+    "bitbucket:",
+    "gitlab:",
+    "gist:",
+    "http:",
+    "https:",
+    "file:",
+    "link:",
+    "catalog:",
+    "portal:",
+    "patch:",
+];
+
 /// Check if a dependency value is a resolvable version spec.
 ///
 /// Filters out non-semver specifiers like workspace protocols, npm aliases,
@@ -72,21 +90,9 @@ fn is_version_spec(value: &str) -> bool {
     if matches!(trimmed, "latest" | "*" | "x" | "X" | "") {
         return false;
     }
-    !trimmed.starts_with("workspace:")
-        && !trimmed.starts_with("npm:")
-        && !trimmed.starts_with("git+")
-        && !trimmed.starts_with("git:")
-        && !trimmed.starts_with("github:")
-        && !trimmed.starts_with("bitbucket:")
-        && !trimmed.starts_with("gitlab:")
-        && !trimmed.starts_with("gist:")
-        && !trimmed.starts_with("http:")
-        && !trimmed.starts_with("https:")
-        && !trimmed.starts_with("file:")
-        && !trimmed.starts_with("link:")
-        && !trimmed.starts_with("catalog:")
-        && !trimmed.starts_with("portal:")
-        && !trimmed.starts_with("patch:")
+    !SKIP_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
 }
 
 /// Errors from package.json parsing.
