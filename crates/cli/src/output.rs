@@ -93,8 +93,12 @@ pub fn render_table(updates: &[PlannedUpdate], use_color: bool) -> String {
     let mut output = String::with_capacity(unique.len() * (max_name + max_from + 24));
 
     for update in &unique {
-        let bump = detect_bump_type(&update.from, &update.to);
-        let colored_to = colorize_version(&update.to, bump, use_color);
+        let colored_to = if use_color {
+            let bump = detect_bump_type(&update.from, &update.to);
+            colorize_version(&update.to, bump, true)
+        } else {
+            Cow::Borrowed(update.to.as_str())
+        };
 
         let _ = writeln!(
             output,
