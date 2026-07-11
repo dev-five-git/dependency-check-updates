@@ -167,11 +167,11 @@ impl NpmRegistry {
     ) -> Result<ResolvedVersion, DcuError> {
         // `newest` needs publish timestamps, which only the full packument
         // carries; every other target uses the cheaper abbreviated format.
-        let info = self
+        let mut info = self
             .fetch_package_info(&dep.name, target == TargetLevel::Newest)
             .await?;
 
-        let latest = info.dist_tags.as_ref().and_then(|dt| dt.latest.clone());
+        let latest = info.dist_tags.take().and_then(|dt| dt.latest);
 
         // Detect if the user's current requirement is a prerelease. When it is,
         // we cannot use the dist-tags.latest fast path because the user may be
