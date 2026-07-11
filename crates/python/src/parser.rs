@@ -248,11 +248,12 @@ fn collect_poetry_table(
 /// Faithful extraction of the existing PEP 621 main-array inner loop — same
 /// matching predicate, same decor preservation, no semantic drift.
 fn apply_to_pep508_array(arr: &mut toml_edit::Array, update: &PlannedUpdate) -> bool {
+    let update_name_norm = normalize_pep503(&update.name);
     for item in arr.iter_mut() {
         let Some(spec_str) = item.as_str() else {
             continue;
         };
-        if !spec_str_matches_name(spec_str, &update.name) {
+        if !spec_name_matches_normalized(spec_str, &update_name_norm) {
             continue;
         }
         let new_spec = replace_version_in_pep508(spec_str, &update.to);
@@ -328,11 +329,23 @@ fn parse_pep508_spec(spec: &str, section: DependencySection) -> Option<Dependenc
 }
 
 /// Check if a PEP 508 spec string matches a given package name.
+///
+/// Test-only convenience wrapper over [`spec_name_matches_normalized`];
+/// production call sites normalize the name once outside their loops.
+#[cfg(test)]
 fn spec_str_matches_name(spec: &str, name: &str) -> bool {
+    spec_name_matches_normalized(spec, &normalize_pep503(name))
+}
+
+/// Check if a PEP 508 spec string matches an already-PEP-503-normalized name.
+///
+/// Callers that compare one name against many specs should normalize the name
+/// once and use this directly, avoiding a loop-invariant allocation per spec.
+fn spec_name_matches_normalized(spec: &str, normalized_name: &str) -> bool {
     let (spec_name, _) = split_pep508_name(spec);
 
     // PEP 503 normalized comparison (case-insensitive, treat - _ . as equivalent)
-    normalize_pep503(spec_name) == normalize_pep503(name)
+    normalize_pep503(spec_name) == normalized_name
 }
 
 fn normalize_pep503(name: &str) -> String {

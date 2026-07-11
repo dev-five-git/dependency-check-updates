@@ -79,6 +79,19 @@ pub async fn run_cli() -> std::process::ExitCode {
     }
 }
 
+/// Construct a registry only when at least one non-empty job of the matching
+/// kind exists. Returns `Some(R)` if any job has non-empty deps and matching
+/// kind, otherwise `None`.
+fn registry_for<R>(
+    jobs: &[ManifestJob],
+    kind: ManifestKind,
+    make: impl FnOnce() -> R,
+) -> Option<R> {
+    jobs.iter()
+        .any(|job| !job.deps.is_empty() && job.manifest_ref.kind == kind)
+        .then(make)
+}
+
 /// Run the dependency-check-updates CLI with the given configuration.
 ///
 /// # Errors
@@ -177,22 +190,22 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
     // matching kind exists, so a scan touching only (say) Cargo.toml never
     // builds the npm/PyPI/GitHub HTTP clients. Each registry is still created
     // at most once and shared by reference across every manifest of its kind.
-    let npm_registry = manifest_jobs
-        .iter()
-        .any(|job| !job.deps.is_empty() && job.manifest_ref.kind == ManifestKind::PackageJson)
-        .then(NpmRegistry::new);
-    let crates_registry = manifest_jobs
-        .iter()
-        .any(|job| !job.deps.is_empty() && job.manifest_ref.kind == ManifestKind::CargoToml)
-        .then(CratesIoRegistry::new);
-    let pypi_registry = manifest_jobs
-        .iter()
-        .any(|job| !job.deps.is_empty() && job.manifest_ref.kind == ManifestKind::PyProjectToml)
-        .then(PyPiRegistry::new);
-    let github_registry = manifest_jobs
-        .iter()
-        .any(|job| !job.deps.is_empty() && job.manifest_ref.kind == ManifestKind::GitHubWorkflow)
-        .then(GitHubActionsRegistry::new);
+    let npm_registry = registry_for(&manifest_jobs, ManifestKind::PackageJson, NpmRegistry::new);
+    let crates_registry = registry_for(
+        &manifest_jobs,
+        ManifestKind::CargoToml,
+        CratesIoRegistry::new,
+    );
+    let pypi_registry = registry_for(
+        &manifest_jobs,
+        ManifestKind::PyProjectToml,
+        PyPiRegistry::new,
+    );
+    let github_registry = registry_for(
+        &manifest_jobs,
+        ManifestKind::GitHubWorkflow,
+        GitHubActionsRegistry::new,
+    );
 
     let mut resolve_futures = Vec::new();
     for (job_idx, job) in manifest_jobs.iter().enumerate() {
