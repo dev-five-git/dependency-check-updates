@@ -70,8 +70,8 @@ pub async fn send_checked(
         detail: e.to_string(),
     })?;
 
-    if !response.status().is_success() {
-        let status = response.status();
+    let status = response.status();
+    if !status.is_success() {
         return Err(DcuError::RegistryLookup {
             package: package.to_owned(),
             detail: format!("HTTP {status}"),

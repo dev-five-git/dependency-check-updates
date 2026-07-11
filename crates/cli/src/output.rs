@@ -85,7 +85,7 @@ pub fn render_table(updates: &[PlannedUpdate], use_color: bool) -> String {
         (n.max(u.name.len()), f.max(u.from.len()))
     });
 
-    let mut output = String::new();
+    let mut output = String::with_capacity(unique.len() * (max_name + max_from + 24));
 
     for update in &unique {
         let bump = detect_bump_type(&update.from, &update.to);
@@ -160,7 +160,7 @@ pub fn render_footer(path: &str, upgrading: bool, has_updates: bool, use_color: 
 /// `(name, from, to)` triples, use the table format and parse line-by-line.
 #[must_use]
 pub fn render_json(updates: &[PlannedUpdate]) -> String {
-    let mut map = serde_json::Map::new();
+    let mut map = serde_json::Map::with_capacity(updates.len());
     for update in updates {
         map.insert(
             update.name.clone(),

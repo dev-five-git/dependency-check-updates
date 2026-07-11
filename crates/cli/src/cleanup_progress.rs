@@ -80,7 +80,7 @@ pub(crate) async fn cleanup_with_progress(targets: &[CleanupTarget]) -> String {
     let mut removals = FuturesUnordered::new();
     for target in targets {
         let target = target.clone();
-        removals.push(tokio::task::spawn_blocking(move || remove_target(&target)));
+        removals.push(tokio::task::spawn_blocking(move || remove_target(target)));
     }
 
     let mut removed = Vec::with_capacity(targets.len());
@@ -114,7 +114,7 @@ pub(crate) async fn cleanup_with_progress(targets: &[CleanupTarget]) -> String {
     render_cleanup_summary(&mut removed, total_bytes)
 }
 
-fn remove_target(target: &CleanupTarget) -> Option<Result<RemovalOutcome, io::Error>> {
+fn remove_target(target: CleanupTarget) -> Option<Result<RemovalOutcome, io::Error>> {
     let bytes = match path_size(&target.path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
@@ -128,7 +128,7 @@ fn remove_target(target: &CleanupTarget) -> Option<Result<RemovalOutcome, io::Er
 
     match remove_result {
         Ok(()) => Some(Ok(RemovalOutcome {
-            label: target.label.clone(),
+            label: target.label,
             bytes,
         })),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
