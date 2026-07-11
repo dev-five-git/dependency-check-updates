@@ -1,5 +1,6 @@
 //! ncu-style table output with colored version diffs.
 
+use std::borrow::Cow;
 use std::fmt::Write;
 
 use dependency_check_updates_core::{
@@ -47,14 +48,18 @@ pub fn color_enabled(no_color: Option<std::ffi::OsString>) -> bool {
 }
 
 /// Colorize a version string based on bump type.
-fn colorize_version(version: &str, bump: BumpType, use_color: bool) -> String {
+///
+/// Returns a `Cow<'_, str>` to avoid allocation when color is disabled:
+/// - `!use_color` returns `Cow::Borrowed(version)` (zero-copy)
+/// - Colored paths return `Cow::Owned(...)` with ANSI escape codes
+fn colorize_version(version: &str, bump: BumpType, use_color: bool) -> Cow<'_, str> {
     if !use_color {
-        return version.to_owned();
+        return Cow::Borrowed(version);
     }
     match bump {
-        BumpType::Major => format!("{}", version.red()),
-        BumpType::Minor => format!("{}", version.cyan()),
-        BumpType::Patch => format!("{}", version.green()),
+        BumpType::Major => Cow::Owned(format!("{}", version.red())),
+        BumpType::Minor => Cow::Owned(format!("{}", version.cyan())),
+        BumpType::Patch => Cow::Owned(format!("{}", version.green())),
     }
 }
 
@@ -271,7 +276,7 @@ mod tests {
     #[case::major_with_color("^2.0.0", BumpType::Major, true, "2.0.0", false)]
     #[case::minor_with_color("^1.1.0", BumpType::Minor, true, "1.1.0", false)]
     #[case::patch_with_color("^1.0.1", BumpType::Patch, true, "1.0.1", false)]
-    // No color: the result must equal the input verbatim.
+    // No color: the result must equal the input verbatim (and be borrowed).
     #[case::no_color("^2.0.0", BumpType::Major, false, "^2.0.0", true)]
     fn colorize_version_cases(
         #[case] version: &str,
@@ -286,9 +291,15 @@ mod tests {
             "{result:?} should contain {expected_substr:?}"
         );
         if expect_equal_input {
-            assert_eq!(result, version);
+            assert_eq!(result.as_ref(), version);
+            // Verify the no-color path returns a borrowed Cow
+            assert!(matches!(result, Cow::Borrowed(_)));
         } else {
-            assert_ne!(result, version, "expected ANSI color codes to be applied");
+            assert_ne!(
+                result.as_ref(),
+                version,
+                "expected ANSI color codes to be applied"
+            );
         }
     }
 
