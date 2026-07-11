@@ -528,14 +528,15 @@ fn pick_existing_ref(selected: &str, current_req: &str, tag_numerics: &HashSet<S
     // longest shorter form. The resolved version always came from a real tag,
     // so some precision in this order always matches — the `expect` documents
     // that invariant and keeps the success line on the covered path.
-    let chosen = (start..=len)
+    (start..=len)
         .chain((1..start).rev())
-        .find(|&p| {
+        .find_map(|p| {
             let candidate = segments[..p].join(".");
-            tag_numerics.contains(candidate.as_str())
+            tag_numerics
+                .contains(candidate.as_str())
+                .then_some(candidate)
         })
-        .expect("resolved version is always backed by at least one tag");
-    segments[..chosen].join(".")
+        .expect("resolved version is always backed by at least one tag")
 }
 
 #[cfg(test)]
