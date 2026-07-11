@@ -17,6 +17,9 @@ pub(crate) fn filter_deps(
     include: &[String],
     exclude: &[String],
 ) -> Vec<DependencySpec> {
+    if include.is_empty() && exclude.is_empty() {
+        return deps;
+    }
     deps.into_iter()
         .filter(|dep| {
             if !include.is_empty() && !include.iter().any(|f| dep.name.contains(f.as_str())) {

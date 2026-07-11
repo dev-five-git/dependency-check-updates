@@ -797,8 +797,9 @@ mod tests {
     #[case::with_subdir("actions/checkout/sub/dir", Some("actions/checkout"))]
     #[case::single_segment("checkout", None)]
     #[case::empty_string("", None)]
-    // `splitn(3, '/')` yields empty strings for `foo/` and `/foo`; the
-    // empty-half guard must catch them to avoid `/repos/foo//tags` URLs.
+    // `find('/')` guards: leading slash `first == 0`, trailing slash
+    // `after >= name.len()`, empty repo segment `end == after`. These catch
+    // the edge cases to avoid `/repos/foo//tags` URLs.
     #[case::trailing_slash("foo/", None)]
     #[case::leading_slash("/foo", None)]
     #[case::just_slash("/", None)]
