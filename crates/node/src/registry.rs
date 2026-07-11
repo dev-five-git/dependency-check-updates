@@ -12,7 +12,7 @@ use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, send_checked, strip_range_prefix,
+    build_client, current_req_is_prerelease, send_checked,
 };
 
 /// npm registry client for looking up package versions.
@@ -179,7 +179,7 @@ impl NpmRegistry {
         // dist-tags.latest points at `1.1.20`), and we must consider the full
         // sorted version list to preserve the "prerelease tail" policy.
         let current_is_prerelease =
-            parse_base_version(&dep.current_req).is_some_and(|v| !v.pre_release.is_empty());
+            current_req_is_prerelease::<node_semver::Version>(&dep.current_req);
 
         // Fast path: Latest + current is stable → return dist-tags.latest directly.
         let selected = if target == TargetLevel::Latest && !current_is_prerelease {
@@ -297,16 +297,6 @@ fn extract_sorted_versions(info: &NpmPackageInfo) -> Vec<node_semver::Version> {
     parsed
 }
 
-/// Parse a base version from a requirement string.
-///
-/// Strips leading range operators: `^1.2.3` -> `1.2.3`, `~2.0.0` -> `2.0.0`,
-/// `>=1.0.0` -> `1.0.0`. Used by [`NpmRegistry::resolve_version`]'s
-/// prerelease-detection fast path; the strip→parse→select sequence for the
-/// slow path now lives in [`dependency_check_updates_core::parse_and_select`].
-fn parse_base_version(req_str: &str) -> Option<node_semver::Version> {
-    node_semver::Version::parse(strip_range_prefix(req_str)).ok()
-}
-
 #[cfg(test)]
 // rstest's `#[from(crypto_provider)] _crypto: ()` parameter resolves the
 // `crypto_provider` fixture in the macro-expanded body. The underscore is
@@ -381,27 +371,6 @@ mod tests {
     #[case::scoped_babel("@babel/core", "@babel%2Fcore")]
     fn encode_package_name_cases(#[case] input: &str, #[case] expected: &str) {
         assert_eq!(NpmRegistry::encode_package_name(input).as_ref(), expected);
-    }
-
-    #[rstest]
-    // Range prefix variants strip to the same `1.2.3` (or `1.0.0` for `>=`).
-    // `None` ⇒ the requirement has no parseable numeric prefix.
-    #[case::caret("^1.2.3", Some((1, 2, 3)))]
-    #[case::tilde("~1.2.3", Some((1, 2, 3)))]
-    #[case::gte(">=1.0.0", Some((1, 0, 0)))]
-    #[case::bare("1.2.3", Some((1, 2, 3)))]
-    #[case::star("*", None)]
-    fn parse_base_version_cases(#[case] input: &str, #[case] expected: Option<(u64, u64, u64)>) {
-        let result = parse_base_version(input);
-        match expected {
-            Some((major, minor, patch)) => {
-                let v = result.unwrap();
-                assert_eq!(v.major, major);
-                assert_eq!(v.minor, minor);
-                assert_eq!(v.patch, patch);
-            }
-            None => assert!(result.is_none()),
-        }
     }
 
     #[rstest]

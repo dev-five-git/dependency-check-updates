@@ -10,7 +10,7 @@ use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, parse_and_select, send_checked, strip_range_prefix,
+    build_client, current_req_is_prerelease, parse_and_select, send_checked,
 };
 
 /// `PyPI` registry client.
@@ -134,8 +134,7 @@ impl PyPiRegistry {
         // is treated as stable, matching the slow path's `current = None`
         // branch which also routes through `latest_for_stable = info.version`.
         let current_is_prerelease =
-            pep440_rs::Version::from_str(strip_range_prefix(&dep.current_req))
-                .is_ok_and(|v| v.any_prerelease());
+            current_req_is_prerelease::<pep440_rs::Version>(&dep.current_req);
 
         // Fast path: Latest + current is stable → return PyPI's canonical
         // `info.version` directly. The slow path's `parse_and_select` arm for

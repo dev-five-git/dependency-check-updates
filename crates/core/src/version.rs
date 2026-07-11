@@ -193,6 +193,25 @@ where
     select_version(current.as_ref(), all_versions, target, latest, latest)
 }
 
+/// Return `true` when the current requirement string resolves to a pre-release
+/// version after stripping any leading range operator.
+///
+/// Strips the range prefix with [`strip_range_prefix`], parses the remainder
+/// as `V`, and delegates to [`SelectableVersion::is_prerelease`]. Returns
+/// `false` for any input that cannot be parsed (e.g. `"*"` or `""`), matching
+/// the convention that an unparseable requirement is treated as stable.
+///
+/// Used by registry fast-paths that need to know whether the user's current
+/// pin is a pre-release before deciding whether to skip the full version-list
+/// enumeration.
+#[must_use]
+pub fn current_req_is_prerelease<V>(current_req: &str) -> bool
+where
+    V: SelectableVersion + FromStr,
+{
+    V::from_str(strip_range_prefix(current_req)).is_ok_and(|v| v.is_prerelease())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +359,48 @@ mod tests {
         let selected = highest_stable(&candidates);
 
         assert_eq!(selected.as_deref(), expected);
+    }
+
+    /// Coverage for [`current_req_is_prerelease`] against both `semver::Version`
+    /// (node/GitHub semantics: `!pre_release.is_empty()`) and `pep440_rs::Version`
+    /// (`PyPI` semantics: `any_prerelease()`). Unparseable inputs must return `false`.
+    #[rstest]
+    // semver::Version — stable inputs
+    #[case::semver_stable_bare("1.2.3", false)]
+    #[case::semver_stable_caret("^1.2.3", false)]
+    #[case::semver_stable_tilde("~2.0.0", false)]
+    #[case::semver_stable_gte(">=3.0.0", false)]
+    // semver::Version — prerelease inputs
+    #[case::semver_prerelease_bare("1.0.0-rc.1", true)]
+    #[case::semver_prerelease_caret("^2.0.0-beta.3", true)]
+    // semver::Version — unparseable (star, empty) → false
+    #[case::semver_unparseable_star("*", false)]
+    #[case::semver_unparseable_empty("", false)]
+    fn current_req_is_prerelease_semver_cases(#[case] input: &str, #[case] expected: bool) {
+        assert_eq!(
+            current_req_is_prerelease::<semver::Version>(input),
+            expected
+        );
+    }
+
+    #[rstest]
+    // pep440_rs::Version — stable inputs
+    #[case::pep440_stable_bare("1.2.3", false)]
+    #[case::pep440_stable_gte(">=2.0.0", false)]
+    // pep440_rs::Version — prerelease inputs (alpha, beta, rc, dev)
+    #[case::pep440_alpha("2.0.0a1", true)]
+    #[case::pep440_beta("1.0.0b2", true)]
+    #[case::pep440_rc("3.0.0rc1", true)]
+    #[case::pep440_dev("1.0.dev0", true)]
+    #[case::pep440_rc_with_prefix(">=2.0.0rc1", true)]
+    // pep440_rs::Version — unparseable → false
+    #[case::pep440_unparseable_star("*", false)]
+    #[case::pep440_unparseable_empty("", false)]
+    fn current_req_is_prerelease_pep440_cases(#[case] input: &str, #[case] expected: bool) {
+        assert_eq!(
+            current_req_is_prerelease::<pep440_rs::Version>(input),
+            expected
+        );
     }
 
     #[test]

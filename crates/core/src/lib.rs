@@ -30,4 +30,6 @@ pub use types::{
 pub use util::{
     count_numeric_segments, pad_to_three_segments, split_numeric_head, strip_range_prefix,
 };
-pub use version::{SelectableVersion, highest_stable, parse_and_select, select_version};
+pub use version::{
+    SelectableVersion, current_req_is_prerelease, highest_stable, parse_and_select, select_version,
+};
