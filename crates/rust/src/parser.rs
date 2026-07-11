@@ -215,6 +215,7 @@ enum DepKind {
 /// inline (`{ ... }`) and full-table (`[deps.x]`) representations.
 struct DepFields<'a> {
     workspace: bool,
+    git: bool,
     path: Option<&'a str>,
     version: Option<&'a str>,
 }
@@ -224,11 +225,13 @@ impl<'a> DepFields<'a> {
         match item {
             Item::Value(Value::InlineTable(t)) => Some(Self {
                 workspace: t.get("workspace").and_then(Value::as_bool).unwrap_or(false),
+                git: t.get("git").is_some(),
                 path: t.get("path").and_then(Value::as_str),
                 version: t.get("version").and_then(Value::as_str),
             }),
             Item::Table(t) => Some(Self {
                 workspace: t.get("workspace").and_then(Item::as_bool).unwrap_or(false),
+                git: t.get("git").is_some(),
                 path: t.get("path").and_then(Item::as_str),
                 version: t.get("version").and_then(Item::as_str),
             }),
@@ -257,6 +260,9 @@ fn classify_dependency(item: &Item, manifest_dir: Option<&Path>) -> Option<DepKi
 
     let fields = DepFields::from_item(item)?;
     if fields.workspace {
+        return None;
+    }
+    if fields.git {
         return None;
     }
 
@@ -448,6 +454,25 @@ tokio = "1.0"
         r#"
 [dependencies]
 my-fork = { git = "https://github.com/user/repo" }
+tokio = "1.0"
+"#,
+        &[("tokio", "1.0", DependencySection::Dependencies)]
+    )]
+    #[case::skip_git_deps_with_registry_fallback(
+        r#"
+[dependencies]
+local = { git = "https://github.com/user/repo", version = "1.0" }
+tokio = "1.0"
+"#,
+        &[("tokio", "1.0", DependencySection::Dependencies)]
+    )]
+    #[case::skip_git_deps_with_registry_fallback_full_table(
+        r#"
+[dependencies.local]
+git = "https://github.com/user/repo"
+version = "1.0"
+
+[dependencies]
 tokio = "1.0"
 "#,
         &[("tokio", "1.0", DependencySection::Dependencies)]

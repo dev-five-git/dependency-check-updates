@@ -77,6 +77,9 @@ fn is_version_spec(value: &str) -> bool {
         && !trimmed.starts_with("git+")
         && !trimmed.starts_with("git:")
         && !trimmed.starts_with("github:")
+        && !trimmed.starts_with("bitbucket:")
+        && !trimmed.starts_with("gitlab:")
+        && !trimmed.starts_with("gist:")
         && !trimmed.starts_with("http:")
         && !trimmed.starts_with("https:")
         && !trimmed.starts_with("file:")
@@ -301,6 +304,17 @@ mod tests {
      "yarn-patch": "patch:left-pad@1.0.0#./p.patch",
      "react": "^18.0.0"
    }
+}"#,
+        "react"
+    )]
+    #[case::npm_git_host_shortcuts(
+        r#"{
+    "dependencies": {
+      "bitbucket-fork": "bitbucket:user/repo",
+      "gitlab-fork": "gitlab:user/repo",
+      "gist-fork": "gist:abc123def456",
+      "react": "^18.0.0"
+    }
 }"#,
         "react"
     )]
