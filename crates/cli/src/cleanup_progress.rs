@@ -162,7 +162,7 @@ fn render_cleanup_summary(removed: &mut [RemovalOutcome], total_bytes: u64) -> S
         return String::new();
     }
 
-    removed.sort_by(|a, b| a.label.cmp(&b.label));
+    removed.sort_unstable_by(|a, b| a.label.cmp(&b.label));
 
     let mut output = String::new();
     for outcome in removed {

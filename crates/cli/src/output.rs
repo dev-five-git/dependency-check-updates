@@ -107,8 +107,9 @@ pub fn render_table(updates: &[PlannedUpdate], use_color: bool) -> String {
 
 /// Collapse `updates` by `(name, from, to)` while preserving original order.
 ///
-/// Lifted out of [`render_table`] so [`render_json`] can apply the same dedup
-/// without duplicating logic. Returns references so we avoid cloning.
+/// Used by [`render_table`] to deduplicate display rows. [`render_json`] dedupes
+/// separately via `serde_json::Map` key uniqueness (last-write-wins). Returns
+/// references so we avoid cloning.
 fn dedupe_updates(updates: &[PlannedUpdate]) -> Vec<&PlannedUpdate> {
     let mut seen = std::collections::HashSet::with_capacity(updates.len());
     updates

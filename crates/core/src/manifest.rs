@@ -103,7 +103,9 @@ impl Scanner {
         // is NOT alphabetical, and `read_dir` ordering is OS-dependent (NTFS
         // vs ext4 give different orderings), so we sort unconditionally here
         // to match `scan_deep`'s already-unconditional sort below.
-        manifests.sort_by(|a, b| a.path.cmp(&b.path));
+        // Paths are unique (each manifest file appears at most once), so stable
+        // ordering is unobservable; use sort_unstable_by for better performance.
+        manifests.sort_unstable_by(|a, b| a.path.cmp(&b.path));
         manifests
     }
 
@@ -190,7 +192,9 @@ impl Scanner {
             manifests.push(ManifestRef { path, kind });
         }
 
-        manifests.sort_by(|a, b| a.path.cmp(&b.path));
+        // Paths are unique (each manifest file appears at most once), so stable
+        // ordering is unobservable; use sort_unstable_by for better performance.
+        manifests.sort_unstable_by(|a, b| a.path.cmp(&b.path));
         manifests
     }
 
