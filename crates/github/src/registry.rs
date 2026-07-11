@@ -273,7 +273,7 @@ impl GitHubActionsRegistry {
         // `HashSet<String>` form took ownership before the dedup check and
         // therefore allocated on every iteration only to drop the duplicates.
         let mut seen: HashSet<&str> = HashSet::with_capacity(deps.len());
-        let mut unique_repos: Vec<String> = Vec::new();
+        let mut unique_repos: Vec<String> = Vec::with_capacity(deps.len());
         for dep in deps {
             if let Some(key) = Self::repo_key(&dep.name) {
                 if seen.insert(key) {

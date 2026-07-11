@@ -37,7 +37,12 @@ impl PackageJsonManifest {
     }
 
     fn collect_dependencies(root: &Value) -> Vec<DependencySpec> {
-        let mut deps = Vec::new();
+        let capacity = DEPENDENCY_SECTIONS
+            .iter()
+            .filter_map(|(_, key)| root.get(key).and_then(Value::as_object))
+            .map(serde_json::Map::len)
+            .sum();
+        let mut deps = Vec::with_capacity(capacity);
 
         for &(section, key) in DEPENDENCY_SECTIONS {
             if let Some(Value::Object(map)) = root.get(key) {

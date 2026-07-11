@@ -130,7 +130,7 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
     }
 
     // 2. Parse all manifests and collect deps (sync — fast, no I/O wait)
-    let mut manifest_jobs: Vec<ManifestJob> = Vec::new();
+    let mut manifest_jobs: Vec<ManifestJob> = Vec::with_capacity(manifests.len());
 
     for manifest_ref in manifests {
         let text = std::fs::read_to_string(&manifest_ref.path).map_err(|e| DcuError::Io {
@@ -207,7 +207,7 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
         GitHubActionsRegistry::new,
     );
 
-    let mut resolve_futures = Vec::new();
+    let mut resolve_futures = Vec::with_capacity(manifest_jobs.len());
     for (job_idx, job) in manifest_jobs.iter().enumerate() {
         if !job.deps.is_empty() {
             let npm = npm_registry.as_ref();
