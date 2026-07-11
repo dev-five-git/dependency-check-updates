@@ -51,6 +51,15 @@ fn strip_build_metadata(v: &str) -> &str {
     v.split_once('+').map_or(v, |(head, _)| head)
 }
 
+fn plan_update(dep: &DependencySpec, to: String) -> PlannedUpdate {
+    PlannedUpdate {
+        name: dep.name.clone(),
+        section: dep.section,
+        from: dep.current_req.clone(),
+        to,
+    }
+}
+
 /// Compute planned updates from resolved versions.
 pub(crate) fn compute_updates(
     deps: &[DependencySpec],
@@ -172,12 +181,7 @@ pub(crate) fn compute_updates(
         let new_version =
             rewrite_with_range_prefix(&dep.current_req, current_bare, &selected_truncated);
 
-        updates.push(PlannedUpdate {
-            name: dep.name.clone(),
-            section: dep.section,
-            from: dep.current_req.clone(),
-            to: new_version,
-        });
+        updates.push(plan_update(dep, new_version));
     }
 
     updates
@@ -214,12 +218,10 @@ fn sync_path_dep(dep: &DependencySpec, local_version: &str) -> Option<PlannedUpd
         return None;
     }
 
-    Some(PlannedUpdate {
-        name: dep.name.clone(),
-        section: dep.section,
-        from: dep.current_req.clone(),
-        to: rewrite_with_range_prefix(&dep.current_req, current_bare, &new_bare),
-    })
+    Some(plan_update(
+        dep,
+        rewrite_with_range_prefix(&dep.current_req, current_bare, &new_bare),
+    ))
 }
 
 /// True when `current_bare` represents a compound version range — multiple

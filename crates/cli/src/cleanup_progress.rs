@@ -62,12 +62,13 @@ pub(crate) fn targets_for_job(
     targets
 }
 
-pub(crate) async fn cleanup_with_progress(targets: &[CleanupTarget]) -> String {
-    if targets.is_empty() {
+pub(crate) async fn cleanup_with_progress(targets: Vec<CleanupTarget>) -> String {
+    let len = targets.len();
+    if len == 0 {
         return String::new();
     }
 
-    let pb = ProgressBar::new(targets.len() as u64);
+    let pb = ProgressBar::new(len as u64);
     if let Ok(style) = ProgressStyle::with_template(
         "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}",
     ) {
@@ -79,11 +80,10 @@ pub(crate) async fn cleanup_with_progress(targets: &[CleanupTarget]) -> String {
 
     let mut removals = FuturesUnordered::new();
     for target in targets {
-        let target = target.clone();
         removals.push(tokio::task::spawn_blocking(move || remove_target(target)));
     }
 
-    let mut removed = Vec::with_capacity(targets.len());
+    let mut removed = Vec::with_capacity(len);
     let mut total_bytes = 0_u64;
 
     while let Some(outcome) = removals.next().await {

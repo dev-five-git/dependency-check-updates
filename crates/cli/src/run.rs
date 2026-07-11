@@ -304,7 +304,7 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
         );
     }
 
-    print!("{}", cleanup_with_progress(&cleanup_targets).await);
+    print!("{}", cleanup_with_progress(cleanup_targets).await);
 
     Ok(any_updates)
 }
