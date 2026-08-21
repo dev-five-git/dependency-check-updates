@@ -110,23 +110,8 @@ impl DockerRegistry {
     }
 
     /// The scheme + authority to send registry requests to.
-    ///
-    /// A bare `localhost` / `127.0.0.1` registry is assumed to be plain HTTP,
-    /// matching the Docker daemon's own default insecure-registry rule;
-    /// everything else is HTTPS.
     fn endpoint(&self, host: &str) -> String {
-        if let Some(base) = &self.base_url_override {
-            return base.to_string();
-        }
-        let scheme = if host == "localhost"
-            || host.starts_with("localhost:")
-            || host.starts_with("127.0.0.1")
-        {
-            "http"
-        } else {
-            "https"
-        };
-        format!("{scheme}://{host}")
+        endpoint_for(self.base_url_override.as_deref(), host)
     }
 
     /// Fetch every published tag of `repository` on `host`.
@@ -305,6 +290,33 @@ fn registry_target_of(name: &str) -> Option<(String, String)> {
 /// Cache key for one repository on one registry.
 fn cache_key(host: &str, repository: &str) -> String {
     format!("{host}/{repository}")
+}
+
+/// Resolve the scheme + authority for `host`, honouring a test override.
+///
+/// A bare `localhost` / `127.0.0.1` registry is assumed to be plain HTTP,
+/// matching the Docker daemon's own default insecure-registry rule; everything
+/// else is HTTPS.
+///
+/// Kept as a free function so its behaviour can be tested without constructing
+/// a `DockerRegistry` — building one instantiates a `reqwest::Client`, which
+/// panics unless a rustls crypto provider has already been installed in the
+/// process. Depending on some *other* test to have installed it first makes the
+/// outcome hinge on test execution order.
+fn endpoint_for(base_url_override: Option<&str>, host: &str) -> String {
+    if let Some(base) = base_url_override {
+        return base.to_owned();
+    }
+    // Compare the bare authority, so a public host that merely *starts with*
+    // a local name (`localhost.example.com`, `127.0.0.1.example.com`) is not
+    // downgraded to plain HTTP.
+    let authority = host.split_once(':').map_or(host, |(name, _port)| name);
+    let scheme = if matches!(authority, "localhost" | "127.0.0.1" | "::1") {
+        "http"
+    } else {
+        "https"
+    };
+    format!("{scheme}://{host}")
 }
 
 /// Build the token-realm URL for a pull-scoped exchange.
@@ -552,12 +564,25 @@ mod tests {
         assert_eq!(cache_key(&host, &repository), expected_key);
     }
 
-    #[test]
-    fn endpoint_uses_plain_http_for_local_registries_only() {
-        let registry = DockerRegistry::new();
-        assert_eq!(registry.endpoint("localhost:5000"), "http://localhost:5000");
-        assert_eq!(registry.endpoint("127.0.0.1:5000"), "http://127.0.0.1:5000");
-        assert_eq!(registry.endpoint("ghcr.io"), "https://ghcr.io");
+    #[rstest]
+    // Local registries default to plain HTTP, as the Docker daemon does.
+    #[case::localhost_ported(None, "localhost:5000", "http://localhost:5000")]
+    #[case::localhost_bare(None, "localhost", "http://localhost")]
+    #[case::loopback_ip(None, "127.0.0.1:5000", "http://127.0.0.1:5000")]
+    // Everything else is HTTPS — including hosts that merely *contain*
+    // "localhost", which must not be mistaken for the local one.
+    #[case::public_registry(None, "ghcr.io", "https://ghcr.io")]
+    #[case::docker_hub(None, "registry-1.docker.io", "https://registry-1.docker.io")]
+    #[case::lookalike_host(None, "localhost.example.com", "https://localhost.example.com")]
+    #[case::lookalike_ip(None, "127.0.0.1.example.com", "https://127.0.0.1.example.com")]
+    // A test override replaces the derived endpoint entirely.
+    #[case::override_wins(Some("http://127.0.0.1:9999"), "ghcr.io", "http://127.0.0.1:9999")]
+    fn endpoint_for_cases(
+        #[case] base_url_override: Option<&str>,
+        #[case] host: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(endpoint_for(base_url_override, host), expected);
     }
 
     #[test]
