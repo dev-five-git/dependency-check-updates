@@ -511,6 +511,47 @@ mod tests {
         );
     }
 
+    /// Covers the `if !is_usable_release(files) { return None; }` filter
+    /// inside the `TargetLevel::Newest` arm of `resolve_version` (registry.rs
+    /// line 166) — a distinct code path from `resolve_version_skips_all_yanked_release`
+    /// above, which only exercises the equivalent guard in the non-Newest
+    /// slow path (line 190). The `2.0.0` release has every file yanked and
+    /// carries the *most recent* upload timestamp; if the Newest arm's
+    /// yanked filter regressed, `max_by` would pick it purely on date and
+    /// `dcu -t newest` would recommend an unpublished release.
+    #[rstest]
+    #[tokio::test]
+    async fn resolve_version_newest_skips_all_yanked_release(#[future] mock_server: MockServer) {
+        let server = mock_server.await;
+        Mock::given(method("GET"))
+            .and(path("/newesty/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": "1.2.0"},
+                "releases": {
+                    "1.0.0": [{"upload_time_iso_8601": "2022-01-01T00:00:00Z", "yanked": false}],
+                    "1.2.0": [{"upload_time_iso_8601": "2023-01-01T00:00:00Z", "yanked": false}],
+                    "2.0.0": [
+                        {"upload_time_iso_8601": "2024-06-01T00:00:00Z", "yanked": true},
+                        {"upload_time_iso_8601": "2024-06-02T00:00:00Z", "yanked": true}
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let registry = PyPiRegistry::with_base_url(&server.uri());
+        let dep = make_dep("newesty", ">=1.0.0");
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Newest)
+            .await
+            .expect("resolve_version should succeed");
+        assert_eq!(
+            result.selected.as_deref(),
+            Some("1.2.0"),
+            "all-yanked 2.0.0 must be excluded from Newest despite its later upload date"
+        );
+    }
+
     /// `Latest` + stable current must short-circuit on `info.version` without
     /// consulting `releases`. The mock body deliberately omits the `releases`
     /// map; the fast path returns `info.version` regardless. Without the fast

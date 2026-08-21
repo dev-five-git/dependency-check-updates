@@ -23,6 +23,7 @@ pub(crate) struct CleanupTarget {
     kind: CleanupKind,
 }
 
+#[derive(Debug)]
 struct RemovalOutcome {
     label: String,
     bytes: u64,
@@ -87,26 +88,9 @@ pub(crate) async fn cleanup_with_progress(targets: Vec<CleanupTarget>) -> String
     let mut total_bytes = 0_u64;
 
     while let Some(outcome) = removals.next().await {
-        match outcome {
-            Ok(Some(Ok(outcome))) => {
-                total_bytes = total_bytes.saturating_add(outcome.bytes);
-                pb.set_message(format!(
-                    "removed {} ({}, total {})",
-                    outcome.label,
-                    format_bytes(outcome.bytes),
-                    format_bytes(total_bytes),
-                ));
-                removed.push(outcome);
-            }
-            Ok(Some(Err(error))) => {
-                warn!(error = %error, "failed to remove cleanup target");
-            }
-            Ok(None) => {}
-            Err(error) => {
-                warn!(error = %error, "cleanup worker failed");
-            }
+        if let Some(message) = absorb_outcome(outcome, &mut removed, &mut total_bytes) {
+            pb.set_message(message);
         }
-
         pb.inc(1);
     }
 
@@ -114,11 +98,51 @@ pub(crate) async fn cleanup_with_progress(targets: Vec<CleanupTarget>) -> String
     render_cleanup_summary(&mut removed, total_bytes)
 }
 
+/// Fold one worker's result into the running tally, returning the progress
+/// message to display when something was actually removed.
+///
+/// Split out of [`cleanup_with_progress`] so every arm is reachable from a
+/// test. The `JoinError` arm in particular only arises when a worker panics,
+/// which cannot be provoked by driving the public entry point — [`remove_target`]
+/// has no panic path — but is trivially constructed by awaiting a task that
+/// does panic.
+fn absorb_outcome(
+    outcome: Result<Option<Result<RemovalOutcome, io::Error>>, tokio::task::JoinError>,
+    removed: &mut Vec<RemovalOutcome>,
+    total_bytes: &mut u64,
+) -> Option<String> {
+    match outcome {
+        Ok(Some(Ok(outcome))) => {
+            *total_bytes = total_bytes.saturating_add(outcome.bytes);
+            let message = format!(
+                "removed {} ({}, total {})",
+                outcome.label,
+                format_bytes(outcome.bytes),
+                format_bytes(*total_bytes),
+            );
+            removed.push(outcome);
+            Some(message)
+        }
+        Ok(Some(Err(error))) => {
+            warn!(error = %error, "failed to remove cleanup target");
+            None
+        }
+        // The target was already gone — nothing removed, nothing to report.
+        Ok(None) => None,
+        Err(error) => {
+            warn!(error = %error, "cleanup worker failed");
+            None
+        }
+    }
+}
+
 fn remove_target(target: CleanupTarget) -> Option<Result<RemovalOutcome, io::Error>> {
     let bytes = match path_size(&target.path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
-        Err(error) => return Some(Err(error)),
+        // A target that vanished between planning and removal is not a
+        // failure; anything else is. Both readings share one expression so the
+        // "already gone" case cannot drift from the sizing step below.
+        Err(error) => return (error.kind() != io::ErrorKind::NotFound).then_some(Err(error)),
     };
 
     let remove_result = match target.kind {
@@ -131,21 +155,25 @@ fn remove_target(target: CleanupTarget) -> Option<Result<RemovalOutcome, io::Err
             label: target.label,
             bytes,
         })),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => Some(Err(error)),
+        Err(error) => (error.kind() != io::ErrorKind::NotFound).then_some(Err(error)),
     }
 }
 
 fn path_size(path: &Path) -> io::Result<u64> {
+    // `symlink_metadata` deliberately does not follow links: a symlink into a
+    // directory tree would otherwise be counted twice, or lead outside it.
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.is_file() {
-        return Ok(metadata.len());
+    if metadata.is_dir() {
+        return dir_size(path);
     }
-    if !metadata.is_dir() {
-        return Ok(0);
-    }
-
-    dir_size(path)
+    // Regular files report their own length. Everything else a directory can
+    // contain — symlinks, sockets, device nodes — reclaims no space when the
+    // entry itself is unlinked, so it contributes nothing.
+    Ok(if metadata.is_file() {
+        metadata.len()
+    } else {
+        0
+    })
 }
 
 fn dir_size(path: &Path) -> io::Result<u64> {
@@ -208,6 +236,268 @@ fn format_unit(bytes: u64, unit: u64, suffix: &str) -> String {
 mod tests {
     use super::*;
     use dependency_check_updates_core::{ManifestKind, ManifestRef};
+    use tempfile::TempDir;
+
+    /// Write `contents` to `dir/name` and return the path.
+    fn write_file(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, contents).expect("write fixture file");
+        path
+    }
+
+    fn target(path: PathBuf, kind: CleanupKind) -> CleanupTarget {
+        CleanupTarget {
+            path,
+            label: "fixture".to_owned(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn path_size_reports_a_file_length() {
+        let dir = TempDir::new().unwrap();
+        let file = write_file(dir.path(), "bun.lock", &[0u8; 128]);
+        assert_eq!(path_size(&file).unwrap(), 128);
+    }
+
+    #[test]
+    fn path_size_sums_a_directory_tree_recursively() {
+        // node_modules is nested, so the size must come from a full walk
+        // rather than the directory entry's own metadata.
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("node_modules").join("pkg").join("dist");
+        fs::create_dir_all(&nested).unwrap();
+        write_file(dir.path().join("node_modules").as_path(), "top", &[0u8; 10]);
+        write_file(&nested, "deep", &[0u8; 25]);
+
+        assert_eq!(path_size(&dir.path().join("node_modules")).unwrap(), 35);
+    }
+
+    #[test]
+    fn path_size_reports_zero_for_an_empty_directory() {
+        let dir = TempDir::new().unwrap();
+        let empty = dir.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        assert_eq!(path_size(&empty).unwrap(), 0);
+    }
+
+    #[test]
+    fn path_size_propagates_a_missing_path() {
+        let dir = TempDir::new().unwrap();
+        let error = path_size(&dir.path().join("absent")).expect_err("missing path must error");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// Entries that are neither a regular file nor a directory contribute
+    /// nothing. Exercised through a dangling symlink, which is the only such
+    /// entry creatable without elevated privileges — and only on Unix, where
+    /// `std::os::unix::fs::symlink` needs no special rights.
+    #[cfg(unix)]
+    #[test]
+    fn path_size_ignores_entries_that_are_neither_file_nor_directory() {
+        let dir = TempDir::new().unwrap();
+        let link = dir.path().join("dangling");
+        std::os::unix::fs::symlink("nowhere", &link).unwrap();
+        assert_eq!(path_size(&link).unwrap(), 0);
+    }
+
+    #[test]
+    fn dir_size_propagates_a_missing_directory() {
+        let dir = TempDir::new().unwrap();
+        let error = dir_size(&dir.path().join("absent")).expect_err("missing dir must error");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn remove_target_deletes_a_lockfile_and_reports_its_size() {
+        let dir = TempDir::new().unwrap();
+        let file = write_file(dir.path(), "bun.lock", &[0u8; 64]);
+
+        let outcome = remove_target(target(file.clone(), CleanupKind::Lockfile))
+            .expect("an existing target yields an outcome")
+            .expect("removing a plain file succeeds");
+
+        assert_eq!(outcome.bytes, 64);
+        assert_eq!(outcome.label, "fixture");
+        assert!(!file.exists(), "the lockfile must be gone");
+    }
+
+    #[test]
+    fn remove_target_deletes_an_installed_directory_tree() {
+        let dir = TempDir::new().unwrap();
+        let installed = dir.path().join("node_modules");
+        fs::create_dir_all(installed.join("pkg")).unwrap();
+        write_file(installed.join("pkg").as_path(), "index.js", &[0u8; 40]);
+
+        let outcome = remove_target(target(installed.clone(), CleanupKind::InstalledDir))
+            .expect("an existing target yields an outcome")
+            .expect("removing a directory tree succeeds");
+
+        assert_eq!(outcome.bytes, 40);
+        assert!(!installed.exists(), "the directory tree must be gone");
+    }
+
+    #[test]
+    fn remove_target_treats_an_absent_target_as_nothing_to_do() {
+        // Targets are planned before removal runs, so one may legitimately
+        // vanish in between. That is not a failure to report.
+        let dir = TempDir::new().unwrap();
+        let missing = target(dir.path().join("never-existed.lock"), CleanupKind::Lockfile);
+        assert!(remove_target(missing).is_none());
+    }
+
+    #[test]
+    fn remove_target_surfaces_a_real_removal_failure() {
+        // A lockfile-kind target pointing at a directory: sizing succeeds, but
+        // `remove_file` refuses with something other than "not found".
+        let dir = TempDir::new().unwrap();
+        let not_a_file = dir.path().join("node_modules");
+        fs::create_dir(&not_a_file).unwrap();
+
+        let error = remove_target(target(not_a_file.clone(), CleanupKind::Lockfile))
+            .expect("a real failure must be reported")
+            .expect_err("removing a directory as a file cannot succeed");
+
+        assert_ne!(error.kind(), io::ErrorKind::NotFound);
+        assert!(not_a_file.exists(), "the directory must survive");
+    }
+
+    #[test]
+    fn absorb_outcome_accumulates_removals_and_reports_a_running_total() {
+        let mut removed = Vec::new();
+        let mut total = 0_u64;
+
+        let first = absorb_outcome(
+            Ok(Some(Ok(RemovalOutcome {
+                label: "a.lock".to_owned(),
+                bytes: 1024,
+            }))),
+            &mut removed,
+            &mut total,
+        );
+        let second = absorb_outcome(
+            Ok(Some(Ok(RemovalOutcome {
+                label: "b.lock".to_owned(),
+                bytes: 1024,
+            }))),
+            &mut removed,
+            &mut total,
+        );
+
+        assert_eq!(total, 2048);
+        assert_eq!(removed.len(), 2);
+        assert!(first.unwrap().contains("total 1.00 KiB"));
+        assert!(second.unwrap().contains("total 2.00 KiB"));
+    }
+
+    /// The three non-removal arms must all leave the tally untouched and
+    /// produce no progress message.
+    #[tokio::test]
+    async fn absorb_outcome_ignores_every_non_removal_result() {
+        let mut removed = Vec::new();
+        let mut total = 0_u64;
+
+        // A removal that failed.
+        assert!(
+            absorb_outcome(
+                Ok(Some(Err(io::Error::other("disk on fire")))),
+                &mut removed,
+                &mut total,
+            )
+            .is_none()
+        );
+        // A target that was already gone.
+        assert!(absorb_outcome(Ok(None), &mut removed, &mut total).is_none());
+        // A worker that panicked. `remove_target` has no panic path, so the
+        // only way to obtain a real `JoinError` is to await a task that does.
+        let join_error = tokio::task::spawn_blocking(|| panic!("worker exploded"))
+            .await
+            .expect_err("the worker panicked");
+        assert!(absorb_outcome(Err(join_error), &mut removed, &mut total).is_none());
+
+        assert!(removed.is_empty());
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_with_progress_is_silent_when_there_is_nothing_to_remove() {
+        assert_eq!(cleanup_with_progress(Vec::new()).await, "");
+    }
+
+    #[tokio::test]
+    async fn cleanup_with_progress_removes_every_target_and_summarises_once() {
+        let dir = TempDir::new().unwrap();
+        let lockfile = write_file(dir.path(), "bun.lock", &[0u8; 2048]);
+        let installed = dir.path().join("node_modules");
+        fs::create_dir(&installed).unwrap();
+        write_file(&installed, "index.js", &[0u8; 1024]);
+        // A target that is already gone and one that cannot be removed must
+        // both be tolerated without aborting the run.
+        let absent = dir.path().join("absent.lock");
+        let undeletable = dir.path().join("target");
+        fs::create_dir(&undeletable).unwrap();
+
+        let summary = cleanup_with_progress(vec![
+            CleanupTarget {
+                path: lockfile.clone(),
+                label: "app:bun.lock".to_owned(),
+                kind: CleanupKind::Lockfile,
+            },
+            CleanupTarget {
+                path: installed.clone(),
+                label: "app:node_modules/".to_owned(),
+                kind: CleanupKind::InstalledDir,
+            },
+            CleanupTarget {
+                path: absent,
+                label: "app:absent.lock".to_owned(),
+                kind: CleanupKind::Lockfile,
+            },
+            CleanupTarget {
+                path: undeletable.clone(),
+                label: "app:target".to_owned(),
+                kind: CleanupKind::Lockfile,
+            },
+        ])
+        .await;
+
+        assert!(!lockfile.exists());
+        assert!(!installed.exists());
+        assert!(undeletable.exists(), "the failing target must survive");
+
+        // Only the two successful removals are listed, sorted by label, and
+        // the total is their sum.
+        let lines: Vec<&str> = summary.lines().collect();
+        assert_eq!(lines.len(), 3, "got: {summary}");
+        assert!(lines[0].contains("app:bun.lock"));
+        assert!(lines[1].contains("app:node_modules/"));
+        assert!(
+            lines[2].contains("Total removed 3.00 KiB"),
+            "got: {summary}"
+        );
+    }
+
+    #[test]
+    fn targets_for_job_yields_nothing_for_a_manifest_without_a_parent() {
+        let job = ManifestJob {
+            manifest_ref: ManifestRef {
+                // An empty path has no parent directory to clean up beside.
+                path: PathBuf::new(),
+                kind: ManifestKind::PackageJson,
+            },
+            display_path: String::new(),
+            text: String::new(),
+            handler: &dependency_check_updates_node::NodeHandler,
+            deps: Vec::new(),
+        };
+
+        assert!(targets_for_job(&job, true, true).is_empty());
+    }
+
+    #[test]
+    fn render_cleanup_summary_is_empty_when_nothing_was_removed() {
+        assert_eq!(render_cleanup_summary(&mut [], 0), "");
+    }
 
     #[test]
     fn format_bytes_uses_binary_units() {

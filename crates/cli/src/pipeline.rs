@@ -697,6 +697,10 @@ mod tests {
     // previous fall-through to the full `0.3.0`).
     #[case::path_dep_two_segment_local_with_build_metadata("0.2", "0.3.0+build", Some("0.3"))]
     #[case::full_version_at_three_segments("0.2.0", "0.3.1", Some("0.3.1"))]
+    // A wildcard requirement already accepts whatever the local crate is, so
+    // there is nothing to sync. Rewriting it would silently narrow the
+    // manifest's intent from "any version" to one pinned number.
+    #[case::wildcard_requirement_is_left_alone("*", "0.3.0", None)]
     fn compute_updates_path_dep_cases(
         #[case] current: &str,
         #[case] local: &str,

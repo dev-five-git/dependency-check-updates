@@ -693,6 +693,43 @@ serde = "1.0"
         // Error path: substrings ignored.
         &[]
     )]
+    #[case::inline_table_non_string_version_replaced(
+        // Inline-table `version = 1` (integer, not a string) hits the `else`
+        // branch that force-wraps the new version in a fresh `Value::String`;
+        // without it, updating a non-string version would leave the manifest
+        // with a numeric (or otherwise malformed) version value.
+        r"
+[dependencies]
+dep = { version = 1 }
+",
+        &[("dep", DependencySection::Dependencies, "2.0")],
+        true,
+        &["\"2.0\""]
+    )]
+    #[case::full_table_non_string_version_replaced(
+        // Full-table `[dependencies.dep]` with `version = 1` (integer) hits
+        // the analogous `else` branch on the `Item::Table` side; without it
+        // the same numeric-version bug would exist for the full-table form.
+        r"
+[dependencies.dep]
+version = 1
+",
+        &[("dep", DependencySection::Dependencies, "2.0")],
+        true,
+        &["\"2.0\""]
+    )]
+    #[case::full_table_missing_version_key_inserted(
+        // `[dependencies.dep]` with no `version` key at all exercises the
+        // branch that inserts a brand-new `version` entry; without it, a
+        // versionless full-table dependency could never be updated at all.
+        r"
+[dependencies.dep]
+features = []
+",
+        &[("dep", DependencySection::Dependencies, "2.0")],
+        true,
+        &["\"2.0\""]
+    )]
     fn apply_updates_cases(
         #[case] toml: &str,
         #[case] updates: UpdateSpecs<'_>,
@@ -958,5 +995,55 @@ serde = "1.0"
         let out = manifest.apply_updates(&updates).unwrap();
         let expected = "[dependencies.serde]\nversion = \"1.0.228\"\nfeatures = [\"derive\"]\n";
         assert_eq!(out, expected);
+    }
+
+    // ----- package_version / is_workspace_inherited / resolve_workspace_version -----
+
+    /// A `[package].version` that is neither a plain string nor
+    /// `{ workspace = true }` (e.g. an integer) must resolve to `None` — the
+    /// path-dependency resolver then treats the crate as having no usable
+    /// version rather than panicking or silently coercing the value.
+    #[test]
+    fn package_version_returns_none_for_non_string_non_workspace() {
+        let doc: DocumentMut = "[package]\nversion = 1\n".parse().unwrap();
+        assert!(package_version(&doc).is_none());
+    }
+
+    /// `version = { workspace = true }` (inline-table form) must be
+    /// recognised as workspace-inherited via the inline-table arm; without
+    /// it, a version declared this way would be misread as a literal (or
+    /// simply ignored), breaking workspace-inherited path deps that use the
+    /// inline syntax instead of `version.workspace = true`.
+    #[test]
+    fn is_workspace_inherited_true_for_inline_table_form() {
+        let doc: DocumentMut = "[package]\nversion = { workspace = true }\n"
+            .parse()
+            .unwrap();
+        let version_item = doc
+            .get("package")
+            .unwrap()
+            .as_table()
+            .unwrap()
+            .get("version")
+            .unwrap();
+        assert!(is_workspace_inherited(version_item));
+    }
+
+    /// A path dependency with `version.workspace = true` but no workspace
+    /// root anywhere above it must resolve to `None` once the walk exhausts
+    /// every ancestor directory up to the filesystem root, instead of
+    /// looping forever or panicking when `Path::pop` finally fails.
+    ///
+    /// A `TempDir` lives under the OS temp directory, which — unlike this
+    /// repo's own crates — has no ancestor `Cargo.toml` at all, so the walk
+    /// is guaranteed to bottom out without finding a workspace.
+    #[test]
+    fn resolve_workspace_version_none_when_no_workspace_root_found() {
+        let tmp = TempDir::new().unwrap();
+
+        assert!(
+            resolve_workspace_version(tmp.path()).is_none(),
+            "expected no workspace root above a bare temp directory"
+        );
     }
 }

@@ -179,6 +179,11 @@ mod tests {
     #[case("1.2-beta", "1.2.0-beta")]
     #[case("5-beta", "5.0.0-beta")]
     #[case("", "")]
+    // A non-empty string with NO numeric head has nothing to pad, and must be
+    // handed back untouched for the caller's parser to reject. Padding it
+    // would fabricate a version out of a branch name.
+    #[case("main", "main")]
+    #[case("v5", "v5")]
     fn pad_to_three_segments_cases(#[case] input: &str, #[case] expected: &str) {
         assert_eq!(pad_to_three_segments(input), expected);
     }

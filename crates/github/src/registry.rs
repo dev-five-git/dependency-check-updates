@@ -661,6 +661,16 @@ mod tests {
         Some("4.1.0"),
         Some("4.1.0")
     )]
+    // A four-segment tag looks version-like to `is_version_ref` but has no
+    // semver reading, so `Version::parse` refuses it. It must be dropped
+    // rather than derailing the whole tag list.
+    #[case::ignores_four_segment_tags(
+        &["v4.0.0", "v1.2.3.4", "v4.1.0"],
+        "v4",
+        TargetLevel::Latest,
+        Some("4.1.0"),
+        Some("4.1.0")
+    )]
     // Minor happy-path: stable v4.1.0 wins over the in-between prerelease.
     #[case::minor_rejects_pre_when_current_is_stable_happy_path(
         &["v4.0.0", "v4.1.0-beta.1", "v4.1.0"],
@@ -801,6 +811,9 @@ mod tests {
     #[case::trailing_slash("foo/", None)]
     #[case::leading_slash("/foo", None)]
     #[case::just_slash("/", None)]
+    // Empty repo segment: the owner is present but the repo name is not, so
+    // the guard must fire before we emit `/repos/foo//tags`.
+    #[case::empty_repo_segment("foo//bar", None)]
     fn repo_key_cases(#[case] input: &str, #[case] expected: Option<&str>) {
         // `repo_key` now returns `Option<&str>` directly — `.as_deref()` would
         // be a no-op (`Option<&str>::as_deref()` returns the same `Option<&str>`)

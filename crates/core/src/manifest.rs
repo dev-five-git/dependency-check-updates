@@ -547,6 +547,11 @@ mod tests {
         let app = dir.path().join("pkgs").join("app");
         std::fs::create_dir_all(&app).unwrap();
         create_temp_manifest(&app, "Cargo.toml", "[package]\nname = \"app\"");
+        // Ordinary files sit beside manifests everywhere; the walker must skip
+        // the ones `ManifestKind::from_path` does not recognise instead of
+        // trying to parse them.
+        create_temp_manifest(&app, "README.md", "# app");
+        create_temp_manifest(&app, "build.gradle", "");
 
         let manifests = Scanner::scan_deep(dir.path());
 

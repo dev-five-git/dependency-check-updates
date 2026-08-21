@@ -466,6 +466,39 @@ mod tests {
         assert!(versions.is_empty());
     }
 
+    /// `versions` is deserialized by a hand-written `Visitor` so the packument's
+    /// multi-KB per-version bodies are walked past instead of materialised.
+    /// A registry that answers with the wrong JSON shape must therefore produce
+    /// a readable serde error naming what was expected, not a bare "invalid
+    /// type" — which is exactly what `Visitor::expecting` supplies.
+    #[test]
+    fn version_keys_rejects_a_non_object_with_an_explanatory_error() {
+        let error = serde_json::from_str::<NpmPackageInfo>(r#"{"versions": ["1.0.0"]}"#)
+            .expect_err("an array is not a valid `versions` map");
+
+        assert!(
+            error
+                .to_string()
+                .contains("a JSON object whose keys are version strings"),
+            "the visitor's `expecting` text must reach the message: {error}"
+        );
+    }
+
+    #[test]
+    fn version_keys_collects_object_keys_and_skips_their_bodies() {
+        // The happy path of the same Visitor: keys are kept, the nested
+        // per-version metadata is walked past without being materialised.
+        let info: NpmPackageInfo = serde_json::from_str(
+            r#"{"versions": {"1.0.0": {"dist": {"tarball": "x"}}, "2.0.0": {}}}"#,
+        )
+        .expect("a versions object must deserialize");
+
+        let versions = extract_sorted_versions(&info);
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].to_string(), "1.0.0");
+        assert_eq!(versions[1].to_string(), "2.0.0");
+    }
+
     #[rstest]
     // Both `NpmRegistry::new()` and `NpmRegistry::default()` must construct
     // a usable client without panicking. `_crypto` ensures the rustls provider

@@ -578,6 +578,22 @@ mod tests {
             Some(DependencySection::DevDependencies),
         )),
     )]
+    // Regression: a single Poetry table exercising all three `continue`
+    // guards in `collect_poetry_table` at once — `python` (interpreter
+    // pin, not a package), `gitdep` (an inline table with no `version`
+    // key, so `extract_poetry_version` returns `None`), and
+    // `wildcarddep` (`"*"`, an unresolvable wildcard). If any guard
+    // regressed, one of these three would leak into the dependency list
+    // alongside `requests`.
+    #[case::poetry_skips_python_git_and_wildcard(
+        "\n[tool.poetry.dependencies]\npython = \"^3.11\"\ngitdep = { git = \"https://example.com/repo.git\" }\nwildcarddep = \"*\"\nrequests = \"^2.28.0\"\n",
+        1,
+        Some((
+            Some("requests"),
+            Some("^2.28.0"),
+            Some(DependencySection::Dependencies),
+        )),
+    )]
     #[case::dependency_groups(
         "\n[dependency-groups]\ntest = [\"pytest>=7.0\", \"coverage>=7.0\"]\n",
         2,
@@ -935,5 +951,93 @@ dependencies = [
         let result = manifest.apply_updates(&updates);
         let expected = "[tool.poetry.dependencies]\npython = \"^3.8\"\n\n[tool.poetry.dependencies.sqlalchemy]\nversion = \"^3.0\"\nextras = [\"asyncio\"]\n";
         assert_eq!(result, expected);
+    }
+
+    // ---------- apply_to_poetry_table direct-call scenarios ----------
+    //
+    // `apply_to_poetry_table` is a private free function, so these call it
+    // directly against a hand-built `toml_edit::Table` rather than going
+    // through the whole `PyProjectManifest::apply_updates` pipeline. That
+    // keeps each fixture down to a single line and the branch under test
+    // obvious.
+
+    #[rstest]
+    // The requested name is absent from the table entirely — the common
+    // case where `apply_to_poetry_table` is probed for a dep that isn't a
+    // Poetry dependency at all. Must report "not found", not panic on the
+    // missing key.
+    #[case::name_absent("absent = \"1.0\"\n", "missing", "2.0")]
+    // Inline-table shape (`gitdep = { git = "..." }`, a Poetry VCS
+    // dependency) with no `version` key. Must fall through to "not found"
+    // instead of panicking when `t.get_mut("version")` comes back empty.
+    #[case::inline_table_missing_version(
+        "gitdep = { git = \"https://example.com/repo.git\" }\n",
+        "gitdep",
+        "2.0"
+    )]
+    // Full `[tool.poetry.dependencies.dep]` sub-table with no `version`
+    // key — same "not found" contract as the inline-table case, exercised
+    // through the other value shape `extract_poetry_version` recognises.
+    #[case::full_table_missing_version("[dep]\nextras = [\"x\"]\n", "dep", "2.0")]
+    // A Poetry dep value that is neither a string, an inline table, nor a
+    // full table (a bare integer here). The catch-all `_ => false` arm
+    // must handle an unexpected TOML shape without panicking.
+    #[case::unsupported_shape("dep = 1\n", "dep", "2.0")]
+    fn apply_to_poetry_table_not_found_cases(
+        #[case] fragment: &str,
+        #[case] name: &str,
+        #[case] new_version: &str,
+    ) {
+        let mut doc: DocumentMut = fragment.parse().expect("fragment should parse");
+        let table = doc.as_table_mut();
+        assert!(
+            !apply_to_poetry_table(table, name, new_version),
+            "expected no version field to patch for `{name}` in `{fragment}`"
+        );
+    }
+
+    #[test]
+    // Inline-table Poetry dep whose `version` value is not a string (e.g.
+    // `version = 1`, a malformed-but-parseable pin). Must still overwrite
+    // it with a proper string via the `Value::String(Formatted::new(...))`
+    // fallback instead of silently no-op'ing or panicking on the type
+    // mismatch, and must leave sibling keys untouched.
+    fn apply_to_poetry_table_inline_table_non_string_version_replaced() {
+        let mut doc: DocumentMut = "dep = { version = 1, extras = [\"x\"] }\n"
+            .parse()
+            .expect("fragment should parse");
+        let table = doc.as_table_mut();
+        assert!(apply_to_poetry_table(table, "dep", "2.0"));
+        let result = doc.to_string();
+        assert!(
+            result.contains("version = \"2.0\""),
+            "non-string inline-table version should be overwritten with a string:\n{result}"
+        );
+        assert!(
+            result.contains("extras = [\"x\"]"),
+            "sibling key should survive untouched:\n{result}"
+        );
+    }
+
+    #[test]
+    // Full-table Poetry dep (`[tool.poetry.dependencies.dep]`) whose
+    // `version` value is not a string (e.g. `version = 1`). Must overwrite
+    // via `toml_edit::value(...)` instead of leaving the wrong-typed value
+    // in place, and must leave sibling keys untouched.
+    fn apply_to_poetry_table_full_table_non_string_version_replaced() {
+        let mut doc: DocumentMut = "[dep]\nversion = 1\nextras = [\"x\"]\n"
+            .parse()
+            .expect("fragment should parse");
+        let table = doc.as_table_mut();
+        assert!(apply_to_poetry_table(table, "dep", "2.0"));
+        let result = doc.to_string();
+        assert!(
+            result.contains("version = \"2.0\""),
+            "non-string full-table version should be overwritten with a string:\n{result}"
+        );
+        assert!(
+            result.contains("extras = [\"x\"]"),
+            "sibling key should survive untouched:\n{result}"
+        );
     }
 }
