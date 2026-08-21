@@ -58,9 +58,9 @@
     "build:debug": "napi build --platform",
     "lint": "echo 'lint'",
     "prepublishOnly": "napi prepublish -t npm",
-    "test": "echo 'test'"
+    "test": "bun run build:debug && bun test"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.7"
+    "@napi-rs/cli": "^3.8"
   }
 }

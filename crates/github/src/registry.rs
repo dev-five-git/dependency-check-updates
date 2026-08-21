@@ -18,10 +18,9 @@ use tokio::sync::Semaphore;
 use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
-    DcuError, DependencySpec, ResolvedVersion, TargetLevel, build_client,
+    DcuError, DependencySpec, ResolvedVersion, TargetLevel, build_client, count_numeric_segments,
+    is_version_ref, pad_to_three_segments, split_numeric_head,
 };
-
-use crate::parser::is_version_ref;
 
 /// Cap on parallel GitHub API calls. The unauthenticated rate limit is
 /// 60 req/hr; keeping concurrency modest avoids burst-rejection during deep
@@ -33,9 +32,71 @@ const MAX_CONCURRENT_REQUESTS: usize = 5;
 const TAGS_PER_PAGE: u32 = 100;
 
 /// One tag entry from the GitHub API.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 struct Tag {
     name: String,
+}
+
+/// Per-repo tag list with its parse + sort + highest-stable lookup AND the
+/// `pick_existing_ref` numeric-prefix set already done once. Built once per
+/// unique `owner/repo` in `resolve_batch` so each duplicate-repo dep reuses
+/// the same prepared data instead of re-parsing and re-sorting the same
+/// 100-entry tag list — and instead of rebuilding the same `tag_numerics`
+/// `HashSet` inside `pick_existing_ref` for every dep that shares the repo.
+struct PreparedTags {
+    sorted_versions: Vec<node_semver::Version>,
+    highest_stable: Option<String>,
+    /// Numeric tag prefixes (`v8.1.0` → `8.1.0`, `v8` → `8`) used by
+    /// `pick_existing_ref` to check existence at a given precision. Owned
+    /// `String`s let the set outlive the source `Vec<Tag>` so the tag list
+    /// can be consumed once and dropped.
+    tag_numerics: HashSet<String>,
+}
+
+impl PreparedTags {
+    fn new(tags: Vec<Tag>) -> Self {
+        // Single pass over the tag list: build `sorted_versions` and
+        // `tag_numerics` together AND inline the per-tag upfront work so
+        // `is_version_ref` and `strip_prefix('v')` each run exactly once
+        // per tag. The previous form delegated to `normalize_tag` AND
+        // `tag_numeric_str`, which each repeated `is_version_ref` + the
+        // `v`-strip — paying that cost twice per tag. The two helpers
+        // are kept intact for their other callers (`select_from_tags`
+        // and `pick_existing_ref` respectively).
+        // Capture the length before consuming `tags` in the loop below so we
+        // can pre-size both output collections and avoid grow-path reallocs.
+        let capacity = tags.len();
+        let mut sorted_versions: Vec<node_semver::Version> = Vec::with_capacity(capacity);
+        let mut tag_numerics: HashSet<String> = HashSet::with_capacity(capacity);
+        for tag in tags {
+            // Mirror `normalize_tag` + `tag_numeric_str` semantics exactly,
+            // but share the up-front work between them. Skip both pushes when
+            // either `is_version_ref` is false OR `Version::parse` refuses
+            // (e.g. 4+-segment numerics) — same as `normalize_tag = None`.
+            if !is_version_ref(&tag.name) {
+                continue;
+            }
+            let stripped = tag.name.strip_prefix('v').unwrap_or(&tag.name);
+            let numeric_str = split_numeric_head(stripped).0.trim_end_matches('.');
+            let padded = pad_to_three_segments(stripped);
+            let Ok(version) = node_semver::Version::parse(&padded) else {
+                continue;
+            };
+            sorted_versions.push(version);
+            tag_numerics.insert(numeric_str.to_owned());
+        }
+        // Unstable sort matches the cargo/npm registry convention for these
+        // final, already-unique version lists; `pdqsort` skips `Timsort`'s
+        // auxiliary buffer for the same observable ordering. See
+        // 0007-analyze.md F2.
+        sorted_versions.sort_unstable();
+        let highest_stable = dependency_check_updates_core::highest_stable(&sorted_versions);
+        Self {
+            sorted_versions,
+            highest_stable,
+            tag_numerics,
+        }
+    }
 }
 
 /// GitHub Tags API client.
@@ -93,14 +154,34 @@ impl GitHubActionsRegistry {
     /// `actions/checkout/sub/path` → `Some("actions/checkout")` (sub-action;
     ///   tags still live on the parent repo)
     /// `not-a-valid-name` → `None`
-    fn repo_key(name: &str) -> Option<String> {
-        let mut parts = name.splitn(3, '/');
-        let owner = parts.next()?;
-        let repo = parts.next()?;
-        if owner.is_empty() || repo.is_empty() {
+    ///
+    /// Returns a borrowed prefix of `name` (the formatted output was always
+    /// byte-equivalent to such a prefix). The dedup site in `resolve_batch`
+    /// upgrades to owned via `.to_owned()` only when the borrowed key is newly
+    /// seen, so a workflow with N deps over R unique repos allocates exactly
+    /// R `String`s — once per unique repo — instead of N times.
+    fn repo_key(name: &str) -> Option<&str> {
+        // First '/' separates owner from repo. An owner of zero length
+        // (`/foo`, `/`) is rejected so we never emit `/repos//repo/tags`.
+        let first = name.find('/')?;
+        if first == 0 {
             return None;
         }
-        Some(format!("{owner}/{repo}"))
+        let after = first + 1;
+        // Trailing slash (`foo/`) — no repo segment at all.
+        if after >= name.len() {
+            return None;
+        }
+        // End of the repo segment is either the next '/' or end-of-string.
+        // `'/'` is ASCII single-byte so every returned index sits on a UTF-8
+        // char boundary, keeping the final `&name[..end]` slice valid.
+        let end = name[after..].find('/').map_or(name.len(), |i| after + i);
+        // Empty repo segment (`foo//bar`) — same guard as the old
+        // `repo.is_empty()` check.
+        if end == after {
+            return None;
+        }
+        Some(&name[..end])
     }
 
     /// Fetch tags for a single repo.
@@ -185,33 +266,38 @@ impl GitHubActionsRegistry {
         target: TargetLevel,
     ) -> Vec<(usize, Result<ResolvedVersion, DcuError>)> {
         // Step 1: collect unique repos. Sub-actions (`owner/repo/sub`) collapse
-        // to the same key as `owner/repo`.
-        let mut unique_repos: HashSet<String> = HashSet::new();
+        // to the same key as `owner/repo`. Dedup on a borrowed `&str` so the
+        // owned `String` is allocated EXACTLY ONCE per unique repo — the prior
+        // `HashSet<String>` form took ownership before the dedup check and
+        // therefore allocated on every iteration only to drop the duplicates.
+        let mut seen: HashSet<&str> = HashSet::with_capacity(deps.len());
+        let mut unique_repos: Vec<String> = Vec::with_capacity(deps.len());
         for dep in deps {
             if let Some(key) = Self::repo_key(&dep.name) {
-                unique_repos.insert(key);
+                if seen.insert(key) {
+                    unique_repos.push(key.to_owned());
+                }
             }
         }
 
         // Step 2: fan out fetches in parallel.
-        let mut fetch_futures = Vec::with_capacity(unique_repos.len());
-        for repo in &unique_repos {
-            let repo = repo.clone();
-            let me = self.clone();
-            fetch_futures.push(async move {
-                let result = me.fetch_tags(&repo).await;
-                (repo, result)
-            });
-        }
-
-        let fetched = futures::future::join_all(fetch_futures).await;
-        let mut tags_by_repo: HashMap<String, Result<Vec<Tag>, String>> = HashMap::new();
+        let fetched = futures::future::join_all(unique_repos.into_iter().map(|repo| async move {
+            let result = self.fetch_tags(&repo).await;
+            (repo, result)
+        }))
+        .await;
+        // Build prepared tag data ONCE per unique repo (parse + sort +
+        // highest-stable). A workflow that uses the same repo across N jobs
+        // now pays this cost once instead of N times. Pre-size to avoid
+        // reallocation as we insert each repo's prepared data.
+        let mut prepared_by_repo: HashMap<String, Result<PreparedTags, String>> =
+            HashMap::with_capacity(fetched.len());
         for (repo, result) in fetched {
-            tags_by_repo.insert(repo, result);
+            prepared_by_repo.insert(repo, result.map(PreparedTags::new));
         }
 
-        // Step 3: resolve each dep against the cached tag list. Errors are
-        // duplicated per-dep so each failing dep gets its own diagnostic.
+        // Step 3: resolve each dep against the cached prepared data. Errors
+        // are duplicated per-dep so each failing dep gets its own diagnostic.
         let mut results = Vec::with_capacity(deps.len());
         for (idx, dep) in deps.iter().enumerate() {
             let Some(key) = Self::repo_key(&dep.name) else {
@@ -227,22 +313,22 @@ impl GitHubActionsRegistry {
 
             // Safe because `key` came from `repo_key(&dep.name)`, and every
             // such value was inserted into `unique_repos` (and therefore into
-            // `tags_by_repo`) above. Using `.expect()` documents the invariant
-            // and keeps the code path linear for coverage.
-            match tags_by_repo
-                .get(&key)
+            // `prepared_by_repo`) above. Using `.expect()` documents the
+            // invariant and keeps the code path linear for coverage.
+            match prepared_by_repo
+                .get(key)
                 .expect("tags cache must contain every unique repo key")
             {
-                Ok(tags) => {
-                    let mut resolved = select_from_tags(tags, &dep.current_req, target);
+                Ok(prepared) => {
+                    let mut resolved = select_from_tags(prepared, &dep.current_req, target);
                     // Collapse the resolved full version to the shortest ref
                     // form that an actual tag backs (e.g. `v8` → `v8.1.0` when
                     // only the full tag was published), so the emitted ref
                     // never dangles. `compute_updates` skips its generic
                     // precision truncation for GitHub on the strength of this.
-                    resolved.selected = resolved
-                        .selected
-                        .map(|sel| pick_existing_ref(&sel, &dep.current_req, tags));
+                    resolved.selected = resolved.selected.map(|sel| {
+                        pick_existing_ref(&sel, &dep.current_req, &prepared.tag_numerics)
+                    });
                     trace!(
                         action = %dep.name,
                         current = %dep.current_req,
@@ -325,27 +411,18 @@ fn normalize_tag(tag: &str) -> Option<node_semver::Version> {
         return None;
     }
     let stripped = tag.strip_prefix('v').unwrap_or(tag);
-    // Separate the numeric `1.2.3` head from a `-pre+build` tail.
-    let (numeric, suffix) = stripped
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .map_or((stripped, ""), |i| stripped.split_at(i));
-
-    let parts: Vec<&str> = numeric.split('.').filter(|s| !s.is_empty()).collect();
-    // `is_version_ref` above guarantees `numeric` starts with at least one
-    // digit, so `parts.len() >= 1` always — the previous explicit `0 =>`
-    // arm was unreachable and is folded into the wildcard `_` arm.
-    let padded = match parts.len() {
-        1 => format!("{}.0.0{}", parts[0], suffix),
-        2 => format!("{}.{}.0{}", parts[0], parts[1], suffix),
-        _ => format!("{numeric}{suffix}"),
-    };
+    // Pad the numeric `1.2.3` head to three segments, preserving any
+    // `-pre+build` tail. Shared with the cli `compute_updates` safety net
+    // so both crates pad identically.
+    //
+    // Byte-equivalence with the old inline logic: `is_version_ref` guarantees
+    // `stripped` starts with a digit, so `find(non-digit-dot)` produces a
+    // (numeric, suffix) split whose concatenation IS `stripped`. The shared
+    // helper's `_ => v.to_owned()` therefore yields the same bytes as the old
+    // `_ => format!("{numeric}{suffix}")` for >=3-segment inputs.
+    let padded = pad_to_three_segments(stripped);
 
     node_semver::Version::parse(&padded).ok()
-}
-
-/// Parse the user's current ref so we can compare against tag versions.
-fn parse_current_ref(req: &str) -> Option<node_semver::Version> {
-    normalize_tag(req)
 }
 
 /// Select a tag for the dep based on the target level.
@@ -361,30 +438,26 @@ fn parse_current_ref(req: &str) -> Option<node_semver::Version> {
 /// lookup per tag), so true publish-date ordering is intentionally not
 /// attempted — unlike the npm/crates.io/PyPI registries, whose responses
 /// already carry timestamps.
-fn select_from_tags(tags: &[Tag], current_req: &str, target: TargetLevel) -> ResolvedVersion {
-    // Parse + sort ascending by semver.
-    let mut versions: Vec<node_semver::Version> =
-        tags.iter().filter_map(|t| normalize_tag(&t.name)).collect();
-    versions.sort();
-
-    let highest_stable = versions
-        .iter()
-        .rev()
-        .find(|v| v.pre_release.is_empty())
-        .map(node_semver::Version::to_string);
-
-    let current = parse_current_ref(current_req);
+fn select_from_tags(
+    prepared: &PreparedTags,
+    current_req: &str,
+    target: TargetLevel,
+) -> ResolvedVersion {
+    // Parsing + sorting + highest-stable extraction live on `PreparedTags`,
+    // built once per unique repo by `resolve_batch`. This function is now
+    // only the per-dep `current_req` parse + `select_version` dispatch.
+    let current = normalize_tag(current_req);
 
     let selected = dependency_check_updates_core::select_version(
         current.as_ref(),
-        &versions,
+        &prepared.sorted_versions,
         target,
-        highest_stable.clone(),
+        prepared.highest_stable.as_deref(),
         None,
     );
 
     ResolvedVersion {
-        latest: highest_stable,
+        latest: prepared.highest_stable.clone(),
         selected,
     }
 }
@@ -398,27 +471,13 @@ fn tag_numeric_str(tag: &str) -> Option<&str> {
         return None;
     }
     let stripped = tag.strip_prefix('v').unwrap_or(tag);
-    Some(
-        stripped
-            .split(|c: char| !c.is_ascii_digit() && c != '.')
-            .next()
-            .unwrap_or("")
-            .trim_end_matches('.'),
-    )
+    Some(split_numeric_head(stripped).0.trim_end_matches('.'))
 }
 
 /// Count the segment precision of the user's current ref (`v7` → 1,
 /// `v7.6` → 2, `v7.6.0` → 3). Always at least 1.
 fn ref_precision(req: &str) -> usize {
-    let stripped = req.strip_prefix('v').unwrap_or(req);
-    stripped
-        .split(|c: char| !c.is_ascii_digit() && c != '.')
-        .next()
-        .unwrap_or("")
-        .split('.')
-        .filter(|s| !s.is_empty())
-        .count()
-        .max(1)
+    count_numeric_segments(req.strip_prefix('v').unwrap_or(req)).max(1)
 }
 
 /// Collapse a resolved full version to the shortest tag form that an actual
@@ -439,10 +498,8 @@ fn ref_precision(req: &str) -> usize {
 /// `taiki-e/install-action`, which publishes hundreds of `v2.x.y` patch tags)
 /// would be wrongly escalated to `v2.81.6`, surfacing a spurious update even
 /// though `@v2` already floats to that version.
-fn pick_existing_ref(selected: &str, current_req: &str, tags: &[Tag]) -> String {
-    let (numeric, suffix) = selected
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .map_or((selected, ""), |i| selected.split_at(i));
+fn pick_existing_ref(selected: &str, current_req: &str, tag_numerics: &HashSet<String>) -> String {
+    let (numeric, suffix) = split_numeric_head(selected);
     if !suffix.is_empty() {
         return selected.to_owned();
     }
@@ -461,21 +518,23 @@ fn pick_existing_ref(selected: &str, current_req: &str, tags: &[Tag]) -> String 
         return current_prefix;
     }
 
-    let exists = |p: usize| {
-        let candidate = segments[..p].join(".");
-        tags.iter()
-            .any(|t| tag_numeric_str(&t.name) == Some(candidate.as_str()))
-    };
-
+    // `tag_numerics` (the set of numeric tag prefixes such as `5.0.0`, `5`)
+    // is precomputed once per unique repo in `PreparedTags::new`, so every
+    // dep that shares the repo reuses the same HashSet instead of rebuilding
+    // a per-call one — turning the per-dep O(tags) HashSet build into O(1).
     // Prefer the shortest form at or above the pin precision; otherwise the
     // longest shorter form. The resolved version always came from a real tag,
     // so some precision in this order always matches — the `expect` documents
     // that invariant and keeps the success line on the covered path.
-    let chosen = (start..=len)
+    (start..=len)
         .chain((1..start).rev())
-        .find(|&p| exists(p))
-        .expect("resolved version is always backed by at least one tag");
-    segments[..chosen].join(".")
+        .find_map(|p| {
+            let candidate = segments[..p].join(".");
+            tag_numerics
+                .contains(candidate.as_str())
+                .then_some(candidate)
+        })
+        .expect("resolved version is always backed by at least one tag")
 }
 
 #[cfg(test)]
@@ -524,6 +583,7 @@ mod tests {
             name: name.to_owned(),
             current_req: current_req.to_owned(),
             section: DependencySection::GitHubActions,
+            path_version: None,
         }
     }
 
@@ -601,6 +661,16 @@ mod tests {
         Some("4.1.0"),
         Some("4.1.0")
     )]
+    // A four-segment tag looks version-like to `is_version_ref` but has no
+    // semver reading, so `Version::parse` refuses it. It must be dropped
+    // rather than derailing the whole tag list.
+    #[case::ignores_four_segment_tags(
+        &["v4.0.0", "v1.2.3.4", "v4.1.0"],
+        "v4",
+        TargetLevel::Latest,
+        Some("4.1.0"),
+        Some("4.1.0")
+    )]
     // Minor happy-path: stable v4.1.0 wins over the in-between prerelease.
     #[case::minor_rejects_pre_when_current_is_stable_happy_path(
         &["v4.0.0", "v4.1.0-beta.1", "v4.1.0"],
@@ -656,8 +726,8 @@ mod tests {
         #[case] expected_selected: Option<&str>,
         #[case] expected_latest: Option<&str>,
     ) {
-        let tags = make_tags(tag_names);
-        let r = select_from_tags(&tags, current_req, target);
+        let prepared = PreparedTags::new(make_tags(tag_names));
+        let r = select_from_tags(&prepared, current_req, target);
         assert_eq!(r.selected.as_deref(), expected_selected);
         assert_eq!(r.latest.as_deref(), expected_latest);
     }
@@ -723,8 +793,11 @@ mod tests {
         #[case] tag_names: &[&str],
         #[case] expected: &str,
     ) {
-        let tags = make_tags(tag_names);
-        assert_eq!(pick_existing_ref(selected, current, &tags), expected);
+        let prepared = PreparedTags::new(make_tags(tag_names));
+        assert_eq!(
+            pick_existing_ref(selected, current, &prepared.tag_numerics),
+            expected,
+        );
     }
 
     #[rstest]
@@ -732,13 +805,20 @@ mod tests {
     #[case::with_subdir("actions/checkout/sub/dir", Some("actions/checkout"))]
     #[case::single_segment("checkout", None)]
     #[case::empty_string("", None)]
-    // `splitn(3, '/')` yields empty strings for `foo/` and `/foo`; the
-    // empty-half guard must catch them to avoid `/repos/foo//tags` URLs.
+    // `find('/')` guards: leading slash `first == 0`, trailing slash
+    // `after >= name.len()`, empty repo segment `end == after`. These catch
+    // the edge cases to avoid `/repos/foo//tags` URLs.
     #[case::trailing_slash("foo/", None)]
     #[case::leading_slash("/foo", None)]
     #[case::just_slash("/", None)]
+    // Empty repo segment: the owner is present but the repo name is not, so
+    // the guard must fire before we emit `/repos/foo//tags`.
+    #[case::empty_repo_segment("foo//bar", None)]
     fn repo_key_cases(#[case] input: &str, #[case] expected: Option<&str>) {
-        assert_eq!(GitHubActionsRegistry::repo_key(input).as_deref(), expected);
+        // `repo_key` now returns `Option<&str>` directly — `.as_deref()` would
+        // be a no-op (`Option<&str>::as_deref()` returns the same `Option<&str>`)
+        // and trips `clippy::needless_option_as_deref`.
+        assert_eq!(GitHubActionsRegistry::repo_key(input), expected);
     }
 
     #[rstest]

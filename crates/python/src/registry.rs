@@ -6,11 +6,11 @@ use std::sync::Arc;
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, collect_task_results, select_version, strip_range_prefix,
+    build_client, current_req_is_prerelease, parse_and_select, send_checked,
 };
 
 /// `PyPI` registry client.
@@ -43,6 +43,17 @@ struct PyPiFile {
     upload_time_iso_8601: String,
     #[serde(default)]
     yanked: bool,
+}
+
+/// Predicate for a release with at least one non-yanked file.
+///
+/// Centralises the filter used by both the `Newest` arm and the
+/// version-sorted arm of [`PyPiRegistry::resolve_version`]'s slow path so
+/// the two stay in sync without re-introducing the wasted
+/// `(Version, &str)` tuple `Vec` the old code paid for on every non-Newest
+/// lookup.
+fn is_usable_release(files: &[PyPiFile]) -> bool {
+    files.iter().any(|f| !f.yanked)
 }
 
 impl PyPiRegistry {
@@ -82,23 +93,8 @@ impl PyPiRegistry {
         let url = format!("{}/{normalized}/json", self.base_url);
         debug!(package = name, %url, "fetching PyPI package info");
 
-        let response =
-            self.client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| DcuError::RegistryLookup {
-                    package: name.to_owned(),
-                    detail: e.to_string(),
-                })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            return Err(DcuError::RegistryLookup {
-                package: name.to_owned(),
-                detail: format!("HTTP {status}"),
-            });
-        }
+        let request = self.client.get(&url);
+        let response = send_checked(request, name).await?;
 
         response.json().await.map_err(|e| DcuError::RegistryLookup {
             package: name.to_owned(),
@@ -127,47 +123,80 @@ impl PyPiRegistry {
 
         // PyPI's `info.version` is the canonical latest stable; it doubles as
         // the fallback for `Latest`/empty-list and unparseable `Minor`/`Patch`.
-        let latest = Some(info.info.version.clone());
+        let latest = Some(info.info.version);
 
-        // (parsed PEP 440 version, max upload timestamp) for every release that
-        // has at least one non-yanked file and parses cleanly.
-        let mut candidates: Vec<(pep440_rs::Version, String)> = info
-            .releases
-            .iter()
-            .filter_map(|(ver_str, files)| {
-                if files.is_empty() || files.iter().all(|f| f.yanked) {
+        // Detect if the user's current requirement is a prerelease. When it
+        // is, we cannot use the `info.version` fast path because the user may
+        // be ahead of the canonical stable version (e.g. `2.0.0rc1` while
+        // `info.version` points at `1.1.20`), and we must consider the full
+        // release list to preserve the prerelease-tail policy that
+        // `parse_and_select` encodes. An unparseable requirement (e.g. `"*"`)
+        // is treated as stable, matching the slow path's `current = None`
+        // branch which also routes through `latest_for_stable = info.version`.
+        let current_is_prerelease =
+            current_req_is_prerelease::<pep440_rs::Version>(&dep.current_req);
+
+        // Fast path: Latest + current is stable → return PyPI's canonical
+        // `info.version` directly. The slow path's `parse_and_select` arm for
+        // (`Latest`, stable current) is documented to fall back to
+        // `latest_for_stable` (= `info.version`), so this is byte-equivalent —
+        // it just avoids enumerating + parsing + sorting every release.
+        // Mirrors the `dist-tags.latest` fast path in
+        // `crates/node/src/registry.rs::resolve_version`.
+        let selected = if target == TargetLevel::Latest && !current_is_prerelease {
+            trace!(
+                package = %dep.name,
+                latest = ?latest,
+                "fast path: using PyPI info.version directly"
+            );
+            latest.clone()
+        } else if target == TargetLevel::Newest {
+            // Most recently uploaded by date (ISO-8601 sorts chronologically),
+            // which can differ from the highest version number. Stream the
+            // releases straight into `max_by` — no intermediate `Vec`, no
+            // sort, since the version ordering the old slow path computed
+            // was thrown away in this arm anyway. The upload `&str` is
+            // borrowed out of `info.releases` and dies with the iterator.
+            // `max_by` returns `None` only on an empty iterator, which
+            // already means there is nothing to fall back to.
+            info.releases
+                .iter()
+                .filter_map(|(ver_str, files)| {
+                    if !is_usable_release(files) {
+                        return None;
+                    }
+                    let parsed = pep440_rs::Version::from_str(ver_str).ok()?;
+                    let upload = files
+                        .iter()
+                        .map(|f| f.upload_time_iso_8601.as_str())
+                        .max()
+                        .unwrap_or("");
+                    Some((parsed, upload))
+                })
+                .max_by(|a, b| a.1.cmp(b.1))
+                .map(|(v, _)| v.to_string())
+        } else {
+            // `parse_and_select` still wants an ascending list, so we sort
+            // — but we sort plain `pep440_rs::Version`s instead of
+            // `(Version, &str)` tuples whose `&str` half this arm never
+            // reads, dropping one allocation pass and a wider comparator.
+            // Shared strip→parse→select sequence centralised in `core`;
+            // PyPI's `info.version` (canonical latest stable) doubles as
+            // the fallback for the stable-`Latest` and unparseable-
+            // `Minor`/`Patch` cases.
+            let mut versions: Vec<pep440_rs::Version> = Vec::with_capacity(info.releases.len());
+            versions.extend(info.releases.iter().filter_map(|(ver_str, files)| {
+                if !is_usable_release(files) {
                     return None;
                 }
-                let parsed = pep440_rs::Version::from_str(ver_str).ok()?;
-                let upload = files
-                    .iter()
-                    .map(|f| f.upload_time_iso_8601.clone())
-                    .max()
-                    .unwrap_or_default();
-                Some((parsed, upload))
-            })
-            .collect();
-        candidates.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let versions: Vec<pep440_rs::Version> = candidates.iter().map(|(v, _)| v.clone()).collect();
-
-        let selected = if target == TargetLevel::Newest {
-            // Most recently uploaded by date (ISO-8601 sorts chronologically),
-            // which can differ from the highest version number.
-            candidates
-                .iter()
-                .max_by(|a, b| a.1.cmp(&b.1))
-                .map(|(v, _)| v.to_string())
-                .or_else(|| versions.last().map(ToString::to_string))
-        } else {
-            let current = pep440_rs::Version::from_str(strip_range_prefix(&dep.current_req)).ok();
-            select_version(
-                current.as_ref(),
-                &versions,
-                target,
-                latest.clone(),
-                latest.clone(),
-            )
+                pep440_rs::Version::from_str(ver_str).ok()
+            }));
+            // Unstable sort matches the cargo/npm registry convention for
+            // these final, already-unique version lists; `pdqsort` skips
+            // `Timsort`'s auxiliary buffer for the same observable ordering.
+            // See 0007-analyze.md F2.
+            versions.sort_unstable();
+            parse_and_select(&dep.current_req, &versions, target, latest.as_deref())
         };
 
         debug!(
@@ -182,28 +211,21 @@ impl PyPiRegistry {
     }
 
     /// Resolve versions for a batch of dependencies concurrently.
+    ///
+    /// Delegates the `join_all` pipeline to
+    /// [`dependency_check_updates_core::resolve_batch_concurrent`] so the
+    /// concurrency model — no `tokio::spawn`, no per-dep `JoinHandle` /
+    /// `DependencySpec` clones, source-order preserved — lives in exactly one
+    /// place across every per-dep registry.
     pub async fn resolve_batch(
         &self,
         deps: &[DependencySpec],
         target: TargetLevel,
     ) -> Vec<(usize, Result<ResolvedVersion, DcuError>)> {
-        let mut handles = Vec::with_capacity(deps.len());
-
-        for (idx, dep) in deps.iter().enumerate() {
-            let dep = dep.clone();
-            let registry = self.clone();
-
-            let handle = tokio::spawn(async move {
-                let result = registry.resolve_version(&dep, target).await;
-                (idx, result)
-            });
-
-            handles.push(handle);
-        }
-
-        let mut results = collect_task_results(handles).await;
-        results.sort_unstable_by_key(|(idx, _)| *idx);
-        results
+        dependency_check_updates_core::resolve_batch_concurrent(deps, |dep| {
+            self.resolve_version(dep, target)
+        })
+        .await
     }
 }
 
@@ -244,6 +266,7 @@ mod tests {
             name: name.to_owned(),
             current_req: current_req.to_owned(),
             section: DependencySection::ProjectDependencies,
+            path_version: None,
         }
     }
 
@@ -486,5 +509,76 @@ mod tests {
             Some("1.5.0"),
             "all-yanked 1.9.0 must be excluded; Greatest should fall back to 1.5.0"
         );
+    }
+
+    /// Covers the `if !is_usable_release(files) { return None; }` filter
+    /// inside the `TargetLevel::Newest` arm of `resolve_version` (registry.rs
+    /// line 166) — a distinct code path from `resolve_version_skips_all_yanked_release`
+    /// above, which only exercises the equivalent guard in the non-Newest
+    /// slow path (line 190). The `2.0.0` release has every file yanked and
+    /// carries the *most recent* upload timestamp; if the Newest arm's
+    /// yanked filter regressed, `max_by` would pick it purely on date and
+    /// `dcu -t newest` would recommend an unpublished release.
+    #[rstest]
+    #[tokio::test]
+    async fn resolve_version_newest_skips_all_yanked_release(#[future] mock_server: MockServer) {
+        let server = mock_server.await;
+        Mock::given(method("GET"))
+            .and(path("/newesty/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": "1.2.0"},
+                "releases": {
+                    "1.0.0": [{"upload_time_iso_8601": "2022-01-01T00:00:00Z", "yanked": false}],
+                    "1.2.0": [{"upload_time_iso_8601": "2023-01-01T00:00:00Z", "yanked": false}],
+                    "2.0.0": [
+                        {"upload_time_iso_8601": "2024-06-01T00:00:00Z", "yanked": true},
+                        {"upload_time_iso_8601": "2024-06-02T00:00:00Z", "yanked": true}
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let registry = PyPiRegistry::with_base_url(&server.uri());
+        let dep = make_dep("newesty", ">=1.0.0");
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Newest)
+            .await
+            .expect("resolve_version should succeed");
+        assert_eq!(
+            result.selected.as_deref(),
+            Some("1.2.0"),
+            "all-yanked 2.0.0 must be excluded from Newest despite its later upload date"
+        );
+    }
+
+    /// `Latest` + stable current must short-circuit on `info.version` without
+    /// consulting `releases`. The mock body deliberately omits the `releases`
+    /// map; the fast path returns `info.version` regardless. Without the fast
+    /// path the empty-releases slow path would still fall back to
+    /// `info.version` via `parse_and_select`'s `latest_for_stable` slot, so
+    /// the assertion holds in both worlds — but the absence of a populated
+    /// `releases` block keeps this test pinned to the public behavior the
+    /// fast path is required to preserve.
+    #[rstest]
+    #[tokio::test]
+    async fn resolve_version_latest_fast_path_uses_info_version(#[future] mock_server: MockServer) {
+        let server = mock_server.await;
+        Mock::given(method("GET"))
+            .and(path("/requests/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info": {"version": "2.31.0"}
+            })))
+            .mount(&server)
+            .await;
+
+        let registry = PyPiRegistry::with_base_url(&server.uri());
+        let dep = make_dep("requests", ">=2.28.0");
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .expect("resolve_version should succeed");
+        assert_eq!(result.latest.as_deref(), Some("2.31.0"));
+        assert_eq!(result.selected.as_deref(), Some("2.31.0"));
     }
 }

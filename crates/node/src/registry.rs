@@ -1,15 +1,18 @@
 //! npm registry client for looking up package versions.
 
+use std::borrow::Cow;
+use std::fmt;
 use std::sync::Arc;
 
 use reqwest::Client;
 use serde::Deserialize;
+use serde::de::{IgnoredAny, MapAccess, Visitor};
 use tokio::sync::Semaphore;
 use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, collect_task_results, strip_range_prefix,
+    build_client, current_req_is_prerelease, send_checked,
 };
 
 /// npm registry client for looking up package versions.
@@ -25,11 +28,62 @@ pub struct NpmRegistry {
 struct NpmPackageInfo {
     #[serde(rename = "dist-tags")]
     dist_tags: Option<DistTags>,
-    versions: Option<serde_json::Map<String, serde_json::Value>>,
+    versions: Option<VersionKeys>,
     /// Map of version → ISO-8601 publish time. Only present in the *full*
     /// packument (the abbreviated `install-v1` format omits it), so it is
     /// fetched on demand for `--target newest`.
     time: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// List of version-string keys extracted from a packument `versions` JSON
+/// object. Each value body (the nested per-version metadata: `dependencies`,
+/// `peerDependencies`, `dist`, ...) is walked past with `IgnoredAny` instead
+/// of being materialised into a `serde_json::Value` tree, since downstream
+/// code only ever needs the keys. Saves the per-version `Value`-tree
+/// allocation on every npm packument parse — popular packages publish
+/// hundreds of versions, each with multi-KB nested bodies. The container is a
+/// `Vec<String>` (not a `HashSet`) because JSON object keys are unique by
+/// spec — the downstream consumer (`extract_sorted_versions`) only iterates
+/// the keys and sorts them, never probing membership, so the per-key hashing
+/// cost of a `HashSet` was pure overhead.
+#[derive(Debug)]
+struct VersionKeys(Vec<String>);
+
+/// Collects the keys of the packument's `versions` object.
+///
+/// Lives at module scope rather than nested inside [`VersionKeys::deserialize`]
+/// so it is one plain item with one set of instantiations, which keeps its
+/// coverage attributable.
+struct VersionKeysVisitor;
+
+impl<'de> Visitor<'de> for VersionKeysVisitor {
+    type Value = Vec<String>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a JSON object whose keys are version strings")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut keys = Vec::with_capacity(map.size_hint().unwrap_or(0));
+        while let Some(key) = map.next_key::<String>()? {
+            // Skip the value body without materialising it.
+            let _: IgnoredAny = map.next_value()?;
+            keys.push(key);
+        }
+        Ok(keys)
+    }
+}
+
+impl<'de> Deserialize<'de> for VersionKeys {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(VersionKeysVisitor).map(Self)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,11 +116,11 @@ impl NpmRegistry {
     ///
     /// Scoped packages like `@scope/name` need the `/` encoded as `%2F`.
     #[must_use]
-    pub fn encode_package_name(name: &str) -> String {
+    pub fn encode_package_name(name: &str) -> Cow<'_, str> {
         if name.starts_with('@') {
-            name.replacen('/', "%2F", 1)
+            Cow::Owned(name.replacen('/', "%2F", 1))
         } else {
-            name.to_owned()
+            Cow::Borrowed(name)
         }
     }
 
@@ -97,24 +151,8 @@ impl NpmRegistry {
             "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*"
         };
 
-        let response = self
-            .client
-            .get(&url)
-            .header("Accept", accept)
-            .send()
-            .await
-            .map_err(|e| DcuError::RegistryLookup {
-                package: name.to_owned(),
-                detail: e.to_string(),
-            })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            return Err(DcuError::RegistryLookup {
-                package: name.to_owned(),
-                detail: format!("HTTP {status}"),
-            });
-        }
+        let request = self.client.get(&url).header("Accept", accept);
+        let response = send_checked(request, name).await?;
 
         response.json().await.map_err(|e| DcuError::RegistryLookup {
             package: name.to_owned(),
@@ -134,11 +172,11 @@ impl NpmRegistry {
     ) -> Result<ResolvedVersion, DcuError> {
         // `newest` needs publish timestamps, which only the full packument
         // carries; every other target uses the cheaper abbreviated format.
-        let info = self
+        let mut info = self
             .fetch_package_info(&dep.name, target == TargetLevel::Newest)
             .await?;
 
-        let latest = info.dist_tags.as_ref().and_then(|dt| dt.latest.clone());
+        let latest = info.dist_tags.take().and_then(|dt| dt.latest);
 
         // Detect if the user's current requirement is a prerelease. When it is,
         // we cannot use the dist-tags.latest fast path because the user may be
@@ -146,7 +184,7 @@ impl NpmRegistry {
         // dist-tags.latest points at `1.1.20`), and we must consider the full
         // sorted version list to preserve the "prerelease tail" policy.
         let current_is_prerelease =
-            parse_base_version(&dep.current_req).is_some_and(|v| !v.pre_release.is_empty());
+            current_req_is_prerelease::<node_semver::Version>(&dep.current_req);
 
         // Fast path: Latest + current is stable → return dist-tags.latest directly.
         let selected = if target == TargetLevel::Latest && !current_is_prerelease {
@@ -171,7 +209,15 @@ impl NpmRegistry {
                 newest_by_date(&info, &all_versions)
                     .or_else(|| all_versions.last().map(ToString::to_string))
             } else {
-                select_version(&dep.current_req, latest.as_ref(), &all_versions, target)
+                // Shared strip→parse→select sequence centralised in `core`;
+                // npm's `latest` (dist-tags) doubles as the fallback for the
+                // stable-`Latest` and unparseable-`Minor`/`Patch` cases.
+                dependency_check_updates_core::parse_and_select(
+                    &dep.current_req,
+                    &all_versions,
+                    target,
+                    latest.as_deref(),
+                )
             }
         };
 
@@ -194,28 +240,20 @@ impl NpmRegistry {
     /// Resolve versions for a batch of dependencies concurrently.
     ///
     /// Returns `(index, result)` pairs preserving the original ordering.
+    /// Delegates the `join_all` pipeline to
+    /// [`dependency_check_updates_core::resolve_batch_concurrent`] so the
+    /// concurrency model — no `tokio::spawn`, no per-dep `JoinHandle` /
+    /// `DependencySpec` clones, source-order preserved — lives in exactly one
+    /// place across every per-dep registry.
     pub async fn resolve_batch(
         &self,
         deps: &[DependencySpec],
         target: TargetLevel,
     ) -> Vec<(usize, Result<ResolvedVersion, DcuError>)> {
-        let mut handles = Vec::with_capacity(deps.len());
-
-        for (idx, dep) in deps.iter().enumerate() {
-            let dep = dep.clone();
-            let registry = self.clone();
-
-            let handle = tokio::spawn(async move {
-                let result = registry.resolve_version(&dep, target).await;
-                (idx, result)
-            });
-
-            handles.push(handle);
-        }
-
-        let mut results = collect_task_results(handles).await;
-        results.sort_unstable_by_key(|(idx, _)| *idx);
-        results
+        dependency_check_updates_core::resolve_batch_concurrent(deps, |dep| {
+            self.resolve_version(dep, target)
+        })
+        .await
     }
 }
 
@@ -238,12 +276,10 @@ fn newest_by_date(info: &NpmPackageInfo, all_versions: &[node_semver::Version]) 
         .iter()
         .filter_map(|v| {
             let s = v.to_string();
-            times
-                .get(&s)
-                .and_then(serde_json::Value::as_str)
-                .map(|t| (t.to_owned(), s))
+            let t = times.get(&s).and_then(serde_json::Value::as_str)?;
+            Some((t, s))
         })
-        .max_by(|a, b| a.0.cmp(&b.0))
+        .max_by(|a, b| a.0.cmp(b.0))
         .map(|(_, s)| s)
 }
 
@@ -254,42 +290,16 @@ fn extract_sorted_versions(info: &NpmPackageInfo) -> Vec<node_semver::Version> {
         return Vec::new();
     };
 
-    let mut parsed: Vec<node_semver::Version> = versions
-        .keys()
-        .filter_map(|v| node_semver::Version::parse(v).ok())
-        .collect();
+    let mut parsed: Vec<node_semver::Version> = Vec::with_capacity(versions.0.len());
+    parsed.extend(
+        versions
+            .0
+            .iter()
+            .filter_map(|v| node_semver::Version::parse(v).ok()),
+    );
 
     parsed.sort_unstable();
     parsed
-}
-
-/// Select the appropriate version based on target level.
-///
-/// Thin wrapper over [`dependency_check_updates_core::select_version`]: parses
-/// the current requirement and supplies npm's fallbacks (the dist-tags latest
-/// for both the stable-`Latest` and unparseable-`Minor`/`Patch` cases).
-fn select_version(
-    current_req_str: &str,
-    latest: Option<&String>,
-    all_versions: &[node_semver::Version],
-    target: TargetLevel,
-) -> Option<String> {
-    let current = parse_base_version(current_req_str);
-    dependency_check_updates_core::select_version(
-        current.as_ref(),
-        all_versions,
-        target,
-        latest.cloned(),
-        latest.cloned(),
-    )
-}
-
-/// Parse a base version from a requirement string.
-///
-/// Strips leading range operators: `^1.2.3` -> `1.2.3`, `~2.0.0` -> `2.0.0`,
-/// `>=1.0.0` -> `1.0.0`.
-fn parse_base_version(req_str: &str) -> Option<node_semver::Version> {
-    node_semver::Version::parse(strip_range_prefix(req_str)).ok()
 }
 
 #[cfg(test)]
@@ -347,6 +357,7 @@ mod tests {
             name: name.to_owned(),
             current_req: current_req.to_owned(),
             section: DependencySection::Dependencies,
+            path_version: None,
         }
     }
 
@@ -364,28 +375,7 @@ mod tests {
     #[case::scoped_types("@types/react", "@types%2Freact")]
     #[case::scoped_babel("@babel/core", "@babel%2Fcore")]
     fn encode_package_name_cases(#[case] input: &str, #[case] expected: &str) {
-        assert_eq!(NpmRegistry::encode_package_name(input), expected);
-    }
-
-    #[rstest]
-    // Range prefix variants strip to the same `1.2.3` (or `1.0.0` for `>=`).
-    // `None` ⇒ the requirement has no parseable numeric prefix.
-    #[case::caret("^1.2.3", Some((1, 2, 3)))]
-    #[case::tilde("~1.2.3", Some((1, 2, 3)))]
-    #[case::gte(">=1.0.0", Some((1, 0, 0)))]
-    #[case::bare("1.2.3", Some((1, 2, 3)))]
-    #[case::star("*", None)]
-    fn parse_base_version_cases(#[case] input: &str, #[case] expected: Option<(u64, u64, u64)>) {
-        let result = parse_base_version(input);
-        match expected {
-            Some((major, minor, patch)) => {
-                let v = result.unwrap();
-                assert_eq!(v.major, major);
-                assert_eq!(v.minor, minor);
-                assert_eq!(v.patch, patch);
-            }
-            None => assert!(result.is_none()),
-        }
+        assert_eq!(NpmRegistry::encode_package_name(input).as_ref(), expected);
     }
 
     #[rstest]
@@ -425,9 +415,15 @@ mod tests {
         #[case] target: TargetLevel,
         #[case] expected: Option<&str>,
     ) {
-        let latest = latest_str.to_owned();
         let versions = make_versions(versions);
-        let got = select_version(current_req, Some(&latest), &versions, target);
+        // Drives the same algorithm the registry now calls directly: the
+        // ecosystem-agnostic helper in `core` that fuses strip→parse→select.
+        let got = dependency_check_updates_core::parse_and_select::<node_semver::Version>(
+            current_req,
+            &versions,
+            target,
+            Some(latest_str),
+        );
         assert_eq!(got, expected.map(ToOwned::to_owned));
     }
 
@@ -436,13 +432,12 @@ mod tests {
         // Current: 4.0.0-beta.1. Unrelated 5.0.0-alpha.1 must NOT be selected.
         // Kept separate because its assertion is `assert_ne!`, not `assert_eq!`,
         // and rstest parametrization would obscure that distinction.
-        let latest = "3.5.0".to_owned();
         let versions = make_versions(&["3.5.0", "4.0.0-beta.1", "5.0.0-alpha.1"]);
-        let result = select_version(
+        let result = dependency_check_updates_core::parse_and_select::<node_semver::Version>(
             "4.0.0-beta.1",
-            Some(&latest),
             &versions,
             TargetLevel::Latest,
+            Some("3.5.0"),
         );
         assert_ne!(result, Some("5.0.0-alpha.1".to_owned()));
     }
@@ -451,22 +446,11 @@ mod tests {
     fn test_extract_sorted_versions() {
         let info = NpmPackageInfo {
             dist_tags: None,
-            versions: Some({
-                let mut map = serde_json::Map::new();
-                map.insert(
-                    "2.0.0".to_owned(),
-                    serde_json::Value::Object(serde_json::Map::new()),
-                );
-                map.insert(
-                    "1.0.0".to_owned(),
-                    serde_json::Value::Object(serde_json::Map::new()),
-                );
-                map.insert(
-                    "1.5.0".to_owned(),
-                    serde_json::Value::Object(serde_json::Map::new()),
-                );
-                map
-            }),
+            versions: Some(VersionKeys(vec![
+                "2.0.0".to_owned(),
+                "1.0.0".to_owned(),
+                "1.5.0".to_owned(),
+            ])),
             time: None,
         };
         let versions = extract_sorted_versions(&info);
@@ -485,6 +469,66 @@ mod tests {
         };
         let versions = extract_sorted_versions(&info);
         assert!(versions.is_empty());
+    }
+
+    /// `versions` is deserialized by a hand-written `Visitor` so the packument's
+    /// multi-KB per-version bodies are walked past instead of materialised.
+    /// A registry that answers with the wrong JSON shape must therefore produce
+    /// a readable serde error naming what was expected, not a bare "invalid
+    /// type" — which is exactly what `Visitor::expecting` supplies.
+    #[test]
+    fn version_keys_rejects_a_non_object_with_an_explanatory_error() {
+        let error = serde_json::from_str::<NpmPackageInfo>(r#"{"versions": ["1.0.0"]}"#)
+            .expect_err("an array is not a valid `versions` map");
+
+        assert!(
+            error
+                .to_string()
+                .contains("a JSON object whose keys are version strings"),
+            "the visitor's `expecting` text must reach the message: {error}"
+        );
+    }
+
+    /// `serde_json` rejects a mis-shaped `versions` before it ever reaches the
+    /// visitor, so that route only exercises `expecting`. Feeding the visitor a
+    /// sequence directly drives its inherited `visit_seq`, proving the visitor
+    /// itself — not just the JSON parser in front of it — refuses anything that
+    /// is not a map, and does so with the same explanatory wording.
+    #[test]
+    fn version_keys_rejects_a_sequence_handed_straight_to_the_visitor() {
+        use serde::de::IntoDeserializer;
+        use serde::de::value::{Error as ValueError, SeqDeserializer};
+
+        let deserializer: SeqDeserializer<_, ValueError> = SeqDeserializer::new(
+            ["1.0.0"]
+                .into_iter()
+                .map(IntoDeserializer::into_deserializer),
+        );
+
+        let error =
+            VersionKeys::deserialize(deserializer).expect_err("a sequence is not a versions map");
+
+        assert!(
+            error
+                .to_string()
+                .contains("a JSON object whose keys are version strings"),
+            "the visitor must explain what it wanted: {error}"
+        );
+    }
+
+    #[test]
+    fn version_keys_collects_object_keys_and_skips_their_bodies() {
+        // The happy path of the same Visitor: keys are kept, the nested
+        // per-version metadata is walked past without being materialised.
+        let info: NpmPackageInfo = serde_json::from_str(
+            r#"{"versions": {"1.0.0": {"dist": {"tarball": "x"}}, "2.0.0": {}}}"#,
+        )
+        .expect("a versions object must deserialize");
+
+        let versions = extract_sorted_versions(&info);
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].to_string(), "1.0.0");
+        assert_eq!(versions[1].to_string(), "2.0.0");
     }
 
     #[rstest]

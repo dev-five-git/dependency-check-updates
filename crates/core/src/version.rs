@@ -6,7 +6,10 @@
 //! once behind the [`SelectableVersion`] trait so the three registry clients
 //! no longer carry near-identical copies of it.
 
+use std::str::FromStr;
+
 use crate::types::TargetLevel;
+use crate::util::strip_range_prefix;
 
 /// A version type the [`select_version`] algorithm can operate on.
 ///
@@ -72,6 +75,21 @@ impl SelectableVersion for pep440_rs::Version {
     }
 }
 
+/// Return the highest stable version from an ascending sorted version slice.
+///
+/// Registry clients use this for their shared "latest stable" fallback after
+/// filtering and sorting concrete ecosystem versions. Pre-release versions are
+/// skipped; returns `None` when the list is empty or contains only
+/// pre-releases.
+#[must_use]
+pub fn highest_stable<V: SelectableVersion>(sorted_asc: &[V]) -> Option<String> {
+    sorted_asc
+        .iter()
+        .rev()
+        .find(|v| !v.is_prerelease())
+        .map(ToString::to_string)
+}
+
 /// Select the best candidate for `target` from a pre-sorted (ascending)
 /// `all_versions` list.
 ///
@@ -92,11 +110,11 @@ pub fn select_version<V: SelectableVersion>(
     current: Option<&V>,
     all_versions: &[V],
     target: TargetLevel,
-    latest_for_stable: Option<String>,
-    unparseable_minor_patch: Option<String>,
+    latest_for_stable: Option<&str>,
+    unparseable_minor_patch: Option<&str>,
 ) -> Option<String> {
     if all_versions.is_empty() {
-        return latest_for_stable;
+        return latest_for_stable.map(ToOwned::to_owned);
     }
 
     let current_is_prerelease = current.is_some_and(SelectableVersion::is_prerelease);
@@ -125,10 +143,10 @@ pub fn select_version<V: SelectableVersion>(
             .rev()
             .find(accept)
             .map(ToString::to_string),
-        TargetLevel::Latest => latest_for_stable,
+        TargetLevel::Latest => latest_for_stable.map(ToOwned::to_owned),
         TargetLevel::Greatest | TargetLevel::Newest => all_versions.last().map(ToString::to_string),
         TargetLevel::Minor => match current {
-            None => unparseable_minor_patch,
+            None => unparseable_minor_patch.map(ToOwned::to_owned),
             Some(cur) => all_versions
                 .iter()
                 .rev()
@@ -136,7 +154,7 @@ pub fn select_version<V: SelectableVersion>(
                 .map(ToString::to_string),
         },
         TargetLevel::Patch => match current {
-            None => unparseable_minor_patch,
+            None => unparseable_minor_patch.map(ToOwned::to_owned),
             Some(cur) => all_versions
                 .iter()
                 .rev()
@@ -144,6 +162,54 @@ pub fn select_version<V: SelectableVersion>(
                 .map(ToString::to_string),
         },
     }
+}
+
+/// Strip the range prefix from `current_req_str`, parse the remainder as `V`,
+/// and run [`select_version`] with the parsed current and `latest` filling
+/// BOTH the `latest_for_stable` and `unparseable_minor_patch` fallback slots.
+///
+/// The three per-language registries (`npm`, `crates.io`, `PyPI`) share this
+/// exact strip→parse→select sequence and the same identical-fallback policy
+/// (each ecosystem's `latest` field doubles as both fallbacks). Centralising
+/// it here matches the existing centralisation of [`select_version`] itself
+/// and removes a parallel block of code that had been reimplemented in each
+/// registry crate.
+///
+/// `latest` is `Option<&str>` (not `Option<&String>`) so callers can pass
+/// either an owned `Option<String>` (`x.as_deref()`) or a borrow without
+/// further allocation. Returns `None` when no candidate matches.
+#[must_use]
+pub fn parse_and_select<V>(
+    current_req_str: &str,
+    all_versions: &[V],
+    target: TargetLevel,
+    latest: Option<&str>,
+) -> Option<String>
+where
+    V: SelectableVersion + FromStr,
+{
+    let stripped = strip_range_prefix(current_req_str);
+    let current = V::from_str(stripped).ok();
+    select_version(current.as_ref(), all_versions, target, latest, latest)
+}
+
+/// Return `true` when the current requirement string resolves to a pre-release
+/// version after stripping any leading range operator.
+///
+/// Strips the range prefix with [`strip_range_prefix`], parses the remainder
+/// as `V`, and delegates to [`SelectableVersion::is_prerelease`]. Returns
+/// `false` for any input that cannot be parsed (e.g. `"*"` or `""`), matching
+/// the convention that an unparseable requirement is treated as stable.
+///
+/// Used by registry fast-paths that need to know whether the user's current
+/// pin is a pre-release before deciding whether to skip the full version-list
+/// enumeration.
+#[must_use]
+pub fn current_req_is_prerelease<V>(current_req: &str) -> bool
+where
+    V: SelectableVersion + FromStr,
+{
+    V::from_str(strip_range_prefix(current_req)).is_ok_and(|v| v.is_prerelease())
 }
 
 #[cfg(test)]
@@ -274,10 +340,67 @@ mod tests {
             cur.as_ref(),
             &candidates,
             target,
-            latest_for_stable.map(ToOwned::to_owned),
-            unparseable_minor_patch.map(ToOwned::to_owned),
+            latest_for_stable,
+            unparseable_minor_patch,
         );
         assert_eq!(selected, expected.map(ToOwned::to_owned));
+    }
+
+    #[rstest]
+    #[case::empty(&[], None)]
+    #[case::stable_prerelease_mix(
+        &["1.0.0", "2.0.0-alpha.1", "2.0.0", "3.0.0-rc.1"],
+        Some("2.0.0"),
+    )]
+    #[case::all_prerelease(&["1.0.0-alpha.1", "2.0.0-rc.1"], None)]
+    fn highest_stable_cases(#[case] version_strs: &[&str], #[case] expected: Option<&str>) {
+        let candidates = vers(version_strs);
+
+        let selected = highest_stable(&candidates);
+
+        assert_eq!(selected.as_deref(), expected);
+    }
+
+    /// Coverage for [`current_req_is_prerelease`] against both `semver::Version`
+    /// (node/GitHub semantics: `!pre_release.is_empty()`) and `pep440_rs::Version`
+    /// (`PyPI` semantics: `any_prerelease()`). Unparseable inputs must return `false`.
+    #[rstest]
+    // semver::Version — stable inputs
+    #[case::semver_stable_bare("1.2.3", false)]
+    #[case::semver_stable_caret("^1.2.3", false)]
+    #[case::semver_stable_tilde("~2.0.0", false)]
+    #[case::semver_stable_gte(">=3.0.0", false)]
+    // semver::Version — prerelease inputs
+    #[case::semver_prerelease_bare("1.0.0-rc.1", true)]
+    #[case::semver_prerelease_caret("^2.0.0-beta.3", true)]
+    // semver::Version — unparseable (star, empty) → false
+    #[case::semver_unparseable_star("*", false)]
+    #[case::semver_unparseable_empty("", false)]
+    fn current_req_is_prerelease_semver_cases(#[case] input: &str, #[case] expected: bool) {
+        assert_eq!(
+            current_req_is_prerelease::<semver::Version>(input),
+            expected
+        );
+    }
+
+    #[rstest]
+    // pep440_rs::Version — stable inputs
+    #[case::pep440_stable_bare("1.2.3", false)]
+    #[case::pep440_stable_gte(">=2.0.0", false)]
+    // pep440_rs::Version — prerelease inputs (alpha, beta, rc, dev)
+    #[case::pep440_alpha("2.0.0a1", true)]
+    #[case::pep440_beta("1.0.0b2", true)]
+    #[case::pep440_rc("3.0.0rc1", true)]
+    #[case::pep440_dev("1.0.dev0", true)]
+    #[case::pep440_rc_with_prefix(">=2.0.0rc1", true)]
+    // pep440_rs::Version — unparseable → false
+    #[case::pep440_unparseable_star("*", false)]
+    #[case::pep440_unparseable_empty("", false)]
+    fn current_req_is_prerelease_pep440_cases(#[case] input: &str, #[case] expected: bool) {
+        assert_eq!(
+            current_req_is_prerelease::<pep440_rs::Version>(input),
+            expected
+        );
     }
 
     #[test]

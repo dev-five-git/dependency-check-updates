@@ -12,10 +12,11 @@ mod registry;
 use std::path::Path;
 
 use dependency_check_updates_core::manifest::{ManifestHandler, ParsedManifest};
+use dependency_check_updates_core::patch::Patch;
 use dependency_check_updates_core::{DcuError, ManifestKind, ManifestRef, PlannedUpdate};
 
 use parser::PackageJsonManifest;
-use patcher::{JsonPatcher, Patch};
+use patcher::JsonPatcher;
 pub use registry::NpmRegistry;
 
 /// Node.js manifest handler for `package.json` files.
@@ -33,7 +34,6 @@ impl ManifestHandler for NodeHandler {
                 path: path.to_path_buf(),
                 kind: ManifestKind::PackageJson,
             },
-            original_text: manifest.original_text,
             dependencies: manifest.dependencies,
         })
     }
@@ -67,20 +67,9 @@ impl ManifestHandler for NodeHandler {
 mod tests {
     use super::*;
     use dependency_check_updates_core::manifest::ManifestHandler;
-    use dependency_check_updates_core::{DependencySection, DependencySpec, PlannedUpdate};
+    use dependency_check_updates_core::{DependencySection, PlannedUpdate};
     use rstest::rstest;
     use std::path::Path;
-
-    /// Test-only helper: true when the section belongs to the Node ecosystem.
-    fn is_node_ecosystem(dep: &DependencySpec) -> bool {
-        matches!(
-            dep.section,
-            DependencySection::Dependencies
-                | DependencySection::DevDependencies
-                | DependencySection::PeerDependencies
-                | DependencySection::OptionalDependencies
-        )
-    }
 
     #[rstest]
     // raw JSON, expected dependency count (None ⇒ parse must error).
@@ -179,17 +168,5 @@ mod tests {
             err_str.contains("package.json"),
             "expected PatchFailed with package.json path, got: {err_str}"
         );
-    }
-
-    #[rstest]
-    #[case::node_dependencies(DependencySection::Dependencies, true)]
-    #[case::non_node_build_dependencies(DependencySection::BuildDependencies, false)]
-    fn is_node_ecosystem_cases(#[case] section: DependencySection, #[case] expected: bool) {
-        let dep = DependencySpec {
-            name: "pkg".to_owned(),
-            current_req: "^1.0.0".to_owned(),
-            section,
-        };
-        assert_eq!(is_node_ecosystem(&dep), expected);
     }
 }

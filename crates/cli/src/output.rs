@@ -1,8 +1,11 @@
 //! ncu-style table output with colored version diffs.
 
+use std::borrow::Cow;
 use std::fmt::Write;
 
-use dependency_check_updates_core::{BumpType, PlannedUpdate};
+use dependency_check_updates_core::{
+    BumpType, PlannedUpdate, split_numeric_head, strip_range_prefix,
+};
 use owo_colors::OwoColorize;
 
 /// Determine the type of version bump by comparing version strings.
@@ -20,32 +23,43 @@ pub fn detect_bump_type(from: &str, to: &str) -> BumpType {
     }
 }
 
-/// Parse major.minor.patch from a version string, stripping range prefixes.
-fn parse_version_parts(v: &str) -> (u64, u64, u64) {
-    let cleaned = v.trim_start_matches(|c: char| !c.is_ascii_digit());
-    let mut parts = cleaned.splitn(3, '.');
+/// Parse major.minor from a version string, stripping range prefixes.
+///
+/// Uses [`split_numeric_head`] to peel the borrowed numeric prefix once
+/// (`"1.2.3-beta.1"` → `"1.2.3"`), then a uniform `.parse()` over the first
+/// two dot-segments. [`detect_bump_type`] only compares major and minor —
+/// anything past those classifies as a patch bump — so the patch segment is
+/// never parsed.
+fn parse_version_parts(v: &str) -> (u64, u64) {
+    let numeric = split_numeric_head(strip_range_prefix(v)).0;
+    let mut parts = numeric.split('.');
     let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let patch = parts
-        .next()
-        .and_then(|s| {
-            // Handle "3-beta.1" -> take digits only
-            let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
-            digits.parse().ok()
-        })
-        .unwrap_or(0);
-    (major, minor, patch)
+    (major, minor)
+}
+
+/// Whether colored output is enabled given the raw `NO_COLOR` value.
+///
+/// Follows <https://no-color.org>: color is disabled only when `NO_COLOR`
+/// is present with a *non-empty* value. Unset or empty keeps color on.
+#[must_use]
+pub fn color_enabled(no_color: Option<std::ffi::OsString>) -> bool {
+    no_color.is_none_or(|value| value.is_empty())
 }
 
 /// Colorize a version string based on bump type.
-fn colorize_version(version: &str, bump: BumpType, use_color: bool) -> String {
+///
+/// Returns a `Cow<'_, str>` to avoid allocation when color is disabled:
+/// - `!use_color` returns `Cow::Borrowed(version)` (zero-copy)
+/// - Colored paths return `Cow::Owned(...)` with ANSI escape codes
+fn colorize_version(version: &str, bump: BumpType, use_color: bool) -> Cow<'_, str> {
     if !use_color {
-        return version.to_owned();
+        return Cow::Borrowed(version);
     }
     match bump {
-        BumpType::Major => format!("{}", version.red()),
-        BumpType::Minor => format!("{}", version.cyan()),
-        BumpType::Patch => format!("{}", version.green()),
+        BumpType::Major => Cow::Owned(format!("{}", version.red())),
+        BumpType::Minor => Cow::Owned(format!("{}", version.cyan())),
+        BumpType::Patch => Cow::Owned(format!("{}", version.green())),
     }
 }
 
@@ -70,25 +84,30 @@ pub fn render_table(updates: &[PlannedUpdate], use_color: bool) -> String {
     let unique = dedupe_updates(updates);
 
     // Calculate column widths against the deduped set so columns stay tight.
-    let max_name = unique.iter().map(|u| u.name.len()).max().unwrap_or(0);
-    let max_from = unique.iter().map(|u| u.from.len()).max().unwrap_or(0);
-    let max_to = unique.iter().map(|u| u.to.len()).max().unwrap_or(0);
+    // The final `to` column is never padded — padding it only adds trailing
+    // whitespace since nothing follows it on the line.
+    let (max_name, max_from) = unique.iter().fold((0usize, 0usize), |(n, f), u| {
+        (n.max(u.name.len()), f.max(u.from.len()))
+    });
 
-    let mut output = String::new();
+    let mut output = String::with_capacity(unique.len() * (max_name + max_from + 24));
 
     for update in &unique {
-        let bump = detect_bump_type(&update.from, &update.to);
-        let colored_to = colorize_version(&update.to, bump, use_color);
+        let colored_to = if use_color {
+            let bump = detect_bump_type(&update.from, &update.to);
+            colorize_version(&update.to, bump, true)
+        } else {
+            Cow::Borrowed(update.to.as_str())
+        };
 
         let _ = writeln!(
             output,
-            " {:<name_w$}  {:>from_w$}  ->  {:<to_w$}",
+            " {:<name_w$}  {:>from_w$}  ->  {}",
             update.name,
             update.from,
             colored_to,
             name_w = max_name,
             from_w = max_from,
-            to_w = max_to,
         );
     }
 
@@ -97,10 +116,11 @@ pub fn render_table(updates: &[PlannedUpdate], use_color: bool) -> String {
 
 /// Collapse `updates` by `(name, from, to)` while preserving original order.
 ///
-/// Lifted out of [`render_table`] so [`render_json`] can apply the same dedup
-/// without duplicating logic. Returns references so we avoid cloning.
+/// Used by [`render_table`] to deduplicate display rows. [`render_json`] dedupes
+/// separately via `serde_json::Map` key uniqueness (last-write-wins). Returns
+/// references so we avoid cloning.
 fn dedupe_updates(updates: &[PlannedUpdate]) -> Vec<&PlannedUpdate> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::with_capacity(updates.len());
     updates
         .iter()
         .filter(|u| seen.insert((u.name.as_str(), u.from.as_str(), u.to.as_str())))
@@ -149,8 +169,8 @@ pub fn render_footer(path: &str, upgrading: bool, has_updates: bool, use_color: 
 /// `(name, from, to)` triples, use the table format and parse line-by-line.
 #[must_use]
 pub fn render_json(updates: &[PlannedUpdate]) -> String {
-    let mut map = serde_json::Map::new();
-    for update in dedupe_updates(updates) {
+    let mut map = serde_json::Map::with_capacity(updates.len());
+    for update in updates {
         map.insert(
             update.name.clone(),
             serde_json::Value::String(update.to.clone()),
@@ -185,6 +205,15 @@ mod tests {
             from: from.to_owned(),
             to: to.to_owned(),
         }
+    }
+
+    #[rstest]
+    // no-color.org: only a *non-empty* NO_COLOR value disables color.
+    #[case::unset(None, true)]
+    #[case::empty(Some(std::ffi::OsString::new()), true)]
+    #[case::non_empty(Some(std::ffi::OsString::from("1")), false)]
+    fn color_enabled_cases(#[case] no_color: Option<std::ffi::OsString>, #[case] expected: bool) {
+        assert_eq!(color_enabled(no_color), expected);
     }
 
     #[rstest]
@@ -251,7 +280,7 @@ mod tests {
     #[case::major_with_color("^2.0.0", BumpType::Major, true, "2.0.0", false)]
     #[case::minor_with_color("^1.1.0", BumpType::Minor, true, "1.1.0", false)]
     #[case::patch_with_color("^1.0.1", BumpType::Patch, true, "1.0.1", false)]
-    // No color: the result must equal the input verbatim.
+    // No color: the result must equal the input verbatim (and be borrowed).
     #[case::no_color("^2.0.0", BumpType::Major, false, "^2.0.0", true)]
     fn colorize_version_cases(
         #[case] version: &str,
@@ -266,9 +295,15 @@ mod tests {
             "{result:?} should contain {expected_substr:?}"
         );
         if expect_equal_input {
-            assert_eq!(result, version);
+            assert_eq!(result.as_ref(), version);
+            // Verify the no-color path returns a borrowed Cow
+            assert!(matches!(result, Cow::Borrowed(_)));
         } else {
-            assert_ne!(result, version, "expected ANSI color codes to be applied");
+            assert_ne!(
+                result.as_ref(),
+                version,
+                "expected ANSI color codes to be applied"
+            );
         }
     }
 
@@ -292,10 +327,9 @@ mod tests {
     #[test]
     fn test_parse_version_parts_with_prerelease() {
         // "3-beta.1" should parse major=3
-        let (major, minor, patch) = parse_version_parts("3.0.0-beta.1");
+        let (major, minor) = parse_version_parts("3.0.0-beta.1");
         assert_eq!(major, 3);
         assert_eq!(minor, 0);
-        assert_eq!(patch, 0);
     }
 
     #[test]
@@ -332,6 +366,20 @@ mod tests {
         assert_eq!(occurrences, 2, "got: {output}");
         assert!(output.contains("v4"));
         assert!(output.contains("v5"));
+    }
+
+    #[test]
+    fn test_render_table_rows_have_no_trailing_spaces() {
+        // Destination versions of different lengths: padding the last column
+        // to the widest `to` would leave trailing spaces on the shorter row.
+        let updates = vec![
+            upd("react", "^17.0.0", "^18.2.0"),
+            upd("lodash", "^4.17.0", "^4.17.21"),
+        ];
+        let output = render_table(&updates, false);
+        for line in output.lines() {
+            assert!(!line.ends_with(' '), "line has trailing space(s): {line:?}");
+        }
     }
 
     #[test]

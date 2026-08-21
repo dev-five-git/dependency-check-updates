@@ -17,8 +17,6 @@ pub const DEPENDENCY_SECTIONS: &[(DependencySection, &str)] = &[
 /// A parsed package.json file.
 #[derive(Debug)]
 pub struct PackageJsonManifest {
-    /// The original raw text (preserved for surgical patching).
-    pub original_text: String,
     /// All collected dependency specs.
     pub dependencies: Vec<DependencySpec>,
 }
@@ -35,14 +33,16 @@ impl PackageJsonManifest {
 
         let dependencies = Self::collect_dependencies(&parsed);
 
-        Ok(Self {
-            original_text: text.to_owned(),
-            dependencies,
-        })
+        Ok(Self { dependencies })
     }
 
     fn collect_dependencies(root: &Value) -> Vec<DependencySpec> {
-        let mut deps = Vec::new();
+        let capacity = DEPENDENCY_SECTIONS
+            .iter()
+            .filter_map(|(_, key)| root.get(key).and_then(Value::as_object))
+            .map(serde_json::Map::len)
+            .sum();
+        let mut deps = Vec::with_capacity(capacity);
 
         for &(section, key) in DEPENDENCY_SECTIONS {
             if let Some(Value::Object(map)) = root.get(key) {
@@ -53,6 +53,7 @@ impl PackageJsonManifest {
                                 name: name.clone(),
                                 current_req: version_str.to_owned(),
                                 section,
+                                path_version: None,
                             });
                         }
                     }
@@ -65,6 +66,24 @@ impl PackageJsonManifest {
     }
 }
 
+const SKIP_PREFIXES: &[&str] = &[
+    "workspace:",
+    "npm:",
+    "git+",
+    "git:",
+    "github:",
+    "bitbucket:",
+    "gitlab:",
+    "gist:",
+    "http:",
+    "https:",
+    "file:",
+    "link:",
+    "catalog:",
+    "portal:",
+    "patch:",
+];
+
 /// Check if a dependency value is a resolvable version spec.
 ///
 /// Filters out non-semver specifiers like workspace protocols, npm aliases,
@@ -76,15 +95,9 @@ fn is_version_spec(value: &str) -> bool {
     if matches!(trimmed, "latest" | "*" | "x" | "X" | "") {
         return false;
     }
-    !value.starts_with("workspace:")
-        && !value.starts_with("npm:")
-        && !value.starts_with("git+")
-        && !value.starts_with("git:")
-        && !value.starts_with("github:")
-        && !value.starts_with("http:")
-        && !value.starts_with("https:")
-        && !value.starts_with("file:")
-        && !value.starts_with("link:")
+    !SKIP_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
 }
 
 /// Errors from package.json parsing.
@@ -279,17 +292,47 @@ mod tests {
 }"#,
         "react"
     )]
+    #[case::whitespace_led_protocols(
+        r#"{
+  "dependencies": {
+    "ws-workspace": " workspace:*",
+    "ws-npm": "  npm:react@^18.0.0",
+    "ws-git": "   git+https://github.com/user/repo.git",
+    "ws-github": " github:user/repo",
+    "ws-http": "  https://example.com/pkg.tgz",
+    "ws-file": " file:../local",
+    "ws-link": "  link:../linked",
+    "react": "^18.0.0"
+  }
+}"#,
+        "react"
+    )]
+    #[case::pnpm_catalog_yarn_portal_patch(
+        r#"{
+   "dependencies": {
+     "pnpm-dep": "catalog:react",
+     "yarn-portal": "portal:../local-pkg",
+     "yarn-patch": "patch:left-pad@1.0.0#./p.patch",
+     "react": "^18.0.0"
+   }
+}"#,
+        "react"
+    )]
+    #[case::npm_git_host_shortcuts(
+        r#"{
+    "dependencies": {
+      "bitbucket-fork": "bitbucket:user/repo",
+      "gitlab-fork": "gitlab:user/repo",
+      "gist-fork": "gist:abc123def456",
+      "react": "^18.0.0"
+    }
+}"#,
+        "react"
+    )]
     fn skips_unresolvable_specs(#[case] json: &str, #[case] survivor: &str) {
         let manifest = PackageJsonManifest::parse(json).unwrap();
         assert_eq!(manifest.dependencies.len(), 1);
         assert_eq!(manifest.dependencies[0].name, survivor);
-    }
-
-    #[test]
-    fn test_original_text_preserved() {
-        let json = "{\n  \"name\": \"test\",\n  \"version\": \"1.0.0\"\n}\n";
-        let manifest = PackageJsonManifest::parse(json).unwrap();
-        assert_eq!(manifest.original_text, json);
     }
 
     #[test]

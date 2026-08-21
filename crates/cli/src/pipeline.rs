@@ -1,16 +1,26 @@
+use std::borrow::Cow;
+
 use tracing::{debug, trace, warn};
 
 use dependency_check_updates_core::{
-    DcuError, DependencySpec, ManifestKind, PlannedUpdate, ResolvedVersion,
+    DcuError, DependencySection, DependencySpec, PlannedUpdate, ResolvedVersion,
+    count_numeric_segments, pad_to_three_segments, split_numeric_head, strip_range_prefix,
 };
 
 /// Filter dependencies by include/exclude patterns.
+///
+/// Consumes `deps` so kept specs move into the returned vec — no `String`
+/// clones on the default code path where neither filter is active and every
+/// dependency survives.
 pub(crate) fn filter_deps(
-    deps: &[DependencySpec],
+    deps: Vec<DependencySpec>,
     include: &[String],
     exclude: &[String],
 ) -> Vec<DependencySpec> {
-    deps.iter()
+    if include.is_empty() && exclude.is_empty() {
+        return deps;
+    }
+    deps.into_iter()
         .filter(|dep| {
             if !include.is_empty() && !include.iter().any(|f| dep.name.contains(f.as_str())) {
                 return false;
@@ -20,17 +30,65 @@ pub(crate) fn filter_deps(
             }
             true
         })
-        .cloned()
         .collect()
 }
 
+/// Re-attach the range prefix from `current_req` onto a new bare version.
+///
+/// `current_bare` MUST be the result of `strip_range_prefix(current_req)` — the
+/// length difference is the leading non-digit prefix (`^`, `~`, `>=`,
+/// `">= "`, …) that needs to be re-glued onto `new_bare`. Centralises the
+/// expression previously duplicated in `compute_updates` and `sync_path_dep`,
+/// so future range-prefix tightenings land in exactly one place.
+fn rewrite_with_range_prefix(current_req: &str, current_bare: &str, new_bare: &str) -> String {
+    let prefix = &current_req[..current_req.len() - current_bare.len()];
+    format!("{prefix}{new_bare}")
+}
+
+/// Strip build metadata (`+…` suffix) from a version string.
+///
+/// Build metadata has no meaning in version requirements and is dropped by
+/// both `truncate_version` and the safety gate in `is_plain_numeric_version`.
+/// This helper centralises the extraction so the three callers stay in sync.
+fn strip_build_metadata(v: &str) -> &str {
+    v.split_once('+').map_or(v, |(head, _)| head)
+}
+
+/// Whether a section's registry resolves a ref that must be written verbatim.
+///
+/// Registry ecosystems (npm, crates.io, `PyPI`) return a canonical `x.y.z`
+/// version, and the pipeline re-shapes it to the user's pin precision. The
+/// tag-addressed ecosystems instead resolve a *name that must exist* — a git
+/// tag, a container tag — and their registries already did that shaping while
+/// checking the candidate against the published list. Reshaping it a second
+/// time here can only invent a ref nobody published.
+fn resolves_to_an_exact_ref(section: DependencySection) -> bool {
+    matches!(
+        section,
+        DependencySection::GitHubActions | DependencySection::DockerImage
+    )
+}
+
+fn plan_update(dep: &DependencySpec, to: String) -> PlannedUpdate {
+    PlannedUpdate {
+        name: dep.name.clone(),
+        section: dep.section,
+        from: dep.current_req.clone(),
+        to,
+    }
+}
+
 /// Compute planned updates from resolved versions.
+///
+/// The rewrite policy is chosen per dependency via
+/// [`resolves_to_an_exact_ref`], not per manifest kind: one workflow file can
+/// carry both `uses:` refs and container `image:` pins, and a future manifest
+/// may mix a registry ecosystem with a tag-addressed one the same way.
 pub(crate) fn compute_updates(
     deps: &[DependencySpec],
     resolved: &[(usize, Result<ResolvedVersion, DcuError>)],
-    kind: ManifestKind,
 ) -> Vec<PlannedUpdate> {
-    let mut updates = Vec::new();
+    let mut updates = Vec::with_capacity(resolved.len());
 
     for (idx, result) in resolved {
         let dep = &deps[*idx];
@@ -50,10 +108,43 @@ pub(crate) fn compute_updates(
             continue;
         };
 
+        // Local path dependency: exact-sync the `version` field to the crate
+        // on disk. The path crate's actual version is the source of truth, so
+        // this bypasses the never-downgrade safety net below — Cargo requires
+        // the requirement to be satisfiable by the local crate's version.
+        if dep.path_version.is_some() {
+            if let Some(update) = sync_path_dep(dep, selected) {
+                debug!(name = %update.name, from = %update.from, to = %update.to, "path dep sync");
+                updates.push(update);
+            } else {
+                trace!(package = %dep.name, version = %dep.current_req, "path dep already in sync");
+            }
+            continue;
+        }
+
         // Strip range prefix for comparison
-        let current_bare = dep
-            .current_req
-            .trim_start_matches(|c: char| !c.is_ascii_digit());
+        let current_bare = strip_range_prefix(&dep.current_req);
+
+        // Skip requirements with no numeric version (e.g., pnpm `catalog:`,
+        // yarn `portal:`, a stray `^`). These have no resolvable version and
+        // would corrupt the manifest if rewritten (e.g., `catalog:` → `catalog:18.2.0`).
+        if current_bare.is_empty() {
+            continue;
+        }
+
+        // Compound ranges (`^17 || ^18`, `>=1.0, <2.0`, `>=18 <19`) carry
+        // multiple clauses; the prefix-reuse rewrite below would keep only
+        // the first clause and silently drop the rest, violating the
+        // manifest's format-preservation contract. Leave them untouched.
+        if is_compound_range(current_bare) {
+            trace!(
+                package = %dep.name,
+                current = %dep.current_req,
+                selected = %selected,
+                "skipping: compound version range (OR/AND clauses not supported)"
+            );
+            continue;
+        }
 
         // Safety net: never suggest a downgrade. When both current and selected
         // can be parsed as semver (after padding short forms like `5` or `5.1`
@@ -65,29 +156,33 @@ pub(crate) fn compute_updates(
         if let (Ok(cur_ver), Ok(sel_ver)) = (
             semver::Version::parse(&pad_to_three_segments(current_bare)),
             semver::Version::parse(&pad_to_three_segments(selected)),
-        ) && sel_ver <= cur_ver
-        {
-            trace!(
-                package = %dep.name,
-                current = %dep.current_req,
-                selected = %selected,
-                "skipping: selected version is not newer than current"
-            );
-            continue;
+        ) {
+            if sel_ver <= cur_ver {
+                trace!(
+                    package = %dep.name,
+                    current = %dep.current_req,
+                    selected = %selected,
+                    "skipping: selected version is not newer than current"
+                );
+                continue;
+            }
         }
 
         // Preserve precision: if the user wrote "0.6" (2 segments), truncate the
         // resolved version to 2 segments before comparing. This respects the user's
         // intent to pin only at that granularity.
         //
-        // GitHub workflow refs are exempt: the GitHub registry already resolved
-        // the exact, tag-validated ref form (`pick_existing_ref`), so re-running
+        // Tag-addressed sections are exempt. Their registries already resolved
+        // an exact, existence-checked ref form — `pick_existing_ref` for GitHub
+        // Actions, `pick_existing_numeric` for container tags — so re-running
         // the generic truncation here could re-shorten an escalated ref
-        // (`v8.1.0` → `v8`) back into a dangling tag.
-        let selected_truncated = if kind == ManifestKind::GitHubWorkflow {
-            selected.clone()
+        // (`v8.1.0` → `v8`) back into a tag that was never published. Container
+        // tags additionally carry a variant suffix (`22-alpine`) that this
+        // numeric truncation would silently amputate.
+        let selected_truncated: Cow<'_, str> = if resolves_to_an_exact_ref(dep.section) {
+            Cow::Borrowed(selected)
         } else {
-            let precision = count_version_segments(current_bare);
+            let precision = count_numeric_segments(current_bare);
 
             if precision < 3 && !is_plain_numeric_version(selected) {
                 trace!(
@@ -102,75 +197,100 @@ pub(crate) fn compute_updates(
             truncate_version(selected, precision)
         };
 
-        if current_bare == selected_truncated {
+        if current_bare == selected_truncated.as_ref() {
             trace!(package = %dep.name, version = %dep.current_req, "already up to date");
             continue;
         }
 
         // Preserve the range prefix from the original spec
-        let prefix_len = dep.current_req.len() - current_bare.len();
-        let prefix = &dep.current_req[..prefix_len];
-        let new_version = format!("{prefix}{selected_truncated}");
+        let new_version =
+            rewrite_with_range_prefix(&dep.current_req, current_bare, &selected_truncated);
 
-        updates.push(PlannedUpdate {
-            name: dep.name.clone(),
-            section: dep.section,
-            from: dep.current_req.clone(),
-            to: new_version,
-        });
+        updates.push(plan_update(dep, new_version));
     }
 
     updates
 }
 
-/// Pad a version string to exactly three numeric segments so it can be
-/// fed to `semver::Version::parse` for ordering comparisons.
+/// Compute the exact-sync update for a local path dependency.
 ///
-/// Preserves any pre-release / build-metadata suffix (`-rc.1`, `+build.7`).
+/// The `version` field of a `{ path = "...", version = "..." }` dependency is
+/// synced to `local_version` (the version of the crate on disk). Unlike the
+/// registry path this allows "downgrades": if the local crate is *older* than
+/// the declared requirement the field is lowered to match, because Cargo
+/// requires the requirement to be satisfiable by the path crate's version.
 ///
-/// `pad_to_three_segments("5")`           → `"5.0.0"`
-/// `pad_to_three_segments("5.1")`         → `"5.1.0"`
-/// `pad_to_three_segments("5.1.0")`       → `"5.1.0"`
-/// `pad_to_three_segments("5.1.0-rc.1")`  → `"5.1.0-rc.1"`
-/// `pad_to_three_segments("1.2-beta")`    → `"1.2.0-beta"`
-fn pad_to_three_segments(v: &str) -> String {
-    if v.is_empty() {
-        return v.to_owned();
+/// The range prefix (`^`, `~`, `>=`, …) and the user's pin precision are
+/// preserved for plain numeric versions (`0.2` → `0.3`); otherwise the full
+/// local version is written (build metadata stripped, pre-release preserved).
+/// Returns `None` when the field is already in sync.
+fn sync_path_dep(dep: &DependencySpec, local_version: &str) -> Option<PlannedUpdate> {
+    let current_bare = strip_range_prefix(&dep.current_req);
+    if current_bare.is_empty() {
+        // e.g. `version = "*"` — already matches any version, nothing to sync.
+        return None;
     }
-    let (numeric, suffix) = v
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .map_or((v, ""), |i| v.split_at(i));
-    let parts: Vec<&str> = numeric.split('.').filter(|s| !s.is_empty()).collect();
-    match parts.len() {
-        1 => format!("{}.0.0{}", parts[0], suffix),
-        2 => format!("{}.{}.0{}", parts[0], parts[1], suffix),
-        // 0 (no numeric prefix) or ≥3 (already padded / over-padded): leave
-        // as-is. `semver::Version::parse` will reject the 0-parts case below.
-        _ => v.to_owned(),
+
+    let precision = count_numeric_segments(current_bare);
+    let new_bare: Cow<'_, str> = if precision < 3 && is_plain_numeric_version(local_version) {
+        truncate_version(local_version, precision)
+    } else {
+        // Full version: strip build metadata (`+...`), keep any pre-release.
+        Cow::Borrowed(strip_build_metadata(local_version))
+    };
+
+    if current_bare == new_bare {
+        return None;
     }
+
+    Some(plan_update(
+        dep,
+        rewrite_with_range_prefix(&dep.current_req, current_bare, &new_bare),
+    ))
 }
 
-/// Count the number of version segments in a bare version string.
+/// True when `current_bare` represents a compound version range — multiple
+/// clauses joined by `||` (npm OR), `,` (Cargo / `PyPI` AND), or an internal
+/// space (npm AND, e.g. `">=18.0.0 <19.0.0"`, or the npm hyphen-range form
+/// `"1.2.3 - 1.5.0"` meaning `>=1.2.3 <=1.5.0`).
 ///
-/// "1"      → 1 (major only)
-/// "1.0"    → 2 (major.minor)
-/// "1.0.0"  → 3 (major.minor.patch)
-/// "1.0.0-beta.1" → 3 (pre-release suffix ignored)
-fn count_version_segments(bare: &str) -> usize {
-    // Stop at the first non-digit, non-dot character (e.g., '-' for pre-release)
-    let numeric_part = bare
-        .split(|c: char| !c.is_ascii_digit() && c != '.')
-        .next()
-        .unwrap_or("");
-    if numeric_part.is_empty() {
-        return 0;
+/// Single clauses with a leading-operator space like `">= 1.0.0"` are NOT
+/// compound: `strip_range_prefix` already removed the leading non-digit run
+/// (including the space), so this helper sees `"1.0.0"` and returns `false`.
+///
+/// `compute_updates` cannot rewrite compound ranges without losing user
+/// intent — every clause beyond the first would be silently dropped when
+/// the registry-resolved version is reprefixed onto the original spec. The
+/// safe answer is to leave the manifest byte-identical until a real
+/// multi-clause rewriter exists.
+fn is_compound_range(current_bare: &str) -> bool {
+    if current_bare.contains("||") || current_bare.contains(',') {
+        return true;
     }
-    numeric_part.split('.').filter(|s| !s.is_empty()).count()
+    // npm AND: a space whose left neighbour is a digit and whose right
+    // neighbour is a clause start (digit or one of `<>=~^!xX*`) — or `-`, the
+    // npm hyphen-range continuation (`A.B.C - X.Y.Z`). The x/X/* additions
+    // catch x-range (`1.2 x`) and wildcard (`1.0.0 *`) clause starts.
+    // Iterating bytes is safe because every character we test against is
+    // ASCII — a non-ASCII byte cannot equal `b' '` or be a digit / operator anyway.
+    let bytes = current_bare.as_bytes();
+    for i in 1..bytes.len().saturating_sub(1) {
+        if bytes[i] == b' '
+            && bytes[i - 1].is_ascii_digit()
+            && matches!(
+                bytes[i + 1],
+                b'<' | b'>' | b'=' | b'~' | b'^' | b'!' | b'-' | b'x' | b'X' | b'*' | b'0'..=b'9'
+            )
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether `version` is a plain numeric version — one or more dot-separated
-/// segments that are *all* ASCII digits, with no pre-release (`-…`) or build
-/// (`+…`) suffix.
+/// segments that are *all* ASCII digits, ignoring any build-metadata tail
+/// (`+…`) but still rejecting pre-release tails (`-…`).
 ///
 /// Such versions are always safe to truncate to fewer segments (`5.1` → `5`,
 /// `4.0.0` → `4.0`): there is no pre-release tag that could be silently
@@ -178,18 +298,19 @@ fn count_version_segments(bare: &str) -> usize {
 /// two-segment stables like `5.1` (e.g. Django) — the previous
 /// exactly-three-segment check rejected them, which made `--target
 /// greatest/newest/minor/patch` silently skip such packages whenever the user
-/// pinned at <3-segment precision. Versions carrying a suffix
-/// (`4.0.0-beta.0`, `1.2.3+build`) return `false` so the caller refuses to
-/// truncate them.
+/// pinned at <3-segment precision.
+///
+/// Build metadata is stripped before the digit check so this predicate stays
+/// in lock-step with [`truncate_version`], which also drops `+…` before
+/// truncating. Without the strip, `0.7.0+build.1` would be rejected here even
+/// though the operation this gate guards is provably safe — `0.7.0+build.1`
+/// → `0.7`. Pre-release (`-…`) tails are still rejected: silently promoting
+/// a prerelease to a stable-looking pin is exactly the surprise this gate
+/// guards against.
 fn is_plain_numeric_version(version: &str) -> bool {
-    let mut any = false;
-    for segment in version.split('.') {
-        if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
-            return false;
-        }
-        any = true;
-    }
-    any
+    strip_build_metadata(version)
+        .split('.')
+        .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Truncate a version string to the given number of segments.
@@ -198,32 +319,46 @@ fn is_plain_numeric_version(version: &str) -> bool {
 /// in version requirements and causes warnings in Cargo.toml. Pre-release
 /// suffix (`-beta.1`) is preserved when not truncating patch level.
 ///
-/// `truncate_version("1.2.3`", 2)             → "1.2"
-/// `truncate_version("1.2.3`", 3)             → "1.2.3"
-/// `truncate_version("1.2.3+build.1`", 3)     → "1.2.3"
-/// truncate_version("1.2.3-rc.1", 3)        → "1.2.3-rc.1"
-/// truncate_version("1.2.3-rc.1", 2)        → "1.2"
-fn truncate_version(version: &str, segments: usize) -> String {
+/// Returns a borrowed reference when no truncation is needed (segments == 0
+/// or already at/below precision), or an owned string when truncation occurs.
+///
+/// ```text
+/// truncate_version("1.2.3", 2)           → "1.2"
+/// truncate_version("1.2.3", 3)           → "1.2.3"
+/// truncate_version("1.2.3+build.1", 3)   → "1.2.3"
+/// truncate_version("1.2.3-rc.1", 3)      → "1.2.3-rc.1"
+/// truncate_version("1.2.3-rc.1", 2)      → "1.2"
+/// ```
+fn truncate_version(version: &str, segments: usize) -> Cow<'_, str> {
     // Strip build metadata unconditionally (`+...`)
-    let stripped = version.split('+').next().unwrap_or(version);
+    let stripped = strip_build_metadata(version);
 
     if segments == 0 {
-        return stripped.to_owned();
+        return Cow::Borrowed(stripped);
     }
 
-    // Split numeric.dot prefix from any trailing pre-release (`-...`)
-    let (numeric, suffix) = stripped
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .map_or((stripped, ""), |i| stripped.split_at(i));
+    // Bare numeric `1.2.3` head — any non-digit, non-dot byte ends the
+    // numeric prefix and marks the start of a pre-release tail we drop on
+    // truncation (the comparison below decides whether truncation happens).
+    let numeric = split_numeric_head(stripped).0;
 
-    let parts: Vec<&str> = numeric.split('.').collect();
-    if parts.len() <= segments {
-        // Already at or below desired precision — keep as-is with any pre-release
-        return stripped.to_owned();
+    if numeric.split('.').count() <= segments {
+        // Already at or below desired precision — return `stripped` so any
+        // pre-release tail survives unchanged.
+        return Cow::Borrowed(stripped);
     }
-    // Truncated: drop any pre-release suffix too
-    let _ = suffix;
-    parts[..segments].join(".")
+
+    // Truncating: build the result directly from the numeric head without
+    // a `Vec<&str>` middleman. Any pre-release suffix is dropped by
+    // construction because we only consume `numeric`.
+    let mut out = String::with_capacity(numeric.len());
+    for (i, part) in numeric.split('.').take(segments).enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        out.push_str(part);
+    }
+    Cow::Owned(out)
 }
 
 #[cfg(test)]
@@ -243,6 +378,7 @@ mod tests {
             name: name.to_owned(),
             current_req: current_req.to_owned(),
             section: DependencySection::Dependencies,
+            path_version: None,
         }
     }
 
@@ -284,6 +420,15 @@ mod tests {
         "0.25.11+spec-1.1.0",
         Some("0.25.11")
     )]
+    // 2-segment pin + selected version with build metadata: the safety gate
+    // now strips `+build.1` before checking, matching `truncate_version`, so
+    // the dep correctly truncates to `0.7` instead of being silently dropped.
+    #[case::truncates_two_segment_with_build_metadata(
+        "0.6",
+        "0.7.0+build.1",
+        "0.7.0+build.1",
+        Some("0.7")
+    )]
     #[case::blocks_downgrade_prerelease_to_stable("2.0.0-rc.37", "1.1.20", "1.1.20", None)]
     #[case::blocks_downgrade_same_major("2.5.0", "2.4.0", "2.4.0", None)]
     #[case::allows_prerelease_to_prerelease(
@@ -300,6 +445,30 @@ mod tests {
     )]
     #[case::allows_prerelease_to_stable("2.0.0-rc.37", "2.0.0", "2.0.0", Some("2.0.0"))]
     #[case::equal_semver_skipped("1.2.3", "1.2.3", "1.2.3", None)]
+    // Compound ranges (multiple clauses joined by `||`, `,`, or an internal
+    // space) are skipped: rewriting them would drop every clause beyond the
+    // first, silently mangling the user's intent. The manifest stays
+    // byte-identical until a real multi-clause rewriter exists.
+    #[case::npm_or_range_skipped("^17.0.0 || ^18.0.0", "18.3.1", "18.3.1", None)]
+    #[case::npm_space_and_range_skipped(">=18.0.0 <19.0.0", "18.3.1", "18.3.1", None)]
+    #[case::cargo_comma_and_range_skipped(">=1.0, <2.0", "1.5.0", "1.5.0", None)]
+    #[case::pypi_comma_and_range_skipped(">=2.28.0,<3.0", "2.31.0", "2.31.0", None)]
+    #[case::npm_hyphen_range_preserved("1.2.3 - 1.5.0", "2.0.0", "2.0.0", None)]
+    // Single clause with a leading-operator space (`>= 1.0.0`): the space
+    // sits before the digit run and `strip_range_prefix` removes it along
+    // with `>=`, so the helper sees a clean `"1.0.0"` and the dep still
+    // updates. The prefix on the rewritten value preserves the original
+    // operator + space exactly.
+    #[case::single_clause_with_leading_space_still_updates(
+        ">= 1.0.0",
+        "1.5.0",
+        "1.5.0",
+        Some(">= 1.5.0")
+    )]
+    // pnpm `catalog:` protocol has no numeric version; `strip_range_prefix`
+    // returns empty string. The guard must skip this to avoid corrupting the
+    // manifest (e.g., `"catalog:"` → `"catalog:18.2.0"`).
+    #[case::skips_pnpm_catalog_protocol("catalog:", "18.2.0", "18.2.0", None)]
     fn compute_updates_single(
         #[case] current: &str,
         #[case] latest: &str,
@@ -307,7 +476,7 @@ mod tests {
         #[case] expected_to: Option<&str>,
     ) {
         let (deps, resolved) = single(current, latest, selected);
-        let updates = compute_updates(&deps, &resolved, ManifestKind::PackageJson);
+        let updates = compute_updates(&deps, &resolved);
         match expected_to {
             Some(to) => {
                 assert_eq!(
@@ -327,7 +496,7 @@ mod tests {
     #[test]
     fn compute_updates_sets_package_name() {
         let (deps, resolved) = single("^17.0.0", "18.2.0", "18.2.0");
-        let updates = compute_updates(&deps, &resolved, ManifestKind::PackageJson);
+        let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates[0].name, "pkg");
     }
 
@@ -341,7 +510,7 @@ mod tests {
                 detail: "not found".to_owned(),
             }),
         )];
-        assert!(compute_updates(&deps, &resolved, ManifestKind::PackageJson).is_empty());
+        assert!(compute_updates(&deps, &resolved).is_empty());
     }
 
     #[test]
@@ -354,7 +523,7 @@ mod tests {
                 selected: None,
             }),
         )];
-        assert!(compute_updates(&deps, &resolved, ManifestKind::PackageJson).is_empty());
+        assert!(compute_updates(&deps, &resolved).is_empty());
     }
 
     #[test]
@@ -365,6 +534,7 @@ mod tests {
                 name: "b".to_owned(),
                 current_req: "~2.0.0".to_owned(),
                 section: DependencySection::DevDependencies,
+                path_version: None,
             },
             dep("c", "^3.0.0"),
         ];
@@ -391,7 +561,7 @@ mod tests {
                 }),
             ),
         ];
-        let updates = compute_updates(&deps, &resolved, ManifestKind::PackageJson);
+        let updates = compute_updates(&deps, &resolved);
         // a: ^1.0.0 -> ^1.5.0 (update), b: ~2.0.0 -> ~2.5.0 (update), c: same (no update)
         assert_eq!(updates.len(), 2);
         assert_eq!(updates[0].name, "a");
@@ -406,6 +576,7 @@ mod tests {
             name: "a".to_owned(),
             current_req: "^1.0.0".to_owned(),
             section: DependencySection::DevDependencies,
+            path_version: None,
         }];
         let resolved = vec![(
             0,
@@ -414,9 +585,55 @@ mod tests {
                 selected: Some("2.0.0".to_owned()),
             }),
         )];
-        let updates = compute_updates(&deps, &resolved, ManifestKind::PackageJson);
+        let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates[0].section, DependencySection::DevDependencies);
         assert_eq!(updates[0].from, "^1.0.0");
+    }
+
+    /// Container tags carry a build variant that the numeric truncation would
+    /// destroy, and their registry already picked an existing tag form. Both
+    /// the variant and the resolved precision must survive verbatim.
+    #[rstest]
+    // The headline case: the `-alpine` variant travels with the bump, and the
+    // 1-segment pin stays 1-segment because `22-alpine` is a published tag.
+    #[case::keeps_variant_and_precision("20-alpine", "22-alpine", Some("22-alpine"))]
+    // An escalated tag (no moving `22` published) must NOT be truncated back
+    // down to the pin's precision — that would name a tag nobody published.
+    #[case::keeps_escalated_precision("20", "22.3.0", Some("22.3.0"))]
+    // A `v`-prefixed pin gets its prefix re-glued exactly once.
+    #[case::reattaches_v_prefix("v3.1.6", "3.2.0", Some("v3.2.0"))]
+    // Already current → no row.
+    #[case::already_current("22-alpine", "22-alpine", None)]
+    // The never-downgrade guard still applies across variant tags.
+    #[case::rejects_downgrade("22-alpine", "20-alpine", None)]
+    fn compute_updates_docker_image_cases(
+        #[case] current: &str,
+        #[case] selected: &str,
+        #[case] expected_to: Option<&str>,
+    ) {
+        let deps = vec![DependencySpec {
+            name: "node".to_owned(),
+            current_req: current.to_owned(),
+            section: DependencySection::DockerImage,
+            path_version: None,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some(selected.to_owned()),
+                selected: Some(selected.to_owned()),
+            }),
+        )];
+
+        let updates = compute_updates(&deps, &resolved);
+        match expected_to {
+            Some(to) => {
+                assert_eq!(updates.len(), 1, "expected one update, got: {updates:?}");
+                assert_eq!(updates[0].to, to);
+                assert_eq!(updates[0].from, current);
+            }
+            None => assert!(updates.is_empty(), "expected no update, got: {updates:?}"),
+        }
     }
 
     #[test]
@@ -429,6 +646,7 @@ mod tests {
             name: "astral-sh/setup-uv".to_owned(),
             current_req: "v7".to_owned(),
             section: DependencySection::GitHubActions,
+            path_version: None,
         }];
         let resolved = vec![(
             0,
@@ -437,9 +655,67 @@ mod tests {
                 selected: Some("8.1.0".to_owned()),
             }),
         )];
-        let updates = compute_updates(&deps, &resolved, ManifestKind::GitHubWorkflow);
+        let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].to, "v8.1.0");
+    }
+
+    /// Build a single path-dependency input: `current_req` is what the manifest
+    /// declares, `local` is the version of the crate on disk (carried via
+    /// `path_version` and echoed by the short-circuiting registry as `selected`).
+    fn path_dep_input(current: &str, local: &str) -> (Vec<DependencySpec>, ResolvedInput) {
+        let deps = vec![DependencySpec {
+            name: "hwp".to_owned(),
+            current_req: current.to_owned(),
+            section: DependencySection::Dependencies,
+            path_version: Some(local.to_owned()),
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some(local.to_owned()),
+                selected: Some(local.to_owned()),
+            }),
+        )];
+        (deps, resolved)
+    }
+
+    #[rstest]
+    // current manifest version, local crate version, expected `to` (None = no update).
+    #[case::upgrade("0.2.0", "0.3.0", Some("0.3.0"))]
+    // Exact sync allows a downgrade — the never-downgrade safety net is bypassed
+    // for path deps because the local crate's version is the source of truth.
+    #[case::downgrade("0.3.0", "0.2.0", Some("0.2.0"))]
+    #[case::already_in_sync("0.3.0", "0.3.0", None)]
+    #[case::preserves_caret("^0.2.0", "0.3.0", Some("^0.3.0"))]
+    #[case::preserves_tilde("~0.2.0", "0.3.0", Some("~0.3.0"))]
+    // Pin precision preserved for plain numeric local versions.
+    #[case::preserves_two_segment_precision("0.2", "0.3.1", Some("0.3"))]
+    // Same precision-preservation, but the local crate carries build metadata
+    // (`+build`). The safety gate now strips it before the digit check, so
+    // the manifest's 2-segment precision is preserved (`0.3` instead of the
+    // previous fall-through to the full `0.3.0`).
+    #[case::path_dep_two_segment_local_with_build_metadata("0.2", "0.3.0+build", Some("0.3"))]
+    #[case::full_version_at_three_segments("0.2.0", "0.3.1", Some("0.3.1"))]
+    // A wildcard requirement already accepts whatever the local crate is, so
+    // there is nothing to sync. Rewriting it would silently narrow the
+    // manifest's intent from "any version" to one pinned number.
+    #[case::wildcard_requirement_is_left_alone("*", "0.3.0", None)]
+    fn compute_updates_path_dep_cases(
+        #[case] current: &str,
+        #[case] local: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let (deps, resolved) = path_dep_input(current, local);
+        let updates = compute_updates(&deps, &resolved);
+        match expected {
+            Some(to) => {
+                assert_eq!(updates.len(), 1, "expected one update, got: {updates:?}");
+                assert_eq!(updates[0].to, to);
+                assert_eq!(updates[0].from, current);
+            }
+            None => assert!(updates.is_empty(), "expected no update, got: {updates:?}"),
+        }
     }
 
     #[rstest]
@@ -458,22 +734,9 @@ mod tests {
         let deps: Vec<DependencySpec> = names.iter().map(|n| dep(n, "^1.0.0")).collect();
         let include: Vec<String> = include.iter().map(|s| (*s).to_owned()).collect();
         let exclude: Vec<String> = exclude.iter().map(|s| (*s).to_owned()).collect();
-        let result = filter_deps(&deps, &include, &exclude);
+        let result = filter_deps(deps, &include, &exclude);
         let got: Vec<&str> = result.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(got, expected);
-    }
-
-    #[rstest]
-    #[case("5", "5.0.0")]
-    #[case("5.1", "5.1.0")]
-    #[case("5.1.0", "5.1.0")]
-    #[case("5.1.2.3", "5.1.2.3")] // 4+ segments left as-is
-    #[case("5.1.0-rc.1", "5.1.0-rc.1")]
-    #[case("1.2-beta", "1.2.0-beta")]
-    #[case("5-beta", "5.0.0-beta")]
-    #[case("", "")]
-    fn pad_to_three_segments_cases(#[case] input: &str, #[case] expected: &str) {
-        assert_eq!(pad_to_three_segments(input), expected);
     }
 
     #[rstest]
@@ -483,7 +746,7 @@ mod tests {
     #[case("1.0.0-beta.1", 3)]
     #[case("", 0)]
     fn count_version_segments_cases(#[case] input: &str, #[case] expected: usize) {
-        assert_eq!(count_version_segments(input), expected);
+        assert_eq!(count_numeric_segments(input), expected);
     }
 
     #[rstest]
@@ -510,10 +773,17 @@ mod tests {
     #[case("4.2", true)]
     #[case("4.0.0", true)]
     #[case("1.2.3.4", true)]
-    // Pre-release / build suffixes are NOT safe to truncate.
+    // Build metadata (`+…`) is stripped before checking — the operation this
+    // gate guards (`truncate_version`) drops it too, so these are safe.
+    #[case("1.2.3+build", true)]
+    #[case("4.0.0+build.7", true)]
+    #[case("5.1+meta-7", true)]
+    // Pre-release (`-…`) is still rejected; a prerelease must never be
+    // silently promoted to a stable-looking pin.
     #[case("4.0.0-beta.0", false)]
-    #[case("1.2.3+build", false)]
     #[case("5.1-rc.1", false)]
+    // Pre-release present even after stripping build metadata: still unsafe.
+    #[case("4.0.0-beta+build", false)]
     // Malformed / empty segments.
     #[case("", false)]
     #[case("5.", false)]
@@ -521,5 +791,40 @@ mod tests {
     #[case("v5", false)]
     fn is_plain_numeric_version_cases(#[case] input: &str, #[case] expected: bool) {
         assert_eq!(is_plain_numeric_version(input), expected);
+    }
+
+    #[rstest]
+    // Compound — multiple clauses joined by `||`, `,`, or an internal space.
+    #[case::or_clauses_with_spaces("17.0.0 || ^18.0.0", true)]
+    #[case::or_clauses_tight("17.0.0||18.0.0", true)]
+    #[case::cargo_comma_and("1.0, <2.0", true)]
+    #[case::pypi_comma_and("2.28.0,<3.0", true)]
+    #[case::npm_space_and_lt("18.0.0 <19.0.0", true)]
+    #[case::npm_space_and_caret("18.0.0 ^19.0.0", true)]
+    #[case::npm_space_and_tilde("18.0.0 ~19.0.0", true)]
+    #[case::npm_space_and_eq("18.0.0 =19.0.0", true)]
+    #[case::npm_space_and_bang("18.0.0 !=19.0.0", true)]
+    #[case::npm_space_and_digit("18.0.0 19.0.0", true)]
+    #[case::npm_space_and_lowercase_x("1.2 x 2.3 x", true)]
+    #[case::npm_space_and_uppercase_x("1.2 X 2.3 X", true)]
+    #[case::npm_space_and_wildcard("1.0.0 *", true)]
+    // Single clauses — must NOT be classified as compound.
+    #[case::single_full("1.2.3", false)]
+    #[case::single_two("1.2", false)]
+    #[case::single_major("1", false)]
+    #[case::single_prerelease("1.2.3-rc.1", false)]
+    #[case::single_with_build("1.2.3+build.7", false)]
+    // After `strip_range_prefix` the leading operator (and any space that
+    // follows it) is already gone, so a permissive `">= 1.0.0"` arrives
+    // here as `"1.0.0"` and stays a single clause.
+    #[case::leading_space_stripped("1.0.0", false)]
+    #[case::empty("", false)]
+    // npm hyphen ranges (`1.2.3 - 1.5.0` meaning `>=1.2.3 <=1.5.0`): the
+    // right-of-space byte is `-`, which is treated as a clause-start
+    // continuation so the dep is left byte-identical instead of being
+    // silently rewritten to a single bare version.
+    #[case::npm_hyphen_range_caught("1.2.3 - 1.5.0", true)]
+    fn is_compound_range_cases(#[case] input: &str, #[case] expected: bool) {
+        assert_eq!(is_compound_range(input), expected);
     }
 }

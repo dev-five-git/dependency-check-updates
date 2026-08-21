@@ -64,7 +64,7 @@ pub struct Cli {
     /// Directories removed (siblings of each manifest):
     /// - `package.json`   → `node_modules/`
     /// - `Cargo.toml`     → `target/`
-    /// - `pyproject.toml` → `.venv/`, `venv/`
+    /// - `pyproject.toml` → `.venv/`, `venv/`, `__pypackages__/`, `.tox/`, `.nox/`
     #[arg(long = "remove-installed")]
     pub remove_installed: bool,
 

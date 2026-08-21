@@ -4,12 +4,13 @@
 //! finds the exact byte positions of dependency version strings in the original
 //! text and replaces only those bytes.
 
+use dependency_check_updates_core::patch::{Patch, apply_byte_patches};
 use dependency_check_updates_core::{DependencySection, PlannedUpdate};
 
 use crate::parser::DEPENDENCY_SECTIONS;
 
 /// A located version string within the JSON text.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct VersionLocation {
     /// The dependency section this belongs to.
     pub section: DependencySection,
@@ -19,14 +20,6 @@ pub struct VersionLocation {
     pub value_start: usize,
     /// Byte offset of the closing quote `"` (exclusive end of value content).
     pub value_end: usize,
-}
-
-/// A patch to apply: replace bytes `[start..end)` with `new_value`.
-#[derive(Debug, Clone)]
-pub struct Patch {
-    pub start: usize,
-    pub end: usize,
-    pub new_value: String,
 }
 
 /// Errors from the patch engine.
@@ -42,6 +35,16 @@ pub enum PatchError {
     OverlappingPatches,
     #[error("patched output is not valid JSON: {0}")]
     ValidationFailed(String),
+}
+
+impl From<dependency_check_updates_core::patch::PatchError> for PatchError {
+    fn from(value: dependency_check_updates_core::patch::PatchError) -> Self {
+        match value {
+            dependency_check_updates_core::patch::PatchError::OverlappingPatches => {
+                Self::OverlappingPatches
+            }
+        }
+    }
 }
 
 /// Format-preserving JSON patcher.
@@ -144,36 +147,27 @@ impl JsonPatcher {
 
     /// Apply patches to the original text, replacing version strings.
     ///
-    /// Patches are applied back-to-front (highest offset first) so that earlier
-    /// byte offsets are not invalidated.
+    /// Delegates the byte-range mechanics (sort-descending, overlap check,
+    /// in-place `replace_range`) to the shared
+    /// [`apply_byte_patches`] primitive, then re-validates the resulting text
+    /// as JSON — the JSON-specific check that the YAML patcher does not need.
     ///
     /// # Errors
     ///
-    /// Returns an error if patches overlap or the result is not valid JSON.
+    /// Returns [`PatchError::OverlappingPatches`] (via the `From` impl on the
+    /// core [`PatchError`](dependency_check_updates_core::patch::PatchError))
+    /// if any two patches touch the same byte range, or
+    /// [`PatchError::ValidationFailed`] if the patched output is not valid
+    /// JSON.
     pub fn apply_patches(original: &str, patches: &[Patch]) -> Result<String, PatchError> {
-        if patches.is_empty() {
-            return Ok(original.to_owned());
-        }
+        let result = apply_byte_patches(original, patches)?;
 
-        // Sort descending by start position
-        let mut sorted: Vec<&Patch> = patches.iter().collect();
-        sorted.sort_by_key(|p| std::cmp::Reverse(p.start));
-
-        // Check for overlapping patches
-        for window in sorted.windows(2) {
-            // sorted is descending, so window[0].start >= window[1].start
-            if window[1].end > window[0].start {
-                return Err(PatchError::OverlappingPatches);
-            }
-        }
-
-        let mut result = original.to_owned();
-        for patch in &sorted {
-            result.replace_range(patch.start..patch.end, &patch.new_value);
-        }
-
-        // Verify the result is still valid JSON
-        serde_json::from_str::<serde_json::Value>(&result)
+        // Verify the result is still valid JSON. `IgnoredAny` drives the same
+        // `serde_json` parser as `Value` (so it catches the same structural
+        // breakage a misformed patch could introduce) but discards every
+        // token instead of materialising a transient `Value`/`Map`/`Vec`
+        // tree — saving hundreds of allocations on a multi-KB package.json.
+        serde_json::from_str::<serde::de::IgnoredAny>(&result)
             .map_err(|e| PatchError::ValidationFailed(e.to_string()))?;
 
         Ok(result)
@@ -198,19 +192,15 @@ fn find_section_bounds(text: &str, section_key: &str) -> Option<(usize, usize)> 
 /// Searches for `"key"` as a JSON key (followed by `:`), starting from `from`.
 fn find_json_key_position(text: &str, key: &str, from: usize) -> Option<usize> {
     let needle = format!("\"{key}\"");
-    let bytes = text.as_bytes();
-    let needle_bytes = needle.as_bytes();
     let mut pos = from;
 
-    while pos + needle_bytes.len() <= bytes.len() {
+    while pos + needle.len() <= text.len() {
         if let Some(found) = text[pos..].find(&needle) {
             let abs_pos = pos + found;
             // Verify this is a key (followed by optional whitespace then `:`)
-            let after = abs_pos + needle_bytes.len();
-            if let Some(colon_pos) = find_char_skipping_whitespace(text, ':', after) {
-                if colon_pos < text.len() {
-                    return Some(abs_pos);
-                }
+            let after = abs_pos + needle.len();
+            if find_char_skipping_whitespace(text, ':', after).is_some() {
+                return Some(abs_pos);
             }
             pos = abs_pos + 1;
         } else {
@@ -233,19 +223,6 @@ fn find_char_skipping_whitespace(text: &str, ch: char, from: usize) -> Option<us
         .take_while(|(_, c)| *c == ch || c.is_whitespace())
         .find(|(_, c)| *c == ch)
         .map(|(i, _)| from + i)
-}
-
-/// Find the next `"` character after skipping whitespace, starting from `from`.
-fn find_next_quote(text: &str, from: usize) -> Option<usize> {
-    for (i, c) in text[from..].char_indices() {
-        if c == '"' {
-            return Some(from + i);
-        }
-        if !c.is_whitespace() {
-            return None; // Non-whitespace, non-quote character found
-        }
-    }
-    None
 }
 
 /// Find the next occurrence of `ch` outside of JSON strings, starting from `from`.
@@ -339,7 +316,7 @@ fn find_dep_value_position(
 
     // Find the opening quote of the value string after the colon.
     // Skip whitespace then expect `"`.
-    let value_quote_start = find_next_quote(text, colon_pos + 1)?;
+    let value_quote_start = find_char_skipping_whitespace(text, '"', colon_pos + 1)?;
 
     // The value content starts after the opening quote
     let value_start = value_quote_start + 1;
@@ -847,18 +824,6 @@ mod tests {
         #[case] expected: Option<usize>,
     ) {
         assert_eq!(find_char_skipping_whitespace(text, ch, from), expected);
-    }
-
-    #[rstest]
-    #[case::non_quote_char_first("abc\"", 0, None)]
-    #[case::leading_whitespace("  \"hello\"", 0, Some(2))]
-    #[case::empty_slice_from_end("abc", 3, None)]
-    fn find_next_quote_cases(
-        #[case] text: &str,
-        #[case] from: usize,
-        #[case] expected: Option<usize>,
-    ) {
-        assert_eq!(find_next_quote(text, from), expected);
     }
 
     #[rstest]

@@ -18,17 +18,19 @@ path = "src/lib.rs"
 
 [dependencies]
 dependency-check-updates-core.workspace = true
+# Workflows spell their job / service containers with the same `image:` key a
+# Compose file uses, so the container scanner is reused rather than duplicated.
+dependency-check-updates-docker.workspace = true
 reqwest.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 node-semver.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 wiremock.workspace = true
 rustls.workspace = true

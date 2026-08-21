@@ -6,9 +6,13 @@
 //! is exposed as a constant because each registry wraps the client in its own
 //! [`tokio::sync::Semaphore`].
 
+use std::future::Future;
 use std::time::Duration;
 
 use reqwest::Client;
+
+use crate::error::DcuError;
+use crate::types::{DependencySpec, ResolvedVersion};
 
 /// Default ceiling on concurrent in-flight registry requests.
 ///
@@ -17,7 +21,7 @@ use reqwest::Client;
 pub const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 10;
 
 /// Default per-request timeout, in seconds.
-pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Build the shared `reqwest::Client` used by every registry.
 ///
@@ -39,4 +43,68 @@ pub fn build_client() -> Client {
         ))
         .build()
         .expect("failed to create HTTP client")
+}
+
+/// Send a pre-built request and verify the HTTP status in one step.
+///
+/// Centralises the two-step pattern that every registry repeats:
+///
+/// 1. `.send().await` — maps a network error to
+///    `DcuError::RegistryLookup { package, detail: e.to_string() }`.
+/// 2. `!response.status().is_success()` — maps a non-2xx status to
+///    `DcuError::RegistryLookup { package, detail: "HTTP <status>" }`.
+///
+/// URL construction, headers, and semaphore acquisition remain in each
+/// registry's own `fetch_*` method; only the send + status-check is shared.
+///
+/// # Errors
+///
+/// Returns `DcuError::RegistryLookup` on a network failure or a non-2xx
+/// HTTP status.
+pub async fn send_checked(
+    request: reqwest::RequestBuilder,
+    package: &str,
+) -> Result<reqwest::Response, DcuError> {
+    let response = request.send().await.map_err(|e| DcuError::RegistryLookup {
+        package: package.to_owned(),
+        detail: e.to_string(),
+    })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(DcuError::RegistryLookup {
+            package: package.to_owned(),
+            detail: format!("HTTP {status}"),
+        });
+    }
+
+    Ok(response)
+}
+
+/// Drive a batch of per-dependency resolutions concurrently while preserving
+/// the input ordering.
+///
+/// Every per-ecosystem registry whose `resolve_version` is an `async fn` over
+/// a single dep funnels through this helper. Centralising the
+/// `join_all`-over-`enumerate().map()` pipeline keeps the concurrency model —
+/// no `tokio::spawn`, so no per-dep `JoinHandle` allocation and no
+/// `DependencySpec`/`Arc` clones (each dep is borrowed for the duration of the
+/// `.await`) — defined in one place. Real concurrency still comes from each
+/// registry's `Semaphore`-gated HTTP requests, which cooperate via `.await`.
+///
+/// `join_all` preserves the source order of the iterator, so callers can rely
+/// on `result[i].0 == i` and no post-sort is needed.
+pub async fn resolve_batch_concurrent<'a, F, Fut>(
+    deps: &'a [DependencySpec],
+    resolve_one: F,
+) -> Vec<(usize, Result<ResolvedVersion, DcuError>)>
+where
+    F: Fn(&'a DependencySpec) -> Fut,
+    Fut: Future<Output = Result<ResolvedVersion, DcuError>>,
+{
+    futures::future::join_all(deps.iter().enumerate().map(|(idx, dep)| {
+        let fut = resolve_one(dep);
+        async move { (idx, fut.await) }
+    }))
+    .await
 }

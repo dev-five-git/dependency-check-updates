@@ -35,16 +35,16 @@ jobs:
           - windows-latest
           - macos-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: false
       - name: Install maturin
@@ -72,7 +72,7 @@ jobs:
       image: xd009642/tarpaulin:develop-nightly
       options: --security-opt seccomp=unconfined
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install
         uses: dtolnay/rust-toolchain@stable
@@ -96,7 +96,7 @@ jobs:
           cargo fmt
           cargo tarpaulin --out Lcov Stdout --engine llvm --fail-under 100
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
@@ -114,7 +114,7 @@ jobs:
       - test
       - coverage-test
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: changepacks/action@main
         id: changepacks
         with:
@@ -156,9 +156,9 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "10.13"
       CARGO_INCREMENTAL: "1"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Setup node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: oven-sh/setup-bun@v2
@@ -263,7 +263,7 @@ jobs:
             target: aarch64
             os: macos
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build wheels
         uses: PyO3/maturin-action@main
         with:
@@ -295,7 +295,7 @@ jobs:
       - node-build
     if: ${{ contains(needs.changepacks.outputs.changepacks, 'bridge/node/package.json') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -396,7 +396,7 @@ jobs:
             binary_name: dependency-check-updates-darwin-arm64
             dcu_binary_name: dcu-darwin-arm64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable

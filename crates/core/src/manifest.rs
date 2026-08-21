@@ -3,14 +3,12 @@
 //! Each language crate (dependency-check-updates-node, dependency-check-updates-rust, dependency-check-updates-python) implements these
 //! traits for its specific manifest format and registry.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tracing::debug;
 
 use crate::error::DcuError;
-use crate::types::{
-    DependencySpec, ManifestKind, ManifestRef, PlannedUpdate, ResolvedVersion, TargetLevel,
-};
+use crate::types::{DependencySpec, ManifestKind, ManifestRef, PlannedUpdate};
 
 // ---------------------------------------------------------------------------
 // ManifestHandler — parse manifests and apply updates
@@ -45,34 +43,8 @@ pub trait ManifestHandler {
 pub struct ParsedManifest {
     /// Reference to the manifest file.
     pub manifest_ref: ManifestRef,
-    /// The original raw text (preserved for patching).
-    pub original_text: String,
     /// Collected dependencies.
     pub dependencies: Vec<DependencySpec>,
-}
-
-// ---------------------------------------------------------------------------
-// RegistryClient — resolve versions from a package registry
-// ---------------------------------------------------------------------------
-
-/// A client for a package registry (npm, crates.io, `PyPI`).
-///
-/// Each language crate provides an implementation.
-/// Uses async methods for network I/O.
-pub trait RegistryClient: Send + Sync {
-    /// Resolve the target version for a single dependency.
-    fn resolve_version(
-        &self,
-        dep: &DependencySpec,
-        target: TargetLevel,
-    ) -> impl std::future::Future<Output = Result<ResolvedVersion, DcuError>> + Send;
-
-    /// Resolve versions for a batch of dependencies concurrently.
-    fn resolve_batch(
-        &self,
-        deps: &[DependencySpec],
-        target: TargetLevel,
-    ) -> impl std::future::Future<Output = Vec<(usize, Result<ResolvedVersion, DcuError>)>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,10 +58,17 @@ impl Scanner {
     /// Find manifest files in the given directory (non-recursive).
     ///
     /// Returns all recognized manifests at the root level (`package.json`,
-    /// `Cargo.toml`, `pyproject.toml`, `action.yml` / `action.yaml`) and every
-    /// `*.yml`/`*.yaml` directly under `.github/workflows/`. The root-level
-    /// `action.yml` is included so that authors of single-action repos see
-    /// their own manifest without needing `-d`.
+    /// `Cargo.toml`, `pyproject.toml`, `action.yml` / `action.yaml`,
+    /// `Dockerfile`, and the Compose project files) and every `*.yml`/`*.yaml`
+    /// directly under `.github/workflows/`. The root-level `action.yml` is
+    /// included so that authors of single-action repos see their own manifest
+    /// without needing `-d`.
+    ///
+    /// Only the canonical Docker file names are probed here. The suffixed
+    /// forms (`Dockerfile.dev`, `compose.prod.yaml`) are still recognised by
+    /// [`ManifestKind::from_path`], so `-d` and `--manifest` pick them up —
+    /// enumerating every possible variant at the root would mean a full
+    /// `read_dir` on every invocation just to catch a rare layout.
     #[must_use]
     pub fn scan_dir(root: &Path) -> Vec<ManifestRef> {
         let mut manifests = Vec::new();
@@ -100,6 +79,11 @@ impl Scanner {
             "pyproject.toml",
             "action.yml",
             "action.yaml",
+            "Dockerfile",
+            "compose.yml",
+            "compose.yaml",
+            "docker-compose.yml",
+            "docker-compose.yaml",
         ];
 
         for filename in &candidates {
@@ -123,11 +107,17 @@ impl Scanner {
                     manifests.push(ManifestRef { path, kind });
                 }
             }
-            // Stable order so output is reproducible across platforms — `read_dir`
-            // is OS-dependent (NTFS vs ext4 give different orderings).
-            manifests.sort_by(|a, b| a.path.cmp(&b.path));
         }
 
+        // Stable order so output is reproducible across platforms regardless
+        // of whether `.github/workflows/` exists. The static `candidates`
+        // array order (package.json → Cargo.toml → pyproject.toml → action.{yml,yaml})
+        // is NOT alphabetical, and `read_dir` ordering is OS-dependent (NTFS
+        // vs ext4 give different orderings), so we sort unconditionally here
+        // to match `scan_deep`'s already-unconditional sort below.
+        // Paths are unique (each manifest file appears at most once), so stable
+        // ordering is unobservable; use sort_unstable_by for better performance.
+        manifests.sort_unstable_by(|a, b| a.path.cmp(&b.path));
         manifests
     }
 
@@ -156,21 +146,14 @@ impl Scanner {
     /// Recursively find manifest files using the `ignore` crate.
     ///
     /// Respects `.gitignore`, `.ignore`, and skips common directories
-    /// (`node_modules`, `target`, `.venv`, `dist`, `build`, `vendor`).
+    /// (`node_modules`, `target`, Python local env/package dirs, `dist`,
+    /// `build`, `vendor`).
     /// Walks INTO `.github` even though it is a hidden directory because
     /// workflow YAMLs live there; without this exception deep scan would miss
     /// every GitHub Actions manifest.
     #[must_use]
     pub fn scan_deep(root: &Path) -> Vec<ManifestRef> {
         use ignore::WalkBuilder;
-
-        let manifest_names: &[&str] = &[
-            "package.json",
-            "Cargo.toml",
-            "pyproject.toml",
-            "action.yml",
-            "action.yaml",
-        ];
 
         let walker = WalkBuilder::new(root)
             // `hidden(false)` so `.github/` is traversed. The filter_entry
@@ -190,45 +173,40 @@ impl Scanner {
                 }
                 !matches!(
                     name.as_ref(),
-                    "node_modules" | "target" | "dist" | "build" | "vendor" | "__pycache__"
+                    "node_modules"
+                        | "target"
+                        | "__pypackages__"
+                        | "dist"
+                        | "build"
+                        | "vendor"
+                        | "__pycache__"
                 )
             })
             .build();
 
         let mut manifests = Vec::new();
 
+        // Single source of truth for what counts as a manifest:
+        // `ManifestKind::from_path` already encodes the full decision tree
+        // (the 5 named files + `.github/workflows/*.{yml,yaml}`). Delegating
+        // here removes the previously-duplicated `manifest_names` list and
+        // `is_workflow_yaml` parent-traversal block, and drops the per-file
+        // `to_string_lossy()` allocation in the deep-walk hot path.
         for entry in walker.flatten() {
             if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                 continue;
             }
-
-            let path = entry.path();
-            let file_name = entry.file_name().to_string_lossy();
-            let is_workflow_yaml = matches!(
-                path.extension().and_then(|s| s.to_str()),
-                Some("yml" | "yaml")
-            ) && path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str())
-                == Some("workflows")
-                && path
-                    .parent()
-                    .and_then(Path::parent)
-                    .and_then(|p| p.file_name())
-                    .and_then(|s| s.to_str())
-                    == Some(".github");
-
-            if manifest_names.contains(&file_name.as_ref()) || is_workflow_yaml {
-                let path = entry.into_path();
-                if let Some(kind) = ManifestKind::from_path(&path) {
-                    debug!(path = %path.display(), kind = %kind, "deep scan: found manifest");
-                    manifests.push(ManifestRef { path, kind });
-                }
-            }
+            let Some(kind) = ManifestKind::from_path(entry.path()) else {
+                continue;
+            };
+            let path = entry.into_path();
+            debug!(path = %path.display(), kind = %kind, "deep scan: found manifest");
+            manifests.push(ManifestRef { path, kind });
         }
 
-        manifests.sort_by(|a, b| a.path.cmp(&b.path));
+        // Paths are unique (each manifest file appears at most once), so stable
+        // ordering is unobservable; use sort_unstable_by for better performance.
+        manifests.sort_unstable_by(|a, b| a.path.cmp(&b.path));
         manifests
     }
 
@@ -268,23 +246,6 @@ impl Scanner {
 
         Ok(manifests)
     }
-}
-
-// ---------------------------------------------------------------------------
-// ScanResult — output of the scan+resolve pipeline
-// ---------------------------------------------------------------------------
-
-/// Result of scanning and resolving a single manifest file.
-#[derive(Debug)]
-pub struct ScanResult {
-    /// The manifest file that was scanned.
-    pub manifest_ref: ManifestRef,
-    /// Path to the manifest.
-    pub path: PathBuf,
-    /// Updates that can be applied.
-    pub updates: Vec<PlannedUpdate>,
-    /// Whether the file was actually modified (only true after apply).
-    pub modified: bool,
 }
 
 #[cfg(test)]
@@ -334,6 +295,19 @@ mod tests {
         "action.yml",
         "name: test\nruns:\n  using: composite\n",
         ManifestKind::GitHubWorkflow
+    )]
+    // Docker manifests must surface without `-d` for the common single-service
+    // repo layout (Dockerfile + compose file at the root).
+    #[case::root_dockerfile("Dockerfile", "FROM node:20-alpine\n", ManifestKind::Dockerfile)]
+    #[case::root_compose_yaml(
+        "compose.yaml",
+        "services:\n  web:\n    image: nginx:1.27\n",
+        ManifestKind::DockerCompose
+    )]
+    #[case::root_docker_compose_yml(
+        "docker-compose.yml",
+        "services:\n  web:\n    image: nginx:1.27\n",
+        ManifestKind::DockerCompose
     )]
     fn scan_dir_finds_single_manifest(
         tmp: TempDir,
@@ -454,6 +428,38 @@ mod tests {
         assert_eq!(result.unwrap().len(), 2);
     }
 
+    /// Regression: `scan_dir`'s sort used to fire only when
+    /// `.github/workflows/` existed, leaving non-workflow projects on the
+    /// static `candidates` array order
+    /// (`package.json` → `Cargo.toml` → `pyproject.toml` → `action.{yml,yaml}`)
+    /// — which is NOT alphabetical. `scan_deep` always sorted, so the same
+    /// layout produced different ordering between `dcu` and `dcu -d`. The
+    /// CI-consumable `--format json` inherited that inconsistency. This test
+    /// fails on the pre-fix code (Cargo.toml appears at index 1, package.json
+    /// at index 0) and passes after the sort moves out of the `if let`.
+    #[test]
+    fn test_scan_dir_sorts_when_no_workflows_dir() {
+        let dir = TempDir::new().unwrap();
+        create_temp_manifest(dir.path(), "package.json", "{}");
+        create_temp_manifest(dir.path(), "Cargo.toml", "[package]");
+        // No `.github/workflows/` directory — the sort must still fire.
+        assert!(!dir.path().join(".github").join("workflows").exists());
+
+        let manifests = Scanner::scan_dir(dir.path());
+        assert_eq!(manifests.len(), 2);
+        // Alphabetical: 'C' (0x43) < 'p' (0x70), so Cargo.toml sorts first.
+        assert!(
+            manifests[0].path.ends_with("Cargo.toml"),
+            "Cargo.toml should sort first: {:?}",
+            manifests.iter().map(|m| &m.path).collect::<Vec<_>>()
+        );
+        assert!(
+            manifests[1].path.ends_with("package.json"),
+            "package.json should sort second: {:?}",
+            manifests.iter().map(|m| &m.path).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn test_scan_dir_workflow_files_sorted_alphabetically() {
         // read_dir order is OS-dependent (NTFS != ext4). Sort guarantees
@@ -521,7 +527,7 @@ mod tests {
         assert!(manifests[0].path.ends_with("CI.yml"));
     }
 
-    /// Deep scan must prune `node_modules` (and friends) yet still descend
+    /// Deep scan must prune installed/generated directories yet still descend
     /// into normal nested directories. Exercises the `!matches!` filter
     /// closure on both branches: `node_modules` → false (pruned),
     /// `pkgs`/`app` → true (kept).
@@ -529,15 +535,23 @@ mod tests {
     fn test_scan_deep_prunes_excluded_dirs_but_keeps_nested() {
         let dir = TempDir::new().unwrap();
 
-        // Excluded: node_modules with a manifest inside that must NOT surface.
-        let nm = dir.path().join("node_modules").join("foo");
-        std::fs::create_dir_all(&nm).unwrap();
-        create_temp_manifest(&nm, "package.json", "{}");
+        // Excluded: dependency/env directories with manifests inside that must
+        // NOT surface.
+        for rel in ["node_modules/foo", "__pypackages__/3.13/lib/pkg"] {
+            let excluded = dir.path().join(rel);
+            std::fs::create_dir_all(&excluded).unwrap();
+            create_temp_manifest(&excluded, "package.json", "{}");
+        }
 
         // Kept: normal nested workspace member.
         let app = dir.path().join("pkgs").join("app");
         std::fs::create_dir_all(&app).unwrap();
         create_temp_manifest(&app, "Cargo.toml", "[package]\nname = \"app\"");
+        // Ordinary files sit beside manifests everywhere; the walker must skip
+        // the ones `ManifestKind::from_path` does not recognise instead of
+        // trying to parse them.
+        create_temp_manifest(&app, "README.md", "# app");
+        create_temp_manifest(&app, "build.gradle", "");
 
         let manifests = Scanner::scan_deep(dir.path());
 
@@ -550,12 +564,13 @@ mod tests {
             "expected pkgs/app/Cargo.toml in results: {:?}",
             manifests.iter().map(|m| &m.path).collect::<Vec<_>>()
         );
-        // The excluded node_modules manifest must NOT be found.
+        // The excluded dependency/env manifests must NOT be found.
         assert!(
-            !manifests
-                .iter()
-                .any(|m| m.path.to_string_lossy().contains("node_modules")),
-            "node_modules must be pruned: {:?}",
+            !manifests.iter().any(|m| matches!(
+                m.path.to_string_lossy().as_ref(),
+                p if p.contains("node_modules") || p.contains("__pypackages__")
+            )),
+            "dependency/env dirs must be pruned: {:?}",
             manifests.iter().map(|m| &m.path).collect::<Vec<_>>()
         );
     }

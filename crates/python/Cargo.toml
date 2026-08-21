@@ -14,10 +14,9 @@ categories.workspace = true
 
 [dependencies]
 dependency-check-updates-core.workspace = true
-pep440_rs = "0.7.3"
+pep440_rs.workspace = true
 toml_edit.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
@@ -25,6 +24,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+serde_json.workspace = true
 wiremock.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 rustls.workspace = true

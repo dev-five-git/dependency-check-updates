@@ -9,7 +9,7 @@ use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, collect_task_results, strip_range_prefix,
+    build_client, send_checked,
 };
 
 /// crates.io registry client.
@@ -70,23 +70,8 @@ impl CratesIoRegistry {
         let url = format!("{}/crates/{name}/versions", self.base_url);
         debug!(crate_name = name, %url, "fetching crate versions");
 
-        let response =
-            self.client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| DcuError::RegistryLookup {
-                    package: name.to_owned(),
-                    detail: e.to_string(),
-                })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            return Err(DcuError::RegistryLookup {
-                package: name.to_owned(),
-                detail: format!("HTTP {status}"),
-            });
-        }
+        let request = self.client.get(&url);
+        let response = send_checked(request, name).await?;
 
         let resp: CratesIoResponse =
             response
@@ -110,14 +95,32 @@ impl CratesIoRegistry {
         dep: &DependencySpec,
         target: TargetLevel,
     ) -> Result<ResolvedVersion, DcuError> {
+        // Local path dependency: the version is dictated by the crate on disk
+        // (resolved at parse time), not crates.io. Short-circuit before any
+        // network call so the declared `version` is synced to that local crate.
+        if let Some(local) = &dep.path_version {
+            return Ok(ResolvedVersion {
+                latest: Some(local.clone()),
+                selected: Some(local.clone()),
+            });
+        }
+
         let crate_versions = self.fetch_versions(&dep.name).await?;
 
-        let yanked_count = crate_versions.iter().filter(|v| v.yanked).count();
-        let mut versions: Vec<semver::Version> = crate_versions
-            .iter()
-            .filter(|v| !v.yanked)
-            .filter_map(|v| semver::Version::parse(&v.num).ok())
-            .collect();
+        // One pass instead of two: the previous form walked
+        // `crate_versions` once to count yanked entries (purely for the
+        // `trace!` diagnostic below) and once more to parse the non-yanked
+        // ones. Pre-size `versions` to skip the grow-loop reallocations on
+        // long version lists. See 0007-analyze.md F3.
+        let mut yanked_count = 0usize;
+        let mut versions: Vec<semver::Version> = Vec::with_capacity(crate_versions.len());
+        for v in &crate_versions {
+            if v.yanked {
+                yanked_count += 1;
+            } else if let Ok(parsed) = semver::Version::parse(&v.num) {
+                versions.push(parsed);
+            }
+        }
         versions.sort_unstable();
 
         trace!(
@@ -128,11 +131,7 @@ impl CratesIoRegistry {
             "fetched version list"
         );
 
-        let latest = versions
-            .iter()
-            .rev()
-            .find(|v| v.pre.is_empty())
-            .map(std::string::ToString::to_string);
+        let latest = dependency_check_updates_core::highest_stable(&versions);
 
         let selected = if target == TargetLevel::Newest {
             // "Newest" = most recently published by date, which can differ from
@@ -141,7 +140,15 @@ impl CratesIoRegistry {
             // version, so resolve it from dates rather than semver ordering.
             newest_by_date(&crate_versions).or_else(|| versions.last().map(ToString::to_string))
         } else {
-            select_version(&dep.current_req, latest.as_ref(), &versions, target)
+            // Shared strip→parse→select sequence centralised in `core`;
+            // crates.io's `latest` (highest stable) doubles as the fallback for
+            // the stable-`Latest` and unparseable-`Minor`/`Patch` cases.
+            dependency_check_updates_core::parse_and_select(
+                &dep.current_req,
+                &versions,
+                target,
+                latest.as_deref(),
+            )
         };
 
         // NOTE: we do NOT filter out versions that satisfy the current requirement.
@@ -160,28 +167,21 @@ impl CratesIoRegistry {
     }
 
     /// Resolve versions for a batch of dependencies concurrently.
+    ///
+    /// Delegates the `join_all` pipeline to
+    /// [`dependency_check_updates_core::resolve_batch_concurrent`] so the
+    /// concurrency model — no `tokio::spawn`, no per-dep `JoinHandle` /
+    /// `DependencySpec` clones, source-order preserved — lives in exactly one
+    /// place across every per-dep registry.
     pub async fn resolve_batch(
         &self,
         deps: &[DependencySpec],
         target: TargetLevel,
     ) -> Vec<(usize, Result<ResolvedVersion, DcuError>)> {
-        let mut handles = Vec::with_capacity(deps.len());
-
-        for (idx, dep) in deps.iter().enumerate() {
-            let dep = dep.clone();
-            let registry = self.clone();
-
-            let handle = tokio::spawn(async move {
-                let result = registry.resolve_version(&dep, target).await;
-                (idx, result)
-            });
-
-            handles.push(handle);
-        }
-
-        let mut results = collect_task_results(handles).await;
-        results.sort_unstable_by_key(|(idx, _)| *idx);
-        results
+        dependency_check_updates_core::resolve_batch_concurrent(deps, |dep| {
+            self.resolve_version(dep, target)
+        })
+        .await
     }
 }
 
@@ -208,32 +208,6 @@ fn newest_by_date(crate_versions: &[CrateVersion]) -> Option<String> {
         })
         .max_by(|a, b| a.0.cmp(b.0))
         .map(|(_, parsed)| parsed.to_string())
-}
-
-/// Select the appropriate version based on target level.
-///
-/// Thin wrapper over [`dependency_check_updates_core::select_version`]. The
-/// crates.io `latest` is already the highest stable version, which doubles as
-/// the fallback for both the stable-`Latest` and unparseable-`Minor`/`Patch`
-/// cases.
-fn select_version(
-    current_req_str: &str,
-    latest: Option<&String>,
-    all_versions: &[semver::Version],
-    target: TargetLevel,
-) -> Option<String> {
-    let current = parse_base_version(current_req_str);
-    dependency_check_updates_core::select_version(
-        current.as_ref(),
-        all_versions,
-        target,
-        latest.cloned(),
-        latest.cloned(),
-    )
-}
-
-fn parse_base_version(req_str: &str) -> Option<semver::Version> {
-    semver::Version::parse(strip_range_prefix(req_str)).ok()
 }
 
 #[cfg(test)]
@@ -269,6 +243,7 @@ mod tests {
             name: "serde".to_owned(),
             current_req: current_req.to_owned(),
             section: DependencySection::Dependencies,
+            path_version: None,
         }
     }
 
@@ -284,15 +259,7 @@ mod tests {
             .await;
     }
 
-    #[rstest]
-    #[case::caret("^1.2.3", (1, 2, 3))]
-    #[case::tilde("~1.2.3", (1, 2, 3))]
-    fn parse_base_version_cases(#[case] req: &str, #[case] expected: (u64, u64, u64)) {
-        let v = parse_base_version(req).unwrap();
-        assert_eq!((v.major, v.minor, v.patch), expected);
-    }
-
-    /// Pure-function `select_version` cases. `expected_eq` and `expected_ne`
+    /// Pure-function `parse_and_select` cases. `expected_eq` and `expected_ne`
     /// are independent: when `Some`, the assertion runs; when `None`, it is
     /// skipped. This faithfully preserves the original mix of `assert_eq!` /
     /// `assert_ne!` / both per test, with no added or dropped assertions.
@@ -326,9 +293,15 @@ mod tests {
         #[case] expected_eq: Option<&str>,
         #[case] expected_ne: Option<&str>,
     ) {
-        let latest_owned = latest.to_owned();
         let versions = make_versions(versions);
-        let result = select_version(req, Some(&latest_owned), &versions, target);
+        // Drives the same algorithm the registry now calls directly: the
+        // ecosystem-agnostic helper in `core` that fuses strip→parse→select.
+        let result = dependency_check_updates_core::parse_and_select::<semver::Version>(
+            req,
+            &versions,
+            target,
+            Some(latest),
+        );
         if let Some(eq) = expected_eq {
             assert_eq!(result.as_deref(), Some(eq), "expected_eq mismatch");
         }
@@ -510,6 +483,7 @@ mod tests {
             name: "nonexistent".to_owned(),
             current_req: "^1.0.0".to_owned(),
             section: DependencySection::Dependencies,
+            path_version: None,
         };
         let result = registry.resolve_version(&dep, TargetLevel::Latest).await;
         assert!(result.is_err());
@@ -547,11 +521,13 @@ mod tests {
                 name: "serde".to_owned(),
                 current_req: "^1.0.0".to_owned(),
                 section: DependencySection::Dependencies,
+                path_version: None,
             },
             DependencySpec {
                 name: "tokio".to_owned(),
                 current_req: "^1.0.0".to_owned(),
                 section: DependencySection::Dependencies,
+                path_version: None,
             },
         ];
         let results = registry.resolve_batch(&deps, TargetLevel::Latest).await;
@@ -627,5 +603,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.latest, Some("2.0.0".to_owned()));
+    }
+
+    /// A dependency carrying `path_version` is resolved from that local version
+    /// without any registry call. The base URL points at an unbindable port, so
+    /// a successful result proves the network was never touched.
+    #[rstest]
+    #[tokio::test]
+    async fn resolve_version_path_dep_short_circuits_without_network() {
+        install_tls_provider();
+        let registry = CratesIoRegistry::with_base_url("http://127.0.0.1:1");
+        let dep = DependencySpec {
+            name: "hwp".to_owned(),
+            current_req: "0.2.0".to_owned(),
+            section: DependencySection::Dependencies,
+            path_version: Some("0.3.0".to_owned()),
+        };
+        let result = registry
+            .resolve_version(&dep, TargetLevel::Latest)
+            .await
+            .unwrap();
+        assert_eq!(result.latest.as_deref(), Some("0.3.0"));
+        assert_eq!(result.selected.as_deref(), Some("0.3.0"));
     }
 }

@@ -9,10 +9,12 @@
 //! its scalar value on `@`, and records absolute byte offsets of the version
 //! ref so the patcher can perform surgical substring replacement.
 
-use dependency_check_updates_core::{DependencySection, DependencySpec};
+use dependency_check_updates_core::{
+    DependencySection, DependencySpec, is_version_ref, scalar_value_bounds,
+};
 
 /// A located `uses:` directive in the workflow text.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct UsesLocation {
     /// `owner/repo` or `owner/repo/sub/path` — preserved verbatim from the
     /// source so output matches what the user wrote.
@@ -30,8 +32,6 @@ pub struct UsesLocation {
 /// Parsed workflow manifest.
 #[derive(Debug)]
 pub struct WorkflowManifest {
-    /// The original raw text (preserved for surgical patching).
-    pub original_text: String,
     /// Version-like `uses:` refs collected as dependency specs.
     pub dependencies: Vec<DependencySpec>,
 }
@@ -49,13 +49,11 @@ impl WorkflowManifest {
                 name: loc.name,
                 current_req: loc.current_ref,
                 section: DependencySection::GitHubActions,
+                path_version: None,
             })
             .collect();
 
-        Self {
-            original_text: text.to_owned(),
-            dependencies,
-        }
+        Self { dependencies }
     }
 }
 
@@ -77,25 +75,10 @@ pub fn scan(text: &str) -> Vec<UsesLocation> {
 /// Scan a single line; returns the directive iff it parses cleanly and its
 /// ref is version-like.
 fn scan_line(line: &str, line_offset: usize) -> Option<UsesLocation> {
-    let uses_pos = line.find("uses:")?;
-
-    // Verify everything before `uses:` is YAML key context (whitespace +
-    // optional single `-` list-item marker). Anything else — including
-    // a leading `#` comment — disqualifies the line.
-    if !is_key_context(&line[..uses_pos]) {
-        return None;
-    }
-
-    let after_colon = uses_pos + "uses:".len();
-    let rest = line.get(after_colon..)?;
-    let leading_ws = rest.find(|c: char| !c.is_whitespace())?;
-    let value_start_in_line = after_colon + leading_ws;
-    let value_str = line.get(value_start_in_line..)?;
-
-    // Strip optional surrounding quotes. `inner_start` is the byte offset
-    // (within `line`) of the first content char; `inner_end` is one past
-    // the last content char (so [inner_start, inner_end) is the value).
-    let (inner_start, inner_end) = parse_scalar_bounds(value_str, value_start_in_line)?;
+    // `inner_start` is the byte offset (within `line`) of the first content
+    // char; `inner_end` is one past the last (so `[inner_start, inner_end)` is
+    // the value, quotes and trailing comment excluded).
+    let (inner_start, inner_end) = scalar_value_bounds(line, "uses:")?;
     let inner = line.get(inner_start..inner_end)?;
 
     let at_pos = inner.find('@')?;
@@ -124,111 +107,10 @@ fn scan_line(line: &str, line_offset: usize) -> Option<UsesLocation> {
     })
 }
 
-/// Returns true iff `s` contains only whitespace and at most one `-` token,
-/// i.e. it looks like the indent of a YAML key (possibly inside a list).
-fn is_key_context(s: &str) -> bool {
-    let mut seen_dash = false;
-    for ch in s.chars() {
-        if ch.is_whitespace() {
-            continue;
-        }
-        if ch == '-' && !seen_dash {
-            seen_dash = true;
-            continue;
-        }
-        return false;
-    }
-    true
-}
-
-/// Compute the (start, end) byte offsets within `line` of the scalar value,
-/// stripping optional surrounding quotes and any trailing `# comment` /
-/// whitespace.
-///
-/// `value_start_in_line` is the byte offset within `line` where `value_str`
-/// begins; this is needed because the returned offsets are absolute within
-/// `line`.
-fn parse_scalar_bounds(value_str: &str, value_start_in_line: usize) -> Option<(usize, usize)> {
-    let first = value_str.chars().next()?;
-    if first == '\'' || first == '"' {
-        let close_rel = value_str.get(1..)?.find(first)?;
-        let inner_start = value_start_in_line + 1;
-        let inner_end = value_start_in_line + 1 + close_rel;
-        return Some((inner_start, inner_end));
-    }
-    // Unquoted scalar: terminate at first whitespace or YAML comment marker.
-    let end_rel = value_str
-        .find(|c: char| c == '#' || c.is_whitespace())
-        .unwrap_or(value_str.len());
-    Some((value_start_in_line, value_start_in_line + end_rel))
-}
-
-/// Return true if `git_ref` looks like a version tag we want to track.
-///
-/// Rules (all must hold):
-/// 1. After stripping an optional leading `v`, the first char is a digit.
-/// 2. The ref is NOT a commit SHA — heuristically defined as "all
-///    hex digits, length ≥ 7, no dots", which matches both short and full
-///    SHAs while letting `v5`, `v5.1`, `v5.1.0`, `2024.01.01`, `1.0-beta`
-///    through.
-///
-/// Refs that fail either rule (`@main`, `@master`, `@my-branch`,
-/// `@8e5e7e5a3b4c1234abcdef0123456789abcdef01`) are intentionally skipped:
-/// the user is opting out of automatic version pinning by referencing a
-/// moving target or a content-addressed SHA.
-#[must_use]
-pub fn is_version_ref(git_ref: &str) -> bool {
-    let stripped = git_ref.strip_prefix('v').unwrap_or(git_ref);
-    let Some(first) = stripped.chars().next() else {
-        return false;
-    };
-    if !first.is_ascii_digit() {
-        return false;
-    }
-    // SHA heuristic: pure hex, length ≥ 7, no dots. Real version tags
-    // contain dots (`1.2.3`) or are very short (`v5` → stripped = `5`).
-    if stripped.len() >= 7
-        && !stripped.contains('.')
-        && stripped.chars().all(|c| c.is_ascii_hexdigit())
-    {
-        return false;
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
-
-    #[rstest]
-    // v-prefix versions accepted as version-like.
-    #[case::v_major("v5", true)]
-    #[case::v_major_minor("v5.1", true)]
-    #[case::v_major_minor_patch("v5.1.0", true)]
-    #[case::v_prerelease("v1.0.0-beta.1", true)]
-    // Bare numeric versions accepted (with or without v prefix).
-    #[case::bare_major("5", true)]
-    #[case::bare_semver("1.2.3", true)]
-    #[case::calendar_version("2024.01.01", true)]
-    // Short v-versions: `v12345` strips to `12345` (5 chars, < 7) so it
-    // bypasses the SHA heuristic and is treated as a version.
-    #[case::v_short_numeric("v12345", true)]
-    // Branch-like refs are rejected (not version-like).
-    #[case::branch_main("main", false)]
-    #[case::branch_master("master", false)]
-    #[case::branch_develop("develop", false)]
-    #[case::branch_release_with_slash("release/v5", false)]
-    // Commit SHAs are rejected by the hex+length heuristic.
-    #[case::sha_40_char("8e5e7e5a3b4c1234abcdef0123456789abcdef01", false)]
-    #[case::sha_7_char_starting_digit("1234567", false)]
-    #[case::sha_8_char_mixed_hex("12345abc", false)]
-    // Empty / lone `v` produce no leading digit → rejected.
-    #[case::empty("", false)]
-    #[case::just_v("v", false)]
-    fn is_version_ref_cases(#[case] input: &str, #[case] expected: bool) {
-        assert_eq!(is_version_ref(input), expected);
-    }
 
     #[rstest]
     // Yaml that produces EXACTLY one `uses:` match — name, ref, and byte

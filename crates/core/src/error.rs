@@ -61,22 +61,13 @@ pub enum DcuError {
         detail: String,
     },
 
-    /// A version string could not be parsed as semver.
-    #[error("invalid semver: {input}")]
-    #[diagnostic(code(dependency_check_updates::semver_error))]
-    SemverParse {
-        /// The input that failed to parse.
-        input: String,
-        /// Human-readable failure detail.
-        detail: String,
-    },
-
     /// No recognized manifest was found at the given location.
     #[error("no manifest found in {path}")]
     #[diagnostic(
         code(dependency_check_updates::no_manifest),
         help(
-            "run dependency-check-updates in a directory containing package.json, or use --manifest"
+            "run dependency-check-updates in a directory containing package.json, Cargo.toml, \
+             pyproject.toml, or .github/workflows/*.yml, or use --manifest"
         )
     )]
     NoManifest {
@@ -120,13 +111,6 @@ mod tests {
         }
     }
 
-    fn semver_parse_err() -> DcuError {
-        DcuError::SemverParse {
-            input: "not.a.version".to_owned(),
-            detail: "invalid semver format".to_owned(),
-        }
-    }
-
     /// Verifies the [`std::fmt::Display`] output for every variant. Variants
     /// whose message embeds a path use `Path::display()` so the expected
     /// string is computed at case time to stay correct on every platform.
@@ -150,10 +134,6 @@ mod tests {
     #[case::registry_lookup(
         registry_lookup_err(),
         "registry lookup failed for package `lodash`: connection timeout".to_owned()
-    )]
-    #[case::semver_parse(
-        semver_parse_err(),
-        "invalid semver: not.a.version".to_owned()
     )]
     fn dcu_error_display(#[case] err: DcuError, #[case] expected: String) {
         assert_eq!(err.to_string(), expected);

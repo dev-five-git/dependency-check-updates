@@ -2,7 +2,6 @@
 //! dependency sections, version targets, and the parsed/resolved/planned
 //! value objects that flow through the scan → resolve → patch pipeline.
 
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// The kind of package manifest file.
@@ -17,6 +16,12 @@ pub enum ManifestKind {
     /// GitHub Actions workflow (`.github/workflows/*.yml` /`*.yaml`) or
     /// composite action definition (`action.yml` / `action.yaml`).
     GitHubWorkflow,
+    /// Docker build definition (`Dockerfile`, `Dockerfile.<suffix>`,
+    /// `<prefix>.Dockerfile`).
+    Dockerfile,
+    /// Docker Compose project file (`compose.y(a)ml`,
+    /// `docker-compose.y(a)ml`, and their `.<profile>.` variants).
+    DockerCompose,
 }
 
 impl ManifestKind {
@@ -25,7 +30,9 @@ impl ManifestKind {
     /// GitHub workflow detection requires the parent directory context because
     /// arbitrary `*.yml` files exist throughout repos and only files under
     /// `.github/workflows/` or named `action.yml`/`action.yaml` are treated as
-    /// workflow manifests.
+    /// workflow manifests. Docker manifests, by contrast, are recognised by
+    /// file name alone — `Dockerfile` and `compose.yaml` mean the same thing
+    /// wherever they sit in the tree.
     #[must_use]
     pub fn from_path(path: &std::path::Path) -> Option<Self> {
         let file_name = path.file_name()?.to_str()?;
@@ -35,17 +42,24 @@ impl ManifestKind {
             "pyproject.toml" => Some(Self::PyProjectToml),
             "action.yml" | "action.yaml" => Some(Self::GitHubWorkflow),
             _ => {
-                // Workflow YAMLs live in `.github/workflows/`.
-                if matches!(
+                // Docker file names are position-independent, so they are
+                // tried before the parent-directory-sensitive workflow check.
+                if is_dockerfile_name(file_name) {
+                    return Some(Self::Dockerfile);
+                }
+                let is_yaml = matches!(
                     path.extension().and_then(|s| s.to_str()),
                     Some("yml" | "yaml")
-                ) && path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|s| s.to_str())
-                    == Some("workflows")
-                    && path
-                        .parent()
+                );
+                if is_yaml && is_compose_name(file_name) {
+                    return Some(Self::DockerCompose);
+                }
+                let parent = path.parent();
+                // Workflow YAMLs live in `.github/workflows/`.
+                if is_yaml
+                    && parent.and_then(|p| p.file_name()).and_then(|s| s.to_str())
+                        == Some("workflows")
+                    && parent
                         .and_then(std::path::Path::parent)
                         .and_then(|p| p.file_name())
                         .and_then(|s| s.to_str())
@@ -60,6 +74,37 @@ impl ManifestKind {
     }
 }
 
+/// Whether `file_name` names a Docker build definition.
+///
+/// Accepts the three conventions Docker tooling itself understands:
+/// `Dockerfile`, the `Dockerfile.<suffix>` form (`Dockerfile.dev`), and the
+/// `<prefix>.Dockerfile` form (`api.Dockerfile`) that editors use for syntax
+/// highlighting. Matching is case-sensitive because `docker build` resolves
+/// the default file name case-sensitively on Linux, and a lowercase
+/// `dockerfile` in a repo is far more likely to be prose than a build file.
+fn is_dockerfile_name(file_name: &str) -> bool {
+    file_name == "Dockerfile"
+        || file_name.starts_with("Dockerfile.")
+        || file_name.ends_with(".Dockerfile")
+}
+
+/// Whether `file_name` (already known to carry a `.yml`/`.yaml` extension)
+/// names a Compose project file.
+///
+/// Covers the modern `compose.yaml` spelling, the legacy `docker-compose.yml`
+/// one, and the profile-suffixed variants of both
+/// (`docker-compose.override.yml`, `compose.prod.yaml`). The stem check is
+/// exact-or-dot-prefixed so unrelated files such as `composer.yml` are not
+/// swept in.
+fn is_compose_name(file_name: &str) -> bool {
+    let stem = file_name
+        .rsplit_once('.')
+        .map_or(file_name, |(stem, _ext)| stem);
+    ["compose", "docker-compose"]
+        .iter()
+        .any(|base| stem == *base || stem.starts_with(&format!("{base}.")))
+}
+
 impl std::fmt::Display for ManifestKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -67,6 +112,8 @@ impl std::fmt::Display for ManifestKind {
             Self::CargoToml => write!(f, "Cargo.toml"),
             Self::PyProjectToml => write!(f, "pyproject.toml"),
             Self::GitHubWorkflow => write!(f, "GitHub workflow"),
+            Self::Dockerfile => write!(f, "Dockerfile"),
+            Self::DockerCompose => write!(f, "Docker Compose"),
         }
     }
 }
@@ -81,16 +128,15 @@ pub struct ManifestRef {
 }
 
 /// Which dependency section a dependency belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DependencySection {
-    /// Node.js `dependencies`.
+    /// Node.js `dependencies` and Poetry `[tool.poetry.dependencies]`.
     Dependencies,
-    /// Node.js `devDependencies`.
+    /// Node.js `devDependencies`, Poetry `[tool.poetry.dev-dependencies]`, and PEP 735 `[dependency-groups]`.
     DevDependencies,
     /// Node.js `peerDependencies`.
     PeerDependencies,
-    /// Node.js `optionalDependencies`.
+    /// Node.js `optionalDependencies` and PEP 621 `[project.optional-dependencies]`.
     OptionalDependencies,
     /// Rust `[build-dependencies]`.
     BuildDependencies,
@@ -100,6 +146,9 @@ pub enum DependencySection {
     ProjectDependencies,
     /// GitHub Actions `uses:` directives in workflows / composite actions.
     GitHubActions,
+    /// Container image references: Dockerfile `FROM` instructions and the
+    /// `image:` key of Compose services / workflow job containers.
+    DockerImage,
 }
 
 impl DependencySection {
@@ -115,6 +164,7 @@ impl DependencySection {
             Self::WorkspaceDependencies => "workspace.dependencies",
             Self::ProjectDependencies => "project.dependencies",
             Self::GitHubActions => "uses",
+            Self::DockerImage => "image",
         }
     }
 }
@@ -126,7 +176,7 @@ impl std::fmt::Display for DependencySection {
 }
 
 /// A dependency found in a manifest file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct DependencySpec {
     /// Package name as written in the manifest.
     pub name: String,
@@ -134,6 +184,14 @@ pub struct DependencySpec {
     pub current_req: String,
     /// Section the dependency was found in.
     pub section: DependencySection,
+    /// For a local **path dependency** that also declares a `version`
+    /// (e.g. Cargo's `dep = { path = "../dep", version = "0.2.0" }`), this
+    /// holds the version resolved from the local crate's own manifest — the
+    /// source of truth for what the `version` field should be synced to.
+    ///
+    /// `None` for ordinary registry dependencies, which resolve their target
+    /// version from the package registry (`crates.io`, `npm`, `PyPI`) instead.
+    pub path_version: Option<String>,
 }
 
 /// The target level for version updates.
@@ -231,7 +289,21 @@ mod tests {
     #[case::action_yaml("path/to/action.yaml", Some(ManifestKind::GitHubWorkflow))]
     #[case::nested_workflow("repo/.github/workflows/test.yml", Some(ManifestKind::GitHubWorkflow))]
     #[case::unknown_extension("unknown.txt", None)]
-    #[case::unrelated_yml_ignored("docker-compose.yml", None)]
+    // Docker build definitions are recognised by file name alone, anywhere in
+    // the tree — all three spellings `docker build -f` accepts.
+    #[case::dockerfile_plain("Dockerfile", Some(ManifestKind::Dockerfile))]
+    #[case::dockerfile_suffixed("Dockerfile.dev", Some(ManifestKind::Dockerfile))]
+    #[case::dockerfile_prefixed("apps/api.Dockerfile", Some(ManifestKind::Dockerfile))]
+    #[case::dockerfile_nested("services/web/Dockerfile", Some(ManifestKind::Dockerfile))]
+    // Compose files: both spellings, both extensions, profile variants.
+    #[case::compose_legacy("docker-compose.yml", Some(ManifestKind::DockerCompose))]
+    #[case::compose_modern("compose.yaml", Some(ManifestKind::DockerCompose))]
+    #[case::compose_override("docker-compose.override.yml", Some(ManifestKind::DockerCompose))]
+    #[case::compose_profile("compose.prod.yaml", Some(ManifestKind::DockerCompose))]
+    // Guards against over-matching: a lowercase prose file and a similarly
+    // named-but-unrelated YAML must stay unrecognised.
+    #[case::lowercase_dockerfile_ignored("dockerfile", None)]
+    #[case::composer_yml_ignored("composer.yml", None)]
     fn manifest_kind_from_path_cases(#[case] path: &str, #[case] expected: Option<ManifestKind>) {
         assert_eq!(
             ManifestKind::from_path(std::path::Path::new(path)),
@@ -246,6 +318,8 @@ mod tests {
     #[case::cargo_toml(ManifestKind::CargoToml, "Cargo.toml")]
     #[case::pyproject_toml(ManifestKind::PyProjectToml, "pyproject.toml")]
     #[case::github_workflow(ManifestKind::GitHubWorkflow, "GitHub workflow")]
+    #[case::dockerfile(ManifestKind::Dockerfile, "Dockerfile")]
+    #[case::docker_compose(ManifestKind::DockerCompose, "Docker Compose")]
     fn manifest_kind_display_cases(#[case] kind: ManifestKind, #[case] expected: &str) {
         assert_eq!(kind.to_string(), expected);
     }
@@ -298,6 +372,7 @@ mod tests {
     )]
     #[case::project_dependencies(DependencySection::ProjectDependencies, "project.dependencies")]
     #[case::github_actions(DependencySection::GitHubActions, "uses")]
+    #[case::docker_image(DependencySection::DockerImage, "image")]
     fn dependency_section_label_cases(#[case] section: DependencySection, #[case] expected: &str) {
         assert_eq!(section.label(), expected);
     }

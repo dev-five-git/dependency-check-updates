@@ -1,7 +1,7 @@
 [package]
 name = "dependency-check-updates-core"
 version = "0.1.15"
-description = "Shared traits and types for dependency-check-updates (ManifestHandler, RegistryClient, Scanner)"
+description = "Shared traits and types for dependency-check-updates (ManifestHandler, Scanner)"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -15,19 +15,23 @@ categories.workspace = true
 [dependencies]
 thiserror.workspace = true
 miette.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 ignore.workspace = true
 tracing.workspace = true
-tokio.workspace = true
 reqwest.workspace = true
 node-semver.workspace = true
-semver = "1.0"
-pep440_rs = "0.7.3"
+semver.workspace = true
+pep440_rs.workspace = true
+futures.workspace = true
+toml_edit.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
 tempfile.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "hot"
+harness = false
 
 [lints]
 workspace = true

@@ -2,7 +2,6 @@
 //!
 //! Defines shared traits that each language crate implements:
 //! - [`ManifestHandler`] — parse manifests and apply format-preserving updates
-//! - [`RegistryClient`] — resolve versions from package registries
 //! - [`Scanner`] — discover manifest files in a directory
 
 #![warn(missing_docs)]
@@ -10,19 +9,30 @@
 pub mod error;
 pub mod http;
 pub mod manifest;
-pub mod style;
+pub mod patch;
+pub mod toml_decor;
 pub mod types;
 pub mod util;
 pub mod version;
+pub mod yaml_scan;
 
 // Re-export commonly used types
 pub use error::DcuError;
-pub use http::{DEFAULT_MAX_CONCURRENT_REQUESTS, DEFAULT_REQUEST_TIMEOUT_SECS, build_client};
-pub use manifest::{ManifestHandler, ParsedManifest, RegistryClient, ScanResult, Scanner};
-pub use style::{FileStyle, IndentStyle, LineEnding};
+pub use http::{
+    DEFAULT_MAX_CONCURRENT_REQUESTS, build_client, resolve_batch_concurrent, send_checked,
+};
+pub use manifest::{ManifestHandler, ParsedManifest, Scanner};
+pub use patch::{Patch, apply_byte_patches};
+pub use toml_decor::replace_string_preserving_decor;
 pub use types::{
     BumpType, DependencySection, DependencySpec, ManifestKind, ManifestRef, PlannedUpdate,
     ResolvedVersion, TargetLevel,
 };
-pub use util::{collect_task_results, strip_range_prefix};
-pub use version::{SelectableVersion, select_version};
+pub use util::{
+    count_numeric_segments, is_version_ref, pad_to_three_segments, split_numeric_head,
+    strip_range_prefix,
+};
+pub use version::{
+    SelectableVersion, current_req_is_prerelease, highest_stable, parse_and_select, select_version,
+};
+pub use yaml_scan::scalar_value_bounds;

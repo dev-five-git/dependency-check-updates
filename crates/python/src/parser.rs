@@ -11,8 +11,6 @@ use toml_edit::{DocumentMut, Item};
 /// A parsed pyproject.toml file.
 #[derive(Debug)]
 pub struct PyProjectManifest {
-    /// The original raw text.
-    pub original_text: String,
     /// The `toml_edit` document (format-preserving).
     pub doc: DocumentMut,
     /// Collected dependencies.
@@ -32,11 +30,7 @@ impl PyProjectManifest {
 
         let dependencies = Self::collect_dependencies(&doc);
 
-        Ok(Self {
-            original_text: text.to_owned(),
-            doc,
-            dependencies,
-        })
+        Ok(Self { doc, dependencies })
     }
 
     fn collect_dependencies(doc: &DocumentMut) -> Vec<DependencySpec> {
@@ -45,15 +39,7 @@ impl PyProjectManifest {
         // PEP 621: [project] dependencies = ["requests>=2.0", ...]
         if let Some(project) = doc.get("project").and_then(Item::as_table) {
             if let Some(dep_array) = project.get("dependencies").and_then(Item::as_array) {
-                for item in dep_array {
-                    if let Some(spec_str) = item.as_str() {
-                        if let Some(dep) =
-                            parse_pep508_spec(spec_str, DependencySection::ProjectDependencies)
-                        {
-                            deps.push(dep);
-                        }
-                    }
-                }
+                collect_pep508_array(dep_array, DependencySection::ProjectDependencies, &mut deps);
             }
 
             // [project.optional-dependencies]
@@ -61,74 +47,34 @@ impl PyProjectManifest {
                 .get("optional-dependencies")
                 .and_then(Item::as_table)
             {
-                for (_group, items) in opt_deps {
-                    if let Some(arr) = items.as_array() {
-                        for item in arr {
-                            if let Some(spec_str) = item.as_str() {
-                                if let Some(dep) = parse_pep508_spec(
-                                    spec_str,
-                                    DependencySection::OptionalDependencies,
-                                ) {
-                                    deps.push(dep);
-                                }
-                            }
-                        }
-                    }
-                }
+                collect_pep508_array_table(
+                    opt_deps,
+                    DependencySection::OptionalDependencies,
+                    &mut deps,
+                );
             }
         }
 
-        // Poetry: [tool.poetry.dependencies]
+        // Poetry: [tool.poetry.dependencies] and [tool.poetry.dev-dependencies]
+        // funnel through one shared `collect_poetry_table` helper — the two
+        // loops were previously byte-for-byte identical except for the
+        // `DependencySection` literal, and the dev-loop's `python` skip
+        // comment already mirrored the main-loop guard, signalling the
+        // duplication. See 0007-analyze.md F1.
         if let Some(tool) = doc.get("tool").and_then(Item::as_table) {
             if let Some(poetry) = tool.get("poetry").and_then(Item::as_table) {
-                if let Some(poetry_deps) = poetry.get("dependencies").and_then(Item::as_table) {
-                    for (name, item) in poetry_deps {
-                        if name == "python" {
-                            continue; // Skip python version constraint
-                        }
-                        if let Some(version) = extract_poetry_version(item) {
-                            if !is_wildcard_req(&version) {
-                                deps.push(DependencySpec {
-                                    name: name.to_owned(),
-                                    current_req: version,
-                                    section: DependencySection::Dependencies,
-                                });
-                            }
-                        }
-                    }
+                if let Some(t) = poetry.get("dependencies").and_then(Item::as_table) {
+                    collect_poetry_table(t, DependencySection::Dependencies, &mut deps);
                 }
-                // Poetry dev-dependencies
-                if let Some(dev_deps) = poetry.get("dev-dependencies").and_then(Item::as_table) {
-                    for (name, item) in dev_deps {
-                        if let Some(version) = extract_poetry_version(item) {
-                            if !is_wildcard_req(&version) {
-                                deps.push(DependencySpec {
-                                    name: name.to_owned(),
-                                    current_req: version,
-                                    section: DependencySection::DevDependencies,
-                                });
-                            }
-                        }
-                    }
+                if let Some(t) = poetry.get("dev-dependencies").and_then(Item::as_table) {
+                    collect_poetry_table(t, DependencySection::DevDependencies, &mut deps);
                 }
             }
         }
 
         // PEP 735: [dependency-groups]
         if let Some(groups) = doc.get("dependency-groups").and_then(Item::as_table) {
-            for (_group_name, items) in groups {
-                if let Some(arr) = items.as_array() {
-                    for item in arr {
-                        if let Some(spec_str) = item.as_str() {
-                            if let Some(dep) =
-                                parse_pep508_spec(spec_str, DependencySection::DevDependencies)
-                            {
-                                deps.push(dep);
-                            }
-                        }
-                    }
-                }
-            }
+            collect_pep508_array_table(groups, DependencySection::DevDependencies, &mut deps);
         }
 
         deps
@@ -147,70 +93,209 @@ impl PyProjectManifest {
     }
 
     fn apply_single_update(&mut self, update: &PlannedUpdate) {
-        // Try PEP 621 project.dependencies
+        // Try PEP 621 project.dependencies (and optional-dependencies)
         if let Some(project) = self.doc.get_mut("project").and_then(Item::as_table_mut) {
             if let Some(dep_array) = project.get_mut("dependencies").and_then(Item::as_array_mut) {
-                for item in dep_array.iter_mut() {
-                    let Some(spec_str) = item.as_str() else {
-                        continue;
-                    };
-                    if !spec_str_matches_name(spec_str, &update.name) {
-                        continue;
-                    }
-                    let new_spec = replace_version_in_pep508(spec_str, &update.to);
-                    // Preserve the element's surrounding decor (leading newline +
-                    // indentation, trailing whitespace/comment) instead of
-                    // replacing the value wholesale — a fresh `Formatted::new`
-                    // carries empty decor, which collapses a multi-line
-                    // `dependencies` array onto a single line. Mirrors the
-                    // decor-preserving Poetry path below.
-                    if let toml_edit::Value::String(s) = item {
-                        let mut new_s = toml_edit::Formatted::new(new_spec);
-                        *new_s.decor_mut() = s.decor().clone();
-                        *s = new_s;
-                    }
+                if apply_to_pep508_array(dep_array, update) {
                     return;
                 }
             }
-        }
-
-        // Try Poetry tool.poetry.dependencies
-        if let Some(tool) = self.doc.get_mut("tool").and_then(Item::as_table_mut) {
-            if let Some(poetry) = tool.get_mut("poetry").and_then(Item::as_table_mut) {
-                if let Some(deps) = poetry.get_mut("dependencies").and_then(Item::as_table_mut) {
-                    if let Some(Item::Value(toml_edit::Value::String(s))) =
-                        deps.get_mut(&update.name)
-                    {
-                        let decor = s.decor().clone();
-                        let mut new_s = toml_edit::Formatted::new(update.to.clone());
-                        *new_s.decor_mut() = decor;
-                        *s = new_s;
+            // PEP 621: [project.optional-dependencies] — one named array per
+            // extra group; the matrix in 0027-analyze.md flagged this as a
+            // silent drop. Each value is a PEP 508 array, identical shape to
+            // the main `dependencies` array above.
+            if let Some(opt) = project
+                .get_mut("optional-dependencies")
+                .and_then(Item::as_table_mut)
+            {
+                for (_group, items) in opt.iter_mut() {
+                    if let Some(arr) = items.as_array_mut() {
+                        if apply_to_pep508_array(arr, update) {
+                            return;
+                        }
                     }
                 }
             }
         }
 
-        // Silently skip if not found (may be in optional-deps or groups)
+        // PEP 735: [dependency-groups] — modern standard for dev dep groups.
+        if let Some(groups) = self
+            .doc
+            .get_mut("dependency-groups")
+            .and_then(Item::as_table_mut)
+        {
+            for (_group, items) in groups.iter_mut() {
+                if let Some(arr) = items.as_array_mut() {
+                    if apply_to_pep508_array(arr, update) {
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Try Poetry tool.poetry.dependencies (and dev-dependencies). All
+        // three Poetry value shapes that `extract_poetry_version` recognises
+        // (string, inline-table, full-table) are handled by the shared
+        // `apply_to_poetry_table` helper — the previous string-only path
+        // silently dropped inline/full-table updates that `compute_updates`
+        // had already planned, so `dcu -u` printed the row but left the file
+        // unchanged. See 0036-analyze.md F1.
+        if let Some(tool) = self.doc.get_mut("tool").and_then(Item::as_table_mut) {
+            if let Some(poetry) = tool.get_mut("poetry").and_then(Item::as_table_mut) {
+                if let Some(deps) = poetry.get_mut("dependencies").and_then(Item::as_table_mut) {
+                    if apply_to_poetry_table(deps, &update.name, &update.to) {
+                        return;
+                    }
+                }
+                if let Some(deps) = poetry
+                    .get_mut("dev-dependencies")
+                    .and_then(Item::as_table_mut)
+                {
+                    apply_to_poetry_table(deps, &update.name, &update.to);
+                }
+            }
+        }
+
+        // Silently skip if the dep is truly absent from every supported
+        // section. This now only fires on real no-ops, not on the three
+        // sections this method previously dropped.
     }
+}
+
+/// Walk a PEP 508 array, parsing each string element via
+/// [`parse_pep508_spec`] and pushing every successfully-parsed
+/// [`DependencySpec`] into `deps` under the given `section`.
+///
+/// Mirrors the patch-side [`apply_to_pep508_array`] so the parse and patch
+/// sides share the same shape: both walk the array, both skip non-string
+/// elements, both delegate the per-element work to a single helper. The
+/// three PEP 508 array sites in [`PyProjectManifest::collect_dependencies`]
+/// (PEP 621 `[project].dependencies`, PEP 621 `[project.optional-dependencies]`
+/// groups, PEP 735 `[dependency-groups]` groups) all funnel through here.
+fn collect_pep508_array(
+    arr: &toml_edit::Array,
+    section: DependencySection,
+    deps: &mut Vec<DependencySpec>,
+) {
+    for item in arr {
+        if let Some(spec_str) = item.as_str() {
+            if let Some(dep) = parse_pep508_spec(spec_str, section) {
+                deps.push(dep);
+            }
+        }
+    }
+}
+
+/// Iterate a table of PEP 508 arrays (e.g., `[project.optional-dependencies]`
+/// or `[dependency-groups]`), calling `collect_pep508_array` for each array value.
+fn collect_pep508_array_table(
+    table: &toml_edit::Table,
+    section: DependencySection,
+    deps: &mut Vec<DependencySpec>,
+) {
+    for (_group, items) in table {
+        if let Some(arr) = items.as_array() {
+            collect_pep508_array(arr, section, deps);
+        }
+    }
+}
+
+/// Walk a Poetry dependency table (`[tool.poetry.dependencies]` or
+/// `[tool.poetry.dev-dependencies]`), pushing every collected
+/// [`DependencySpec`] into `deps` under the given `section`.
+///
+/// Funnels the two previously-duplicated inner loops in
+/// [`PyProjectManifest::collect_dependencies`] through one shared body so
+/// the `python = "^…"` interpreter guard, the
+/// [`extract_poetry_version`] extraction, the [`is_wildcard_req`] skip, and
+/// the [`DependencySpec`] shape (including `path_version: None`) all live in
+/// exactly one place. The `section` parameter is the only piece that
+/// differed between the main- and dev-dep loops, mirroring the analyze
+/// report's `collect_pep508_array` parallel.
+fn collect_poetry_table(
+    table: &toml_edit::Table,
+    section: DependencySection,
+    deps: &mut Vec<DependencySpec>,
+) {
+    for (name, item) in table {
+        // `python` here is the interpreter version constraint Poetry tracks,
+        // not a PyPI package; both the main- and dev-dep loops have always
+        // skipped it (see 0004-analyze.md for the dev-loop addition).
+        if name == "python" {
+            continue;
+        }
+        let Some(version) = extract_poetry_version(item) else {
+            continue;
+        };
+        if is_wildcard_req(&version) {
+            continue;
+        }
+        deps.push(DependencySpec {
+            name: name.to_owned(),
+            current_req: version,
+            section,
+            path_version: None,
+        });
+    }
+}
+
+/// Walk a PEP 508 array; on the first element whose name matches
+/// `update.name`, rewrite its version constraint via
+/// [`replace_version_in_pep508`], preserving the element's decor exactly.
+///
+/// Returns `true` if a match was found (caller should stop searching).
+///
+/// Faithful extraction of the existing PEP 621 main-array inner loop — same
+/// matching predicate, same decor preservation, no semantic drift.
+fn apply_to_pep508_array(arr: &mut toml_edit::Array, update: &PlannedUpdate) -> bool {
+    let update_name_norm = normalize_pep503(&update.name);
+    for item in arr.iter_mut() {
+        let Some(spec_str) = item.as_str() else {
+            continue;
+        };
+        if !spec_name_matches_normalized(spec_str, &update_name_norm) {
+            continue;
+        }
+        let new_spec = replace_version_in_pep508(spec_str, &update.to);
+        // Preserve the element's surrounding decor (leading newline +
+        // indentation, trailing whitespace/comment) — a fresh `Formatted::new`
+        // carries empty decor, which would collapse a multi-line array onto a
+        // single line.
+        if let toml_edit::Value::String(s) = item {
+            dependency_check_updates_core::replace_string_preserving_decor(s, new_spec);
+        }
+        return true;
+    }
+    false
+}
+
+/// Split a PEP 508 dependency spec into `(name, rest)` at the PEP 503 name
+/// boundary. The first character outside `[A-Za-z0-9._-]` ends the name;
+/// `rest` is everything from that offset onwards (extras, version, marker).
+///
+/// Borrow-only; no allocation. Single source of truth for "where does the
+/// package-name head stop and the rest of the PEP 508 spec begin" — every
+/// other helper in this module that needs that split calls this function
+/// instead of open-coding the boundary scan again, so adding any future
+/// PEP 508 / PEP 685 edge case (tightening quoting in environment markers,
+/// accepting unicode-normalised names) only has to land here.
+fn split_pep508_name(spec: &str) -> (&str, &str) {
+    let spec = spec.trim();
+    let name_end = spec
+        .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
+        .unwrap_or(spec.len());
+    spec.split_at(name_end)
 }
 
 /// Parse a PEP 508 dependency spec like `"requests>=2.28.0"` or `"flask~=2.0"`.
 ///
 /// Returns `None` for specs without version constraints (e.g., bare `"requests"`).
 fn parse_pep508_spec(spec: &str, section: DependencySection) -> Option<DependencySpec> {
-    let spec = spec.trim();
-
-    // Find where the version constraint starts (first non-alphanumeric, non-hyphen, non-dot, non-underscore)
-    let name_end = spec
-        .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
-        .unwrap_or(spec.len());
-
-    let name = spec[..name_end].trim();
+    let (name, rest) = split_pep508_name(spec);
     if name.is_empty() {
         return None;
     }
-
-    let rest = spec[name_end..].trim();
+    let rest = rest.trim();
 
     // Remove extras like [security] before version
     let rest = if rest.starts_with('[') {
@@ -226,6 +311,11 @@ fn parse_pep508_spec(spec: &str, section: DependencySection) -> Option<Dependenc
         return None; // No version constraint
     }
 
+    // Reject PEP 508 direct references (name @ url) — they have no resolvable version
+    if rest.starts_with('@') {
+        return None;
+    }
+
     if is_wildcard_req(rest) {
         return None; // `*`, `==*`, etc. already mean "any version"
     }
@@ -234,19 +324,28 @@ fn parse_pep508_spec(spec: &str, section: DependencySection) -> Option<Dependenc
         name: name.to_owned(),
         current_req: rest.to_owned(),
         section,
+        path_version: None,
     })
 }
 
 /// Check if a PEP 508 spec string matches a given package name.
+///
+/// Test-only convenience wrapper over [`spec_name_matches_normalized`];
+/// production call sites normalize the name once outside their loops.
+#[cfg(test)]
 fn spec_str_matches_name(spec: &str, name: &str) -> bool {
-    let spec = spec.trim();
-    let name_end = spec
-        .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
-        .unwrap_or(spec.len());
-    let spec_name = &spec[..name_end];
+    spec_name_matches_normalized(spec, &normalize_pep503(name))
+}
+
+/// Check if a PEP 508 spec string matches an already-PEP-503-normalized name.
+///
+/// Callers that compare one name against many specs should normalize the name
+/// once and use this directly, avoiding a loop-invariant allocation per spec.
+fn spec_name_matches_normalized(spec: &str, normalized_name: &str) -> bool {
+    let (spec_name, _) = split_pep508_name(spec);
 
     // PEP 503 normalized comparison (case-insensitive, treat - _ . as equivalent)
-    normalize_pep503(spec_name) == normalize_pep503(name)
+    normalize_pep503(spec_name) == normalized_name
 }
 
 fn normalize_pep503(name: &str) -> String {
@@ -255,15 +354,9 @@ fn normalize_pep503(name: &str) -> String {
 
 /// Replace the version constraint in a PEP 508 spec string.
 fn replace_version_in_pep508(spec: &str, new_version: &str) -> String {
-    let spec = spec.trim();
-    let name_end = spec
-        .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
-        .unwrap_or(spec.len());
-
-    let name = &spec[..name_end];
+    let (name, rest) = split_pep508_name(spec);
 
     // Check for extras
-    let rest = &spec[name_end..];
     let (extras, rest) = if rest.starts_with('[') {
         rest.find(']')
             .map_or(("", rest), |i| (&rest[..=i], rest[i + 1..].trim_start()))
@@ -299,6 +392,64 @@ fn extract_poetry_version(item: &Item) -> Option<String> {
             .map(String::from),
         Item::Table(t) => t.get("version").and_then(Item::as_str).map(String::from),
         _ => None,
+    }
+}
+
+/// Patch a single Poetry dep entry across all three value shapes that
+/// [`extract_poetry_version`] collects from:
+///
+/// 1. `foo = "^2.0"`                          → `Item::Value(String)`
+/// 2. `foo = {version = "^2.0", extras=[…]}`  → `Item::Value(InlineTable)`
+/// 3. `[tool.poetry.dependencies.foo]`/`version = …` → `Item::Table`
+///
+/// Returns `true` when the name was found AND a `version` field existed to
+/// rewrite (caller should stop searching). For shapes 2 and 3 the entry's
+/// sibling keys (`extras`, `optional`, `source`, …) are left untouched, and
+/// the `version` value's surrounding decor (leading whitespace, trailing
+/// comments) is preserved byte-for-byte so format-preservation guarantees
+/// hold. Mirrors the cargo-side [`update_dep_in_table`](../../../rust/src/parser.rs)
+/// triple-shape `match` for behavioural parity.
+fn apply_to_poetry_table(table: &mut toml_edit::Table, name: &str, new_version: &str) -> bool {
+    let Some(item) = table.get_mut(name) else {
+        return false;
+    };
+    match item {
+        Item::Value(toml_edit::Value::String(s)) => {
+            dependency_check_updates_core::replace_string_preserving_decor(
+                s,
+                new_version.to_owned(),
+            );
+            true
+        }
+        Item::Value(toml_edit::Value::InlineTable(t)) => {
+            let Some(v) = t.get_mut("version") else {
+                return false;
+            };
+            if let toml_edit::Value::String(s) = v {
+                dependency_check_updates_core::replace_string_preserving_decor(
+                    s,
+                    new_version.to_owned(),
+                );
+            } else {
+                *v = toml_edit::Value::String(toml_edit::Formatted::new(new_version.to_owned()));
+            }
+            true
+        }
+        Item::Table(t) => {
+            let Some(v) = t.get_mut("version") else {
+                return false;
+            };
+            if let Item::Value(toml_edit::Value::String(s)) = v {
+                dependency_check_updates_core::replace_string_preserving_decor(
+                    s,
+                    new_version.to_owned(),
+                );
+            } else {
+                *v = toml_edit::value(new_version);
+            }
+            true
+        }
+        _ => false,
     }
 }
 
@@ -372,6 +523,7 @@ mod tests {
     #[case::empty_string("")]
     #[case::equals_wildcard("requests==*")]
     #[case::bare_star("requests *")]
+    #[case::direct_reference("requests @ https://example.com/requests-2.31.0.zip")]
     fn parse_pep508_spec_without_constraint_cases(#[case] spec: &str) {
         assert!(parse_pep508_spec(spec, DependencySection::ProjectDependencies).is_none());
     }
@@ -411,6 +563,36 @@ mod tests {
         "\n[tool.poetry.dev-dependencies]\npytest = \"^7.0\"\n",
         1,
         Some((None, None, Some(DependencySection::DevDependencies))),
+    )]
+    // Regression: `python` is the interpreter version constraint Poetry
+    // tracks, not a PyPI package. The main-deps loop has always skipped it;
+    // the dev-deps loop now mirrors that guard so a `python = "^3.11"` pin
+    // under `[tool.poetry.dev-dependencies]` no longer leaks into the
+    // resolve pipeline (`pytest` remains the only surviving spec).
+    #[case::poetry_dev_dependencies_skips_python(
+        "\n[tool.poetry.dev-dependencies]\npython = \"^3.11\"\npytest = \"^7.0\"\n",
+        1,
+        Some((
+            Some("pytest"),
+            Some("^7.0"),
+            Some(DependencySection::DevDependencies),
+        )),
+    )]
+    // Regression: a single Poetry table exercising all three `continue`
+    // guards in `collect_poetry_table` at once — `python` (interpreter
+    // pin, not a package), `gitdep` (an inline table with no `version`
+    // key, so `extract_poetry_version` returns `None`), and
+    // `wildcarddep` (`"*"`, an unresolvable wildcard). If any guard
+    // regressed, one of these three would leak into the dependency list
+    // alongside `requests`.
+    #[case::poetry_skips_python_git_and_wildcard(
+        "\n[tool.poetry.dependencies]\npython = \"^3.11\"\ngitdep = { git = \"https://example.com/repo.git\" }\nwildcarddep = \"*\"\nrequests = \"^2.28.0\"\n",
+        1,
+        Some((
+            Some("requests"),
+            Some("^2.28.0"),
+            Some(DependencySection::Dependencies),
+        )),
     )]
     #[case::dependency_groups(
         "\n[dependency-groups]\ntest = [\"pytest>=7.0\", \"coverage>=7.0\"]\n",
@@ -627,5 +809,235 @@ dependencies = [
         // 4-space indentation of every element are preserved.
         let expected = "[project]\nname = \"demo\"\ndependencies = [\n    \"pytz>=2026.2\",\n    \"requests>=2.30.0\",\n]\n";
         assert_eq!(result, expected);
+    }
+
+    // ---------- 0027: previously-dropped sections now patched ----------
+    //
+    // Before this iteration, `apply_single_update` only patched PEP 621 main
+    // `dependencies` and Poetry main `dependencies`. The four tests below lock
+    // in the fix for the three sections that were silently dropped, plus a
+    // pure no-op guard so the new branches cannot accidentally panic or
+    // mutate when the dep is truly absent.
+
+    #[test]
+    fn apply_updates_patches_pep621_optional_dependencies() {
+        // [project.optional-dependencies] dev = [...] — F1 in 0027-analyze.md.
+        let toml = "[project]\nname = \"demo\"\n\n[project.optional-dependencies]\ndev = [\n    \"pytest>=7.0\",\n    \"black>=23.0\",\n]\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "pytest".to_owned(),
+            section: DependencySection::OptionalDependencies,
+            from: ">=7.0".to_owned(),
+            to: ">=8.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        // Newlines + 4-space indentation of every element preserved exactly.
+        let expected = "[project]\nname = \"demo\"\n\n[project.optional-dependencies]\ndev = [\n    \"pytest>=8.0\",\n    \"black>=23.0\",\n]\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn apply_updates_patches_pep735_dependency_groups() {
+        // PEP 735 [dependency-groups] — the modern standard for dev deps in
+        // PEP 621 projects. F1 in 0027-analyze.md.
+        let toml =
+            "[dependency-groups]\ntest = [\n    \"pytest>=7.0\",\n    \"coverage>=7.0\",\n]\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "coverage".to_owned(),
+            section: DependencySection::DevDependencies,
+            from: ">=7.0".to_owned(),
+            to: ">=7.5".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        let expected =
+            "[dependency-groups]\ntest = [\n    \"pytest>=7.0\",\n    \"coverage>=7.5\",\n]\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn apply_updates_patches_poetry_dev_dependencies() {
+        // [tool.poetry.dev-dependencies] string-form dep. F1 in 0027-analyze.md.
+        let toml = "[tool.poetry.dev-dependencies]\npytest = \"^7.0\"\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "pytest".to_owned(),
+            section: DependencySection::DevDependencies,
+            from: "^7.0".to_owned(),
+            to: "^8.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        let expected = "[tool.poetry.dev-dependencies]\npytest = \"^8.0\"\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn apply_updates_unknown_dep_remains_a_silent_noop() {
+        // Guard the new branches: an update for a name that exists in NO
+        // section must remain a pure silent no-op (no panic, no mutation,
+        // byte-equal output).
+        let toml = "[project]\nname = \"demo\"\ndependencies = [\n    \"requests>=2.28.0\",\n]\n\n[project.optional-dependencies]\ndev = [\"pytest>=7.0\"]\n\n[dependency-groups]\ntest = [\"coverage>=7.0\"]\n\n[tool.poetry.dev-dependencies]\nblack = \"^23.0\"\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "totally-not-here".to_owned(),
+            section: DependencySection::ProjectDependencies,
+            from: ">=1.0".to_owned(),
+            to: ">=2.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        assert_eq!(result, toml);
+    }
+
+    // ---------- 0036: Poetry inline-table / full-table dep updates ----------
+    //
+    // Before this iteration, `apply_single_update` only patched the
+    // `Item::Value(String)` shape of Poetry deps even though
+    // `extract_poetry_version` (and therefore `compute_updates`) also
+    // recognises inline-table and full-table forms. The three tests below
+    // lock in the fix for those two previously-dropped shapes across both
+    // `[tool.poetry.dependencies]` and `[tool.poetry.dev-dependencies]`,
+    // and prove that sibling keys (`extras`, `optional`) are preserved
+    // byte-for-byte. See 0036-analyze.md F1.
+
+    #[test]
+    fn apply_updates_patches_poetry_inline_table_in_dependencies() {
+        // `flask = {version = "^2.0", extras = ["async"], optional = true}` —
+        // only the `version` value bumps; every sibling key survives intact.
+        let toml = "[tool.poetry.dependencies]\npython = \"^3.8\"\nflask = {version = \"^2.0\", extras = [\"async\"], optional = true}\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "flask".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^2.0".to_owned(),
+            to: "^3.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        let expected = "[tool.poetry.dependencies]\npython = \"^3.8\"\nflask = {version = \"^3.0\", extras = [\"async\"], optional = true}\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn apply_updates_patches_poetry_inline_table_in_dev_dependencies() {
+        // Same inline-table shape but under `[tool.poetry.dev-dependencies]`,
+        // proving the dev-deps Poetry branch now also handles inline tables.
+        let toml =
+            "[tool.poetry.dev-dependencies]\npytest = {version = \"^7.0\", extras = [\"toml\"]}\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "pytest".to_owned(),
+            section: DependencySection::DevDependencies,
+            from: "^7.0".to_owned(),
+            to: "^8.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        let expected =
+            "[tool.poetry.dev-dependencies]\npytest = {version = \"^8.0\", extras = [\"toml\"]}\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn apply_updates_patches_poetry_full_table_form() {
+        // `[tool.poetry.dependencies.sqlalchemy]` with `version` + `extras`
+        // sub-keys — the version bumps, `extras = ["asyncio"]` survives, and
+        // the section header / blank line layout is preserved.
+        let toml = "[tool.poetry.dependencies]\npython = \"^3.8\"\n\n[tool.poetry.dependencies.sqlalchemy]\nversion = \"^2.0\"\nextras = [\"asyncio\"]\n";
+        let mut manifest = PyProjectManifest::parse(toml).unwrap();
+        let updates = vec![PlannedUpdate {
+            name: "sqlalchemy".to_owned(),
+            section: DependencySection::Dependencies,
+            from: "^2.0".to_owned(),
+            to: "^3.0".to_owned(),
+        }];
+        let result = manifest.apply_updates(&updates);
+        let expected = "[tool.poetry.dependencies]\npython = \"^3.8\"\n\n[tool.poetry.dependencies.sqlalchemy]\nversion = \"^3.0\"\nextras = [\"asyncio\"]\n";
+        assert_eq!(result, expected);
+    }
+
+    // ---------- apply_to_poetry_table direct-call scenarios ----------
+    //
+    // `apply_to_poetry_table` is a private free function, so these call it
+    // directly against a hand-built `toml_edit::Table` rather than going
+    // through the whole `PyProjectManifest::apply_updates` pipeline. That
+    // keeps each fixture down to a single line and the branch under test
+    // obvious.
+
+    #[rstest]
+    // The requested name is absent from the table entirely — the common
+    // case where `apply_to_poetry_table` is probed for a dep that isn't a
+    // Poetry dependency at all. Must report "not found", not panic on the
+    // missing key.
+    #[case::name_absent("absent = \"1.0\"\n", "missing", "2.0")]
+    // Inline-table shape (`gitdep = { git = "..." }`, a Poetry VCS
+    // dependency) with no `version` key. Must fall through to "not found"
+    // instead of panicking when `t.get_mut("version")` comes back empty.
+    #[case::inline_table_missing_version(
+        "gitdep = { git = \"https://example.com/repo.git\" }\n",
+        "gitdep",
+        "2.0"
+    )]
+    // Full `[tool.poetry.dependencies.dep]` sub-table with no `version`
+    // key — same "not found" contract as the inline-table case, exercised
+    // through the other value shape `extract_poetry_version` recognises.
+    #[case::full_table_missing_version("[dep]\nextras = [\"x\"]\n", "dep", "2.0")]
+    // A Poetry dep value that is neither a string, an inline table, nor a
+    // full table (a bare integer here). The catch-all `_ => false` arm
+    // must handle an unexpected TOML shape without panicking.
+    #[case::unsupported_shape("dep = 1\n", "dep", "2.0")]
+    fn apply_to_poetry_table_not_found_cases(
+        #[case] fragment: &str,
+        #[case] name: &str,
+        #[case] new_version: &str,
+    ) {
+        let mut doc: DocumentMut = fragment.parse().expect("fragment should parse");
+        let table = doc.as_table_mut();
+        assert!(
+            !apply_to_poetry_table(table, name, new_version),
+            "expected no version field to patch for `{name}` in `{fragment}`"
+        );
+    }
+
+    #[test]
+    // Inline-table Poetry dep whose `version` value is not a string (e.g.
+    // `version = 1`, a malformed-but-parseable pin). Must still overwrite
+    // it with a proper string via the `Value::String(Formatted::new(...))`
+    // fallback instead of silently no-op'ing or panicking on the type
+    // mismatch, and must leave sibling keys untouched.
+    fn apply_to_poetry_table_inline_table_non_string_version_replaced() {
+        let mut doc: DocumentMut = "dep = { version = 1, extras = [\"x\"] }\n"
+            .parse()
+            .expect("fragment should parse");
+        let table = doc.as_table_mut();
+        assert!(apply_to_poetry_table(table, "dep", "2.0"));
+        let result = doc.to_string();
+        assert!(
+            result.contains("version = \"2.0\""),
+            "non-string inline-table version should be overwritten with a string:\n{result}"
+        );
+        assert!(
+            result.contains("extras = [\"x\"]"),
+            "sibling key should survive untouched:\n{result}"
+        );
+    }
+
+    #[test]
+    // Full-table Poetry dep (`[tool.poetry.dependencies.dep]`) whose
+    // `version` value is not a string (e.g. `version = 1`). Must overwrite
+    // via `toml_edit::value(...)` instead of leaving the wrong-typed value
+    // in place, and must leave sibling keys untouched.
+    fn apply_to_poetry_table_full_table_non_string_version_replaced() {
+        let mut doc: DocumentMut = "[dep]\nversion = 1\nextras = [\"x\"]\n"
+            .parse()
+            .expect("fragment should parse");
+        let table = doc.as_table_mut();
+        assert!(apply_to_poetry_table(table, "dep", "2.0"));
+        let result = doc.to_string();
+        assert!(
+            result.contains("version = \"2.0\""),
+            "non-string full-table version should be overwritten with a string:\n{result}"
+        );
+        assert!(
+            result.contains("extras = [\"x\"]"),
+            "sibling key should survive untouched:\n{result}"
+        );
     }
 }
