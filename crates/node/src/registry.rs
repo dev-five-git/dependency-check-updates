@@ -484,6 +484,33 @@ mod tests {
         );
     }
 
+    /// `serde_json` rejects a mis-shaped `versions` before it ever reaches the
+    /// visitor, so that route only exercises `expecting`. Feeding the visitor a
+    /// sequence directly drives its inherited `visit_seq`, proving the visitor
+    /// itself — not just the JSON parser in front of it — refuses anything that
+    /// is not a map, and does so with the same explanatory wording.
+    #[test]
+    fn version_keys_rejects_a_sequence_handed_straight_to_the_visitor() {
+        use serde::de::IntoDeserializer;
+        use serde::de::value::{Error as ValueError, SeqDeserializer};
+
+        let deserializer: SeqDeserializer<_, ValueError> = SeqDeserializer::new(
+            ["1.0.0"]
+                .into_iter()
+                .map(IntoDeserializer::into_deserializer),
+        );
+
+        let error =
+            VersionKeys::deserialize(deserializer).expect_err("a sequence is not a versions map");
+
+        assert!(
+            error
+                .to_string()
+                .contains("a JSON object whose keys are version strings"),
+            "the visitor must explain what it wanted: {error}"
+        );
+    }
+
     #[test]
     fn version_keys_collects_object_keys_and_skips_their_bodies() {
         // The happy path of the same Visitor: keys are kept, the nested
