@@ -30,6 +30,7 @@ dependency-check-updates-node.workspace = true
 dependency-check-updates-rust.workspace = true
 dependency-check-updates-python.workspace = true
 dependency-check-updates-github.workspace = true
+dependency-check-updates-docker.workspace = true
 rustls.workspace = true
 clap.workspace = true
 serde_json.workspace = true

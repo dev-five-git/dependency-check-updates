@@ -40,6 +40,9 @@ Checking .github/workflows/CI.yml
  actions/checkout    v4  ->  v5
  actions/setup-node  v4  ->  v5
 
+Checking Dockerfile
+ node  20-alpine  ->  22-alpine
+
 Run dcu -u to upgrade
 ```
 
@@ -63,8 +66,8 @@ All four accept the same flags described in [Usage](#usage).
 
 ## Features
 
-- **Multi-ecosystem** — `package.json`, `Cargo.toml`, `pyproject.toml`, and `.github/workflows/*.yml` all handled by a single binary
-- **Format-preserving** — surgical byte-range patching for JSON / YAML; `toml_edit` for TOML. Your indentation, comments, trailing newlines, and key ordering stay intact
+- **Multi-ecosystem** — `package.json`, `Cargo.toml`, `pyproject.toml`, `.github/workflows/*.yml`, `Dockerfile`, and `compose.yaml` all handled by a single binary
+- **Format-preserving** — surgical byte-range patching for JSON / YAML / Dockerfiles; `toml_edit` for TOML. Your indentation, comments, trailing newlines, and key ordering stay intact
 - **Fast** — concurrent registry lookups across all manifests via `futures::join_all`
 - **Smart range checking** — skips false positives where the resolved version already satisfies the current range (`^3` already covers `3.5.1`)
 - **Deep scan** — `-d` recursively finds manifests in monorepos, respecting `.gitignore`
@@ -80,6 +83,7 @@ All four accept the same flags described in [Usage](#usage).
 | Rust | `Cargo.toml` | [crates.io](https://crates.io/) | [`dependency-check-updates`](https://crates.io/crates/dependency-check-updates) |
 | Python | `pyproject.toml` | [PyPI](https://pypi.org/) | [`dependency-check-updates`](https://pypi.org/project/dependency-check-updates/) |
 | GitHub Actions | `.github/workflows/*.yml`, `action.yml` | [GitHub Tags API](https://docs.github.com/rest/repos/repos#list-repository-tags) | *(built-in)* |
+| Containers | `Dockerfile`, `compose.yaml` | [OCI Distribution](https://distribution.github.io/distribution/spec/api/) (Docker Hub, ghcr.io, quay.io, …) | *(built-in)* |
 
 ### GitHub Actions specifics
 
@@ -89,6 +93,37 @@ All four accept the same flags described in [Usage](#usage).
 - Duplicate rows are collapsed in the output — if `actions/checkout@v5` appears in 12 jobs, you see one row, not twelve. The patch engine still updates every occurrence in the file.
 - **Rate limit**: unauthenticated runs use GitHub's 60 req/hr ceiling. Hitting it produces an explicit error pointing to the fix — set `GITHUB_TOKEN` (or `GH_TOKEN`) in your environment to raise the limit to 5 000 req/hr.
 - Tag fetch is bounded to the **first 100 tags** per action (newest-first). This comfortably covers every mainstream action; deliberately not paginating keeps API consumption predictable so deep scans don't spike into the rate-limit ceiling.
+
+### Container image specifics
+
+Scans Dockerfile `FROM` instructions and the `image:` key of Compose services. Workflow job `container:` / `services:` images are picked up too — a single `.github/workflows/CI.yml` can have its `uses:` refs resolved against GitHub and its `image:` pins against a container registry in the same run.
+
+**Build variants are never crossed.** A container tag is a version *plus* a variant, and bumping `node:20-alpine` to `node:22` would silently swap Alpine for Debian. Candidate tags are grouped by the verbatim suffix after the leading numeric run, and only tags in the same group are ever considered:
+
+```
+node:20-alpine      →  node:22-alpine       (not node:22)
+python:3.12-slim    →  python:3.13-slim
+postgres:16.0       →  postgres:16.15       (-t minor)
+```
+
+Your pin precision is preserved as long as a real tag backs it: `node:20` becomes `node:22`, not `node:22.3.0`. If the registry never published the shorter form, the tag is escalated to the shortest one that actually exists, so the emitted tag always pulls.
+
+**Registries.** Any OCI Distribution registry works from the same code path — Docker Hub, `ghcr.io`, `quay.io`, `mcr.microsoft.com`, `public.ecr.aws`, or a self-hosted `localhost:5000` (plain HTTP for `localhost` / `127.0.0.1`, HTTPS otherwise). Public images authenticate through the registry's anonymous Bearer-token exchange automatically; private repositories are reported as an error rather than guessed at.
+
+**Left untouched on purpose** — each of these means you opted out of tag tracking:
+
+| Pin | Why it is skipped |
+|---|---|
+| `FROM node` · `image: redis` | No tag: an implicit `latest`, a moving target |
+| `:latest` · `:bookworm` · `:stable` | Not a version |
+| `node:20@sha256:…` | The digest decides what is pulled; moving the tag alone changes nothing |
+| `node:${NODE_VERSION}` · `app:${TAG}` | The real value lives in a build arg or `.env` |
+| `FROM builder` | A multi-stage build stage, not an image |
+| `app:1a2b3c4` | A build hash, same heuristic that skips commit SHAs in workflows |
+
+Discovery covers `Dockerfile`, `Dockerfile.<suffix>`, `<prefix>.Dockerfile`, `compose.y(a)ml`, and `docker-compose.y(a)ml` including profile variants (`docker-compose.override.yml`). Plain `dcu` probes the canonical names at the root; `-d` finds the rest anywhere in the tree.
+
+`-t newest` falls back to `greatest`: the OCI tag list carries no publish dates, and recovering them would cost one manifest fetch per tag.
 
 ## Installation
 
@@ -149,7 +184,7 @@ pipx run dependency-check-updates [flags]
 
 ## Usage
 
-Run from a directory containing at least one of `package.json`, `Cargo.toml`, `pyproject.toml`, or `.github/workflows/*.yml`. Every supported manifest in the current directory is auto-detected.
+Run from a directory containing at least one of `package.json`, `Cargo.toml`, `pyproject.toml`, `.github/workflows/*.yml`, `Dockerfile`, or `compose.yaml`. Every supported manifest in the current directory is auto-detected.
 
 All examples below use the short `dcu` alias. The long form `dependency-check-updates` works identically.
 
@@ -223,6 +258,8 @@ dcu actions            # only actions/checkout, actions/setup-node, …
 dcu --manifest path/to/Cargo.toml
 dcu --manifest apps/web/package.json
 dcu --manifest .github/workflows/CI.yml
+dcu --manifest services/api/Dockerfile
+dcu --manifest docker-compose.override.yml
 
 # Machine-readable output for scripting/CI
 dcu --format json
@@ -285,7 +322,8 @@ Follows the [changepacks](https://github.com/changepacks/changepacks) pattern �
 │   ├── node/          # Node.js: package.json parser + npm registry
 │   ├── rust/          # Rust: Cargo.toml parser (toml_edit) + crates.io
 │   ├── python/        # Python: pyproject.toml parser (toml_edit) + PyPI
-│   └── github/        # GitHub Actions: workflow YAML parser + GitHub Tags API
+│   ├── github/        # GitHub Actions: workflow YAML parser + GitHub Tags API
+│   └── docker/        # Containers: Dockerfile / Compose scanners + OCI registry
 ├── bridge/
 │   ├── node/          # napi-rs N-API binding → npm: @dependency-check-updates/cli
 │   └── python/        # maturin bin binding → PyPI: dependency-check-updates
@@ -297,7 +335,8 @@ Follows the [changepacks](https://github.com/changepacks/changepacks) pattern �
 
 - **JSON** (`package.json`): Surgical byte-range replacement — finds exact byte offsets of version values and replaces only those bytes. Indent, line endings, trailing newline, and key ordering are preserved byte-for-byte.
 - **TOML** (`Cargo.toml`, `pyproject.toml`): `toml_edit` document model preserves comments, table ordering, inline-table formatting, and whitespace.
-- **YAML** (`.github/workflows/*.yml`, `action.yml`): Line-based `uses:` scanning with byte-range replacement of only the `@ref` portion. Anchors, comments, blank lines, and unrelated `@main` / `@<sha>` pins are never touched.
+- **YAML** (`.github/workflows/*.yml`, `action.yml`, `compose.yaml`): Line-based `uses:` / `image:` scanning with byte-range replacement of only the `@ref` or `:tag` portion. Anchors, comments, blank lines, quoting style, and unrelated `@main` / `:latest` / digest pins are never touched.
+- **Dockerfile**: Line-based `FROM` scanning with byte-range replacement of only the tag. `--platform` flags, `AS <stage>` tails, and the `# syntax=` directive survive byte-for-byte.
 
 ### Shared Traits
 

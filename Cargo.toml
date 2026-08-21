@@ -7,7 +7,7 @@ members = ["crates/*", "bridge/*"]
 # parallel linker processes to race on the same output file (LNK1104).
 # `members` still contains bridge/* so workspace-wide commands
 # (`cargo test --workspace`, `cargo clippy --workspace`) keep covering it.
-default-members = ["crates/cli", "crates/core", "crates/node", "crates/rust", "crates/python", "crates/github", "bridge/node"]
+default-members = ["crates/cli", "crates/core", "crates/node", "crates/rust", "crates/python", "crates/github", "crates/docker", "bridge/node"]
 
 [workspace.package]
 edition = "2024"
@@ -29,6 +29,7 @@ dependency-check-updates-node = { path = "crates/node", version = "0.1.15" }
 dependency-check-updates-rust = { path = "crates/rust", version = "0.1.15" }
 dependency-check-updates-python = { path = "crates/python", version = "0.1.15" }
 dependency-check-updates-github = { path = "crates/github", version = "0.1.15" }
+dependency-check-updates-docker = { path = "crates/docker", version = "0.1.15" }
 dependency-check-updates = { path = "crates/cli", version = "0.1.15" }
 
 # External

@@ -9,6 +9,16 @@
 //! Refs that do not look like version numbers (`@main`, `@master`, branch
 //! names, commit SHAs) are intentionally skipped: tracking the moving target
 //! they point at is the caller's responsibility.
+//!
+//! ## Two ecosystems, one file
+//!
+//! A workflow can also pin **container images** — a job `container:` or a
+//! `services:` block — and those are ordinary `image:` keys resolved against a
+//! container registry, not the GitHub Tags API. Both kinds of dependency are
+//! collected here and distinguished by [`DependencySection`]: `GitHubActions`
+//! for `uses:`, `DockerImage` for `image:`. The CLI routes each section to the
+//! registry that can answer it, and `apply_updates` routes each planned update
+//! back to the scanner that located it.
 
 #![warn(missing_docs)]
 
@@ -19,7 +29,9 @@ mod registry;
 use std::path::Path;
 
 use dependency_check_updates_core::manifest::{ManifestHandler, ParsedManifest};
-use dependency_check_updates_core::{DcuError, ManifestKind, ManifestRef, PlannedUpdate};
+use dependency_check_updates_core::{
+    DcuError, DependencySection, ManifestKind, ManifestRef, PlannedUpdate,
+};
 
 use parser::WorkflowManifest;
 use patcher::WorkflowPatcher;
@@ -30,23 +42,38 @@ pub struct GitHubHandler;
 
 impl ManifestHandler for GitHubHandler {
     fn parse(&self, text: &str, path: &Path) -> Result<ParsedManifest, DcuError> {
-        let manifest = WorkflowManifest::parse(text);
+        let mut dependencies = WorkflowManifest::parse(text).dependencies;
+        dependencies.extend(dependency_check_updates_docker::yaml_image_dependencies(
+            text,
+        ));
 
         Ok(ParsedManifest {
             manifest_ref: ManifestRef {
                 path: path.to_path_buf(),
                 kind: ManifestKind::GitHubWorkflow,
             },
-            dependencies: manifest.dependencies,
+            dependencies,
         })
     }
 
     fn apply_updates(&self, text: &str, updates: &[PlannedUpdate]) -> Result<String, DcuError> {
+        // Each scanner knows only its own key, so an update is handed to the
+        // one that located it. Applying them in two passes is safe because the
+        // two byte ranges never overlap — a line carries either `uses:` or
+        // `image:`, never both — and each pass re-scans the text it receives.
+        let (image_updates, action_updates): (Vec<_>, Vec<_>) = updates
+            .iter()
+            .cloned()
+            .partition(|update| update.section == DependencySection::DockerImage);
+
         // `WorkflowPatcher::apply` only fails on overlapping patches, which the
         // line-by-line scanner can never produce (each `uses:` ref occupies a
         // distinct, byte-disjoint span and every update consumes a location at
         // most once). The error arm is therefore unreachable through this path.
-        Ok(WorkflowPatcher::apply(text, updates).expect("workflow patches never overlap"))
+        let patched =
+            WorkflowPatcher::apply(text, &action_updates).expect("workflow patches never overlap");
+
+        dependency_check_updates_docker::apply_yaml_image_updates(&patched, &image_updates)
     }
 }
 
@@ -94,6 +121,83 @@ mod tests {
             parsed.dependencies[0].section,
             DependencySection::GitHubActions
         );
+    }
+
+    /// A workflow that pins both an action and a job container must surface
+    /// both, each tagged with the section that decides which registry resolves
+    /// it.
+    #[test]
+    fn handler_parse_collects_actions_and_container_images() {
+        let yaml = concat!(
+            "jobs:\n",
+            "  test:\n",
+            "    container:\n",
+            "      image: node:20-alpine\n",
+            "    services:\n",
+            "      redis:\n",
+            "        image: redis:7.2\n",
+            "    steps:\n",
+            "      - uses: actions/checkout@v4\n",
+        );
+
+        let parsed = GitHubHandler
+            .parse(yaml, Path::new(".github/workflows/CI.yml"))
+            .unwrap();
+
+        let sections: Vec<_> = parsed.dependencies.iter().map(|d| d.section).collect();
+        assert_eq!(
+            sections,
+            vec![
+                DependencySection::GitHubActions,
+                DependencySection::DockerImage,
+                DependencySection::DockerImage,
+            ]
+        );
+        let names: Vec<&str> = parsed
+            .dependencies
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["actions/checkout", "node", "redis"]);
+    }
+
+    /// Both patchers must be able to run over one document without either
+    /// disturbing the other's ranges.
+    #[test]
+    fn handler_apply_updates_patches_actions_and_images_together() {
+        let yaml = concat!(
+            "jobs:\n",
+            "  test:\n",
+            "    container:\n",
+            "      image: node:20-alpine  # pinned\n",
+            "    steps:\n",
+            "      - uses: actions/checkout@v4\n",
+            "      - uses: changepacks/action@main\n",
+        );
+
+        let result = GitHubHandler
+            .apply_updates(
+                yaml,
+                &[
+                    PlannedUpdate {
+                        name: "actions/checkout".to_owned(),
+                        section: DependencySection::GitHubActions,
+                        from: "v4".to_owned(),
+                        to: "v5".to_owned(),
+                    },
+                    PlannedUpdate {
+                        name: "node".to_owned(),
+                        section: DependencySection::DockerImage,
+                        from: "20-alpine".to_owned(),
+                        to: "22-alpine".to_owned(),
+                    },
+                ],
+            )
+            .unwrap();
+
+        assert!(result.contains("uses: actions/checkout@v5"));
+        assert!(result.contains("image: node:22-alpine  # pinned"));
+        assert!(result.contains("changepacks/action@main"));
     }
 
     #[test]

@@ -58,10 +58,17 @@ impl Scanner {
     /// Find manifest files in the given directory (non-recursive).
     ///
     /// Returns all recognized manifests at the root level (`package.json`,
-    /// `Cargo.toml`, `pyproject.toml`, `action.yml` / `action.yaml`) and every
-    /// `*.yml`/`*.yaml` directly under `.github/workflows/`. The root-level
-    /// `action.yml` is included so that authors of single-action repos see
-    /// their own manifest without needing `-d`.
+    /// `Cargo.toml`, `pyproject.toml`, `action.yml` / `action.yaml`,
+    /// `Dockerfile`, and the Compose project files) and every `*.yml`/`*.yaml`
+    /// directly under `.github/workflows/`. The root-level `action.yml` is
+    /// included so that authors of single-action repos see their own manifest
+    /// without needing `-d`.
+    ///
+    /// Only the canonical Docker file names are probed here. The suffixed
+    /// forms (`Dockerfile.dev`, `compose.prod.yaml`) are still recognised by
+    /// [`ManifestKind::from_path`], so `-d` and `--manifest` pick them up —
+    /// enumerating every possible variant at the root would mean a full
+    /// `read_dir` on every invocation just to catch a rare layout.
     #[must_use]
     pub fn scan_dir(root: &Path) -> Vec<ManifestRef> {
         let mut manifests = Vec::new();
@@ -72,6 +79,11 @@ impl Scanner {
             "pyproject.toml",
             "action.yml",
             "action.yaml",
+            "Dockerfile",
+            "compose.yml",
+            "compose.yaml",
+            "docker-compose.yml",
+            "docker-compose.yaml",
         ];
 
         for filename in &candidates {
@@ -283,6 +295,19 @@ mod tests {
         "action.yml",
         "name: test\nruns:\n  using: composite\n",
         ManifestKind::GitHubWorkflow
+    )]
+    // Docker manifests must surface without `-d` for the common single-service
+    // repo layout (Dockerfile + compose file at the root).
+    #[case::root_dockerfile("Dockerfile", "FROM node:20-alpine\n", ManifestKind::Dockerfile)]
+    #[case::root_compose_yaml(
+        "compose.yaml",
+        "services:\n  web:\n    image: nginx:1.27\n",
+        ManifestKind::DockerCompose
+    )]
+    #[case::root_docker_compose_yml(
+        "docker-compose.yml",
+        "services:\n  web:\n    image: nginx:1.27\n",
+        ManifestKind::DockerCompose
     )]
     fn scan_dir_finds_single_manifest(
         tmp: TempDir,

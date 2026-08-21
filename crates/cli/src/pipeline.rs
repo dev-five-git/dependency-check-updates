@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use tracing::{debug, trace, warn};
 
 use dependency_check_updates_core::{
-    DcuError, DependencySpec, ManifestKind, PlannedUpdate, ResolvedVersion, count_numeric_segments,
-    pad_to_three_segments, split_numeric_head, strip_range_prefix,
+    DcuError, DependencySection, DependencySpec, PlannedUpdate, ResolvedVersion,
+    count_numeric_segments, pad_to_three_segments, split_numeric_head, strip_range_prefix,
 };
 
 /// Filter dependencies by include/exclude patterns.
@@ -54,6 +54,21 @@ fn strip_build_metadata(v: &str) -> &str {
     v.split_once('+').map_or(v, |(head, _)| head)
 }
 
+/// Whether a section's registry resolves a ref that must be written verbatim.
+///
+/// Registry ecosystems (npm, crates.io, `PyPI`) return a canonical `x.y.z`
+/// version, and the pipeline re-shapes it to the user's pin precision. The
+/// tag-addressed ecosystems instead resolve a *name that must exist* — a git
+/// tag, a container tag — and their registries already did that shaping while
+/// checking the candidate against the published list. Reshaping it a second
+/// time here can only invent a ref nobody published.
+fn resolves_to_an_exact_ref(section: DependencySection) -> bool {
+    matches!(
+        section,
+        DependencySection::GitHubActions | DependencySection::DockerImage
+    )
+}
+
 fn plan_update(dep: &DependencySpec, to: String) -> PlannedUpdate {
     PlannedUpdate {
         name: dep.name.clone(),
@@ -64,10 +79,14 @@ fn plan_update(dep: &DependencySpec, to: String) -> PlannedUpdate {
 }
 
 /// Compute planned updates from resolved versions.
+///
+/// The rewrite policy is chosen per dependency via
+/// [`resolves_to_an_exact_ref`], not per manifest kind: one workflow file can
+/// carry both `uses:` refs and container `image:` pins, and a future manifest
+/// may mix a registry ecosystem with a tag-addressed one the same way.
 pub(crate) fn compute_updates(
     deps: &[DependencySpec],
     resolved: &[(usize, Result<ResolvedVersion, DcuError>)],
-    kind: ManifestKind,
 ) -> Vec<PlannedUpdate> {
     let mut updates = Vec::with_capacity(resolved.len());
 
@@ -153,11 +172,14 @@ pub(crate) fn compute_updates(
         // resolved version to 2 segments before comparing. This respects the user's
         // intent to pin only at that granularity.
         //
-        // GitHub workflow refs are exempt: the GitHub registry already resolved
-        // the exact, tag-validated ref form (`pick_existing_ref`), so re-running
+        // Tag-addressed sections are exempt. Their registries already resolved
+        // an exact, existence-checked ref form — `pick_existing_ref` for GitHub
+        // Actions, `pick_existing_numeric` for container tags — so re-running
         // the generic truncation here could re-shorten an escalated ref
-        // (`v8.1.0` → `v8`) back into a dangling tag.
-        let selected_truncated: Cow<'_, str> = if kind == ManifestKind::GitHubWorkflow {
+        // (`v8.1.0` → `v8`) back into a tag that was never published. Container
+        // tags additionally carry a variant suffix (`22-alpine`) that this
+        // numeric truncation would silently amputate.
+        let selected_truncated: Cow<'_, str> = if resolves_to_an_exact_ref(dep.section) {
             Cow::Borrowed(selected)
         } else {
             let precision = count_numeric_segments(current_bare);
@@ -454,7 +476,7 @@ mod tests {
         #[case] expected_to: Option<&str>,
     ) {
         let (deps, resolved) = single(current, latest, selected);
-        let updates = compute_updates(&deps, &resolved, ManifestKind::PackageJson);
+        let updates = compute_updates(&deps, &resolved);
         match expected_to {
             Some(to) => {
                 assert_eq!(
@@ -474,7 +496,7 @@ mod tests {
     #[test]
     fn compute_updates_sets_package_name() {
         let (deps, resolved) = single("^17.0.0", "18.2.0", "18.2.0");
-        let updates = compute_updates(&deps, &resolved, ManifestKind::PackageJson);
+        let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates[0].name, "pkg");
     }
 
@@ -488,7 +510,7 @@ mod tests {
                 detail: "not found".to_owned(),
             }),
         )];
-        assert!(compute_updates(&deps, &resolved, ManifestKind::PackageJson).is_empty());
+        assert!(compute_updates(&deps, &resolved).is_empty());
     }
 
     #[test]
@@ -501,7 +523,7 @@ mod tests {
                 selected: None,
             }),
         )];
-        assert!(compute_updates(&deps, &resolved, ManifestKind::PackageJson).is_empty());
+        assert!(compute_updates(&deps, &resolved).is_empty());
     }
 
     #[test]
@@ -539,7 +561,7 @@ mod tests {
                 }),
             ),
         ];
-        let updates = compute_updates(&deps, &resolved, ManifestKind::PackageJson);
+        let updates = compute_updates(&deps, &resolved);
         // a: ^1.0.0 -> ^1.5.0 (update), b: ~2.0.0 -> ~2.5.0 (update), c: same (no update)
         assert_eq!(updates.len(), 2);
         assert_eq!(updates[0].name, "a");
@@ -563,9 +585,55 @@ mod tests {
                 selected: Some("2.0.0".to_owned()),
             }),
         )];
-        let updates = compute_updates(&deps, &resolved, ManifestKind::PackageJson);
+        let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates[0].section, DependencySection::DevDependencies);
         assert_eq!(updates[0].from, "^1.0.0");
+    }
+
+    /// Container tags carry a build variant that the numeric truncation would
+    /// destroy, and their registry already picked an existing tag form. Both
+    /// the variant and the resolved precision must survive verbatim.
+    #[rstest]
+    // The headline case: the `-alpine` variant travels with the bump, and the
+    // 1-segment pin stays 1-segment because `22-alpine` is a published tag.
+    #[case::keeps_variant_and_precision("20-alpine", "22-alpine", Some("22-alpine"))]
+    // An escalated tag (no moving `22` published) must NOT be truncated back
+    // down to the pin's precision — that would name a tag nobody published.
+    #[case::keeps_escalated_precision("20", "22.3.0", Some("22.3.0"))]
+    // A `v`-prefixed pin gets its prefix re-glued exactly once.
+    #[case::reattaches_v_prefix("v3.1.6", "3.2.0", Some("v3.2.0"))]
+    // Already current → no row.
+    #[case::already_current("22-alpine", "22-alpine", None)]
+    // The never-downgrade guard still applies across variant tags.
+    #[case::rejects_downgrade("22-alpine", "20-alpine", None)]
+    fn compute_updates_docker_image_cases(
+        #[case] current: &str,
+        #[case] selected: &str,
+        #[case] expected_to: Option<&str>,
+    ) {
+        let deps = vec![DependencySpec {
+            name: "node".to_owned(),
+            current_req: current.to_owned(),
+            section: DependencySection::DockerImage,
+            path_version: None,
+        }];
+        let resolved = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: Some(selected.to_owned()),
+                selected: Some(selected.to_owned()),
+            }),
+        )];
+
+        let updates = compute_updates(&deps, &resolved);
+        match expected_to {
+            Some(to) => {
+                assert_eq!(updates.len(), 1, "expected one update, got: {updates:?}");
+                assert_eq!(updates[0].to, to);
+                assert_eq!(updates[0].from, current);
+            }
+            None => assert!(updates.is_empty(), "expected no update, got: {updates:?}"),
+        }
     }
 
     #[test]
@@ -587,7 +655,7 @@ mod tests {
                 selected: Some("8.1.0".to_owned()),
             }),
         )];
-        let updates = compute_updates(&deps, &resolved, ManifestKind::GitHubWorkflow);
+        let updates = compute_updates(&deps, &resolved);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].to, "v8.1.0");
     }
@@ -635,7 +703,7 @@ mod tests {
         #[case] expected: Option<&str>,
     ) {
         let (deps, resolved) = path_dep_input(current, local);
-        let updates = compute_updates(&deps, &resolved, ManifestKind::CargoToml);
+        let updates = compute_updates(&deps, &resolved);
         match expected {
             Some(to) => {
                 assert_eq!(updates.len(), 1, "expected one update, got: {updates:?}");

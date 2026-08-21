@@ -1,7 +1,7 @@
 [package]
-name = "dependency-check-updates-github"
+name = "dependency-check-updates-docker"
 version = "0.1.15"
-description = "GitHub Actions workflow support for dependency-check-updates"
+description = "Container image support (Dockerfile, Docker Compose) for dependency-check-updates"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,18 +9,15 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
-keywords = ["dependency", "update", "github-actions", "workflow", "ncu"]
+keywords = ["dependency", "update", "docker", "container", "ncu"]
 categories = ["development-tools"]
 
 [lib]
-name = "dependency_check_updates_github"
+name = "dependency_check_updates_docker"
 path = "src/lib.rs"
 
 [dependencies]
 dependency-check-updates-core.workspace = true
-# Workflows spell their job / service containers with the same `image:` key a
-# Compose file uses, so the container scanner is reused rather than duplicated.
-dependency-check-updates-docker.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["sync"] }

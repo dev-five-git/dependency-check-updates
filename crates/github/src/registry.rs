@@ -19,10 +19,8 @@ use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
     DcuError, DependencySpec, ResolvedVersion, TargetLevel, build_client, count_numeric_segments,
-    pad_to_three_segments, split_numeric_head,
+    is_version_ref, pad_to_three_segments, split_numeric_head,
 };
-
-use crate::parser::is_version_ref;
 
 /// Cap on parallel GitHub API calls. The unauthenticated rate limit is
 /// 60 req/hr; keeping concurrency modest avoids burst-rejection during deep

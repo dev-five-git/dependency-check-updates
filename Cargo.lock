@@ -425,6 +425,7 @@ version = "0.1.15"
 dependencies = [
  "clap",
  "dependency-check-updates-core",
+ "dependency-check-updates-docker",
  "dependency-check-updates-github",
  "dependency-check-updates-node",
  "dependency-check-updates-python",
@@ -462,10 +463,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dependency-check-updates-docker"
+version = "0.1.15"
+dependencies = [
+ "dependency-check-updates-core",
+ "futures",
+ "node-semver",
+ "reqwest",
+ "rstest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "dependency-check-updates-github"
 version = "0.1.15"
 dependencies = [
  "dependency-check-updates-core",
+ "dependency-check-updates-docker",
  "futures",
  "node-semver",
  "reqwest",

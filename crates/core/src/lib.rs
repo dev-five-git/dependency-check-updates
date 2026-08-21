@@ -14,6 +14,7 @@ pub mod toml_decor;
 pub mod types;
 pub mod util;
 pub mod version;
+pub mod yaml_scan;
 
 // Re-export commonly used types
 pub use error::DcuError;
@@ -28,8 +29,10 @@ pub use types::{
     ResolvedVersion, TargetLevel,
 };
 pub use util::{
-    count_numeric_segments, pad_to_three_segments, split_numeric_head, strip_range_prefix,
+    count_numeric_segments, is_version_ref, pad_to_three_segments, split_numeric_head,
+    strip_range_prefix,
 };
 pub use version::{
     SelectableVersion, current_req_is_prerelease, highest_stable, parse_and_select, select_version,
 };
+pub use yaml_scan::scalar_value_bounds;

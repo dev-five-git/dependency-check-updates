@@ -19,8 +19,11 @@ pub(crate) fn lockfiles_for(kind: ManifestKind) -> &'static [&'static str] {
         ],
         ManifestKind::CargoToml => &["Cargo.lock"],
         ManifestKind::PyProjectToml => &["uv.lock", "poetry.lock", "Pipfile.lock"],
-        // Workflow files have no companion lockfile.
-        ManifestKind::GitHubWorkflow => &[],
+        // Workflow and container manifests have no companion lockfile: the
+        // resolved digest lives in the registry, not in the working tree.
+        ManifestKind::GitHubWorkflow | ManifestKind::Dockerfile | ManifestKind::DockerCompose => {
+            &[]
+        }
     }
 }
 
@@ -37,7 +40,12 @@ pub(crate) fn installed_dirs_for(kind: ManifestKind) -> &'static [&'static str] 
         ManifestKind::PackageJson => &["node_modules"],
         ManifestKind::CargoToml => &["target"],
         ManifestKind::PyProjectToml => &[".venv", "venv", "__pypackages__", ".tox", ".nox"],
-        ManifestKind::GitHubWorkflow => &[],
+        // Nothing is installed next to a workflow or container manifest.
+        // Removing an image's local layers is `docker image prune`'s job, and
+        // wiping it here would silently force a multi-gigabyte re-pull.
+        ManifestKind::GitHubWorkflow | ManifestKind::Dockerfile | ManifestKind::DockerCompose => {
+            &[]
+        }
     }
 }
 
@@ -60,6 +68,8 @@ mod tests {
         &["uv.lock", "poetry.lock", "Pipfile.lock"],
     )]
     #[case::github_workflow(ManifestKind::GitHubWorkflow, &[])]
+    #[case::dockerfile(ManifestKind::Dockerfile, &[])]
+    #[case::docker_compose(ManifestKind::DockerCompose, &[])]
     fn lockfiles_for_cases(#[case] kind: ManifestKind, #[case] expected: &[&str]) {
         let got = lockfiles_for(kind);
         for needle in expected {
@@ -81,6 +91,8 @@ mod tests {
         &[".venv", "venv", "__pypackages__", ".tox", ".nox"]
     )]
     #[case::github_workflow(ManifestKind::GitHubWorkflow, &[])]
+    #[case::dockerfile(ManifestKind::Dockerfile, &[])]
+    #[case::docker_compose(ManifestKind::DockerCompose, &[])]
     fn installed_dirs_for_cases(#[case] kind: ManifestKind, #[case] expected: &[&str]) {
         let got = installed_dirs_for(kind);
         for needle in expected {

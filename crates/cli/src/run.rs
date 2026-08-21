@@ -4,8 +4,10 @@ use tracing::{debug, info, trace};
 
 use dependency_check_updates_core::manifest::ManifestHandler;
 use dependency_check_updates_core::{
-    DcuError, DependencySpec, ManifestKind, ResolvedVersion, Scanner,
+    DcuError, DependencySection, DependencySpec, ManifestKind, ResolvedVersion, Scanner,
+    TargetLevel,
 };
+use dependency_check_updates_docker::{ComposeHandler, DockerRegistry, DockerfileHandler};
 use dependency_check_updates_github::{GitHubActionsRegistry, GitHubHandler};
 use dependency_check_updates_node::{NodeHandler, NpmRegistry};
 use dependency_check_updates_python::{PyPiRegistry, PythonHandler};
@@ -27,6 +29,8 @@ static NODE_HANDLER: NodeHandler = NodeHandler;
 static RUST_HANDLER: RustHandler = RustHandler;
 static PYTHON_HANDLER: PythonHandler = PythonHandler;
 static GITHUB_HANDLER: GitHubHandler = GitHubHandler;
+static DOCKERFILE_HANDLER: DockerfileHandler = DockerfileHandler;
+static COMPOSE_HANDLER: ComposeHandler = ComposeHandler;
 
 /// Entry point for bridge crates (napi, maturin).
 ///
@@ -92,6 +96,96 @@ fn registry_for<R>(
         .then(make)
 }
 
+/// Construct a registry only when at least one collected dependency belongs to
+/// `section`.
+///
+/// Manifest kind is the wrong gate for the GitHub Actions and container
+/// registries: a single workflow file can carry `uses:` directives, `image:`
+/// containers, or both, so what decides whether a registry is needed is the
+/// section of the dependencies actually found — not the file they came from.
+fn registry_for_section<R>(
+    jobs: &[ManifestJob],
+    section: DependencySection,
+    make: impl FnOnce() -> R,
+) -> Option<R> {
+    jobs.iter()
+        .any(|job| job.deps.iter().any(|dep| dep.section == section))
+        .then(make)
+}
+
+/// Resolve a workflow's dependencies, routing each section to the registry
+/// that can answer it.
+///
+/// A workflow mixes two ecosystems: `uses:` refs resolve against the GitHub
+/// Tags API, `image:` containers against an OCI registry. Each sub-batch
+/// reports indices into its own slice, so they are mapped back onto the
+/// caller's indices and re-sorted into document order before returning.
+async fn resolve_workflow(
+    deps: &[DependencySpec],
+    github: Option<&GitHubActionsRegistry>,
+    docker: Option<&DockerRegistry>,
+    target: TargetLevel,
+) -> ResolvedBatch {
+    async fn resolve_actions(
+        registry: Option<&GitHubActionsRegistry>,
+        deps: &[DependencySpec],
+        target: TargetLevel,
+    ) -> ResolvedBatch {
+        match registry {
+            Some(registry) if !deps.is_empty() => registry.resolve_batch(deps, target).await,
+            // Unreachable for a non-empty batch: the gating above constructs
+            // the registry whenever a dep of this section exists.
+            _ => Vec::new(),
+        }
+    }
+
+    async fn resolve_images(
+        registry: Option<&DockerRegistry>,
+        deps: &[DependencySpec],
+        target: TargetLevel,
+    ) -> ResolvedBatch {
+        match registry {
+            Some(registry) if !deps.is_empty() => registry.resolve_batch(deps, target).await,
+            _ => Vec::new(),
+        }
+    }
+
+    // Fast path: a workflow with no container images — by far the common
+    // shape — needs no partitioning and therefore no `DependencySpec` clones.
+    if deps
+        .iter()
+        .all(|dep| dep.section == DependencySection::GitHubActions)
+    {
+        return resolve_actions(github, deps, target).await;
+    }
+
+    let (action_indices, image_indices): (Vec<usize>, Vec<usize>) =
+        (0..deps.len()).partition(|&i| deps[i].section == DependencySection::GitHubActions);
+    let actions: Vec<DependencySpec> = action_indices.iter().map(|&i| deps[i].clone()).collect();
+    let images: Vec<DependencySpec> = image_indices.iter().map(|&i| deps[i].clone()).collect();
+
+    let (resolved_actions, resolved_images) = futures::join!(
+        resolve_actions(github, &actions, target),
+        resolve_images(docker, &images, target),
+    );
+
+    let mut results = Vec::with_capacity(resolved_actions.len() + resolved_images.len());
+    results.extend(
+        resolved_actions
+            .into_iter()
+            .map(|(i, result)| (action_indices[i], result)),
+    );
+    results.extend(
+        resolved_images
+            .into_iter()
+            .map(|(i, result)| (image_indices[i], result)),
+    );
+    // Restore document order so the reported rows follow the file, not the
+    // order the two registries happened to be queried in.
+    results.sort_unstable_by_key(|(idx, _)| *idx);
+    results
+}
+
 /// Run the dependency-check-updates CLI with the given configuration.
 ///
 /// # Errors
@@ -151,6 +245,8 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
             ManifestKind::CargoToml => &RUST_HANDLER,
             ManifestKind::PyProjectToml => &PYTHON_HANDLER,
             ManifestKind::GitHubWorkflow => &GITHUB_HANDLER,
+            ManifestKind::Dockerfile => &DOCKERFILE_HANDLER,
+            ManifestKind::DockerCompose => &COMPOSE_HANDLER,
         };
 
         let parsed = handler.parse(&text, &manifest_ref.path)?;
@@ -201,10 +297,18 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
         ManifestKind::PyProjectToml,
         PyPiRegistry::new,
     );
-    let github_registry = registry_for(
+    // The last two are gated by dependency section, not manifest kind: a
+    // workflow can contribute `uses:` refs, container images, or both, and a
+    // Dockerfile / Compose file contributes only images.
+    let github_registry = registry_for_section(
         &manifest_jobs,
-        ManifestKind::GitHubWorkflow,
+        DependencySection::GitHubActions,
         GitHubActionsRegistry::new,
+    );
+    let docker_registry = registry_for_section(
+        &manifest_jobs,
+        DependencySection::DockerImage,
+        DockerRegistry::new,
     );
 
     let mut resolve_futures = Vec::with_capacity(manifest_jobs.len());
@@ -214,6 +318,7 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
             let crates_io = crates_registry.as_ref();
             let pypi = pypi_registry.as_ref();
             let github = github_registry.as_ref();
+            let docker = docker_registry.as_ref();
             resolve_futures.push(async move {
                 // The gating above guarantees the registry matching this job's
                 // kind is `Some`; the `None` arms are unreachable for a
@@ -231,8 +336,13 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
                         Some(pypi) => pypi.resolve_batch(&job.deps, cli.target).await,
                         None => Vec::new(),
                     },
-                    ManifestKind::GitHubWorkflow => match github {
-                        Some(github) => github.resolve_batch(&job.deps, cli.target).await,
+                    // A workflow can hold both ecosystems, so it fans out to
+                    // both registries and merges the results.
+                    ManifestKind::GitHubWorkflow => {
+                        resolve_workflow(&job.deps, github, docker, cli.target).await
+                    }
+                    ManifestKind::Dockerfile | ManifestKind::DockerCompose => match docker {
+                        Some(docker) => docker.resolve_batch(&job.deps, cli.target).await,
                         None => Vec::new(),
                     },
                 };
@@ -278,7 +388,7 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
             "registry resolution complete"
         );
 
-        let updates = compute_updates(&job.deps, resolved, job.manifest_ref.kind);
+        let updates = compute_updates(&job.deps, resolved);
         debug!(updates = updates.len(), "computed planned updates");
 
         for update in &updates {

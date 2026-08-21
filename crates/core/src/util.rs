@@ -52,6 +52,51 @@ pub fn split_numeric_head(v: &str) -> (&str, &str) {
     v.split_at(i)
 }
 
+/// Return true if `git_ref` looks like a version we want to track, rather
+/// than a moving pointer or a content hash.
+///
+/// Rules (both must hold):
+/// 1. After stripping an optional leading `v`, the first char is a digit.
+/// 2. The ref is NOT a commit SHA — heuristically defined as "all hex digits,
+///    length >= 7, no dots", which matches both short and full SHAs while
+///    letting `v5`, `v5.1`, `v5.1.0`, `2024.01.01`, `1.0-beta` through.
+///
+/// Shared by the GitHub Actions ref scanner (`@main`, `@v5`,
+/// `@8e5e7e5…`) and the container-tag scanner (`:latest`, `:20-alpine`,
+/// `:1a2b3c4`). Both ecosystems pin against either a moving name or an
+/// immutable version string, and both want the moving names left alone, so
+/// the same two rules cover them: `main` and `latest` fail rule 1, build-hash
+/// tags fail rule 2, and `20-alpine` passes because `l`/`p`/`i`/`n` are not
+/// hex digits.
+///
+/// ```
+/// use dependency_check_updates_core::is_version_ref;
+/// assert!(is_version_ref("v5"));
+/// assert!(is_version_ref("20-alpine"));
+/// assert!(!is_version_ref("main"));
+/// assert!(!is_version_ref("latest"));
+/// assert!(!is_version_ref("8e5e7e5a3b4c1234abcdef0123456789abcdef01"));
+/// ```
+#[must_use]
+pub fn is_version_ref(git_ref: &str) -> bool {
+    let stripped = git_ref.strip_prefix('v').unwrap_or(git_ref);
+    let Some(first) = stripped.chars().next() else {
+        return false;
+    };
+    if !first.is_ascii_digit() {
+        return false;
+    }
+    // SHA heuristic: pure hex, length >= 7, no dots. Real version tags
+    // contain dots (`1.2.3`) or are very short (`v5` → stripped = `5`).
+    if stripped.len() >= 7
+        && !stripped.contains('.')
+        && stripped.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return false;
+    }
+    true
+}
+
 /// Count non-empty dot-separated segments in the numeric head of a version.
 #[must_use]
 pub fn count_numeric_segments(v: &str) -> usize {
@@ -159,6 +204,41 @@ mod tests {
         #[case] expected_rest: &str,
     ) {
         assert_eq!(split_numeric_head(input), (expected_numeric, expected_rest));
+    }
+
+    #[rstest]
+    // v-prefix versions accepted as version-like.
+    #[case::v_major("v5", true)]
+    #[case::v_major_minor("v5.1", true)]
+    #[case::v_major_minor_patch("v5.1.0", true)]
+    #[case::v_prerelease("v1.0.0-beta.1", true)]
+    // Bare numeric versions accepted (with or without v prefix).
+    #[case::bare_major("5", true)]
+    #[case::bare_semver("1.2.3", true)]
+    #[case::calendar_version("2024.01.01", true)]
+    // Short v-versions: `v12345` strips to `12345` (5 chars, < 7) so it
+    // bypasses the SHA heuristic and is treated as a version.
+    #[case::v_short_numeric("v12345", true)]
+    // Container tag variants: the alphabetic suffix breaks the all-hex test,
+    // so `20-alpine` stays version-like despite being 9 chars with no dot.
+    #[case::container_variant_tag("20-alpine", true)]
+    #[case::container_variant_dotted("3.12-slim-bookworm", true)]
+    // Moving pointers are rejected (no leading digit).
+    #[case::branch_main("main", false)]
+    #[case::branch_master("master", false)]
+    #[case::branch_develop("develop", false)]
+    #[case::branch_release_with_slash("release/v5", false)]
+    #[case::container_latest("latest", false)]
+    #[case::container_codename("bookworm", false)]
+    // Commit SHAs / build hashes are rejected by the hex+length heuristic.
+    #[case::sha_40_char("8e5e7e5a3b4c1234abcdef0123456789abcdef01", false)]
+    #[case::sha_7_char_starting_digit("1234567", false)]
+    #[case::sha_8_char_mixed_hex("12345abc", false)]
+    // Empty / lone `v` produce no leading digit → rejected.
+    #[case::empty("", false)]
+    #[case::just_v("v", false)]
+    fn is_version_ref_cases(#[case] input: &str, #[case] expected: bool) {
+        assert_eq!(is_version_ref(input), expected);
     }
 
     #[rstest]
