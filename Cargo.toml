@@ -37,7 +37,7 @@ thiserror = "2.0"
 miette = { version = "7.6", features = ["fancy"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-tokio = { version = "1.52", features = ["rt", "macros"] }
+tokio = { version = "1.53", features = ["rt", "macros"] }
 reqwest = { version = "0.13", default-features = false, features = [
   "json",
   "rustls-no-provider",
@@ -60,14 +60,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml_edit = "0.25"
 indicatif = "0.18"
 
-napi = { version = "3.9", features = ["tokio_rt"] }
-napi-derive = "3.5"
+napi = { version = "3.12", features = ["tokio_rt"] }
+napi-derive = "3.6"
 futures = "0.3"
 owo-colors = "4.3"
 tempfile = "3.27"
 wiremock = "0.6"
 rstest = "0.26"
-criterion = "0.7"
+criterion = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
