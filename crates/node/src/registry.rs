@@ -49,34 +49,39 @@ struct NpmPackageInfo {
 #[derive(Debug)]
 struct VersionKeys(Vec<String>);
 
+/// Collects the keys of the packument's `versions` object.
+///
+/// Lives at module scope rather than nested inside [`VersionKeys::deserialize`]
+/// so it is one plain item with one set of instantiations, which keeps its
+/// coverage attributable.
+struct VersionKeysVisitor;
+
+impl<'de> Visitor<'de> for VersionKeysVisitor {
+    type Value = Vec<String>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a JSON object whose keys are version strings")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut keys = Vec::with_capacity(map.size_hint().unwrap_or(0));
+        while let Some(key) = map.next_key::<String>()? {
+            // Skip the value body without materialising it.
+            let _: IgnoredAny = map.next_value()?;
+            keys.push(key);
+        }
+        Ok(keys)
+    }
+}
+
 impl<'de> Deserialize<'de> for VersionKeys {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        struct VersionKeysVisitor;
-
-        impl<'de> Visitor<'de> for VersionKeysVisitor {
-            type Value = Vec<String>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a JSON object whose keys are version strings")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut keys = Vec::with_capacity(map.size_hint().unwrap_or(0));
-                while let Some(key) = map.next_key::<String>()? {
-                    // Skip the value body without materialising it.
-                    let _: IgnoredAny = map.next_value()?;
-                    keys.push(key);
-                }
-                Ok(keys)
-            }
-        }
-
         deserializer.deserialize_map(VersionKeysVisitor).map(Self)
     }
 }
