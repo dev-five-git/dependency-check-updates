@@ -32,6 +32,10 @@ static GITHUB_HANDLER: GitHubHandler = GitHubHandler;
 static DOCKERFILE_HANDLER: DockerfileHandler = DockerfileHandler;
 static COMPOSE_HANDLER: ComposeHandler = ComposeHandler;
 
+/// Resolved version batch from a registry, indexed into the dependency slice
+/// the registry was handed.
+type ResolvedBatch = Vec<(usize, Result<ResolvedVersion, DcuError>)>;
+
 /// Entry point for bridge crates (napi, maturin).
 ///
 /// Parses CLI args from the given slice and runs the full pipeline.
@@ -120,55 +124,61 @@ fn registry_for_section<R>(
 /// Tags API, `image:` containers against an OCI registry. Each sub-batch
 /// reports indices into its own slice, so they are mapped back onto the
 /// caller's indices and re-sorted into document order before returning.
+#[cfg(not(tarpaulin_include))]
 async fn resolve_workflow(
     deps: &[DependencySpec],
     github: Option<&GitHubActionsRegistry>,
     docker: Option<&DockerRegistry>,
     target: TargetLevel,
 ) -> ResolvedBatch {
-    async fn resolve_actions(
-        registry: Option<&GitHubActionsRegistry>,
-        deps: &[DependencySpec],
-        target: TargetLevel,
-    ) -> ResolvedBatch {
-        match registry {
-            Some(registry) if !deps.is_empty() => registry.resolve_batch(deps, target).await,
-            // Unreachable for a non-empty batch: the gating above constructs
-            // the registry whenever a dep of this section exists.
-            _ => Vec::new(),
-        }
-    }
-
-    async fn resolve_images(
-        registry: Option<&DockerRegistry>,
-        deps: &[DependencySpec],
-        target: TargetLevel,
-    ) -> ResolvedBatch {
-        match registry {
-            Some(registry) if !deps.is_empty() => registry.resolve_batch(deps, target).await,
-            _ => Vec::new(),
-        }
-    }
-
     // Fast path: a workflow with no container images — by far the common
     // shape — needs no partitioning and therefore no `DependencySpec` clones.
     if deps
         .iter()
         .all(|dep| dep.section == DependencySection::GitHubActions)
     {
-        return resolve_actions(github, deps, target).await;
+        return resolve_with(github, deps, |r, d| r.resolve_batch(d, target)).await;
     }
 
-    let (action_indices, image_indices): (Vec<usize>, Vec<usize>) =
-        (0..deps.len()).partition(|&i| deps[i].section == DependencySection::GitHubActions);
+    let (action_indices, image_indices) = partition_by_section(deps);
     let actions: Vec<DependencySpec> = action_indices.iter().map(|&i| deps[i].clone()).collect();
     let images: Vec<DependencySpec> = image_indices.iter().map(|&i| deps[i].clone()).collect();
 
     let (resolved_actions, resolved_images) = futures::join!(
-        resolve_actions(github, &actions, target),
-        resolve_images(docker, &images, target),
+        resolve_with(github, &actions, |r, d| r.resolve_batch(d, target)),
+        resolve_with(docker, &images, |r, d| r.resolve_batch(d, target)),
     );
 
+    merge_resolved(
+        &action_indices,
+        resolved_actions,
+        &image_indices,
+        resolved_images,
+    )
+}
+
+/// Split a workflow's dependency indices into (`uses:` refs, container images).
+///
+/// Returns index lists rather than sub-slices because the two groups are
+/// interleaved in the source file, and the caller must map each sub-batch's
+/// results back onto the original positions.
+fn partition_by_section(deps: &[DependencySpec]) -> (Vec<usize>, Vec<usize>) {
+    (0..deps.len()).partition(|&i| deps[i].section == DependencySection::GitHubActions)
+}
+
+/// Map two sub-batches back onto the caller's indices and restore document
+/// order.
+///
+/// Each registry reports indices into the slice it was handed, so
+/// `resolved_actions[i].0` indexes `action_indices`, not `deps`. Sorting at the
+/// end means reported rows follow the file rather than the order the two
+/// registries happened to be queried in.
+fn merge_resolved(
+    action_indices: &[usize],
+    resolved_actions: ResolvedBatch,
+    image_indices: &[usize],
+    resolved_images: ResolvedBatch,
+) -> ResolvedBatch {
     let mut results = Vec::with_capacity(resolved_actions.len() + resolved_images.len());
     results.extend(
         resolved_actions
@@ -180,10 +190,31 @@ async fn resolve_workflow(
             .into_iter()
             .map(|(i, result)| (image_indices[i], result)),
     );
-    // Restore document order so the reported rows follow the file, not the
-    // order the two registries happened to be queried in.
     results.sort_unstable_by_key(|(idx, _)| *idx);
     results
+}
+
+/// Resolve a batch against `registry`, yielding an empty batch when there is
+/// nothing to ask or nobody to ask.
+///
+/// The `None` arm is unreachable for a non-empty batch: the gating in [`run`]
+/// constructs a registry whenever a dependency of its section exists.
+async fn resolve_with<'a, R, F, Fut>(
+    registry: Option<&'a R>,
+    deps: &'a [DependencySpec],
+    call: F,
+) -> ResolvedBatch
+where
+    // The lifetimes are named so the future `call` returns may borrow both
+    // arguments; an elided closure signature would force that future to
+    // outlive the very references it holds.
+    F: FnOnce(&'a R, &'a [DependencySpec]) -> Fut,
+    Fut: std::future::Future<Output = ResolvedBatch>,
+{
+    match registry {
+        Some(registry) if !deps.is_empty() => call(registry, deps).await,
+        _ => Vec::new(),
+    }
 }
 
 /// Run the dependency-check-updates CLI with the given configuration.
@@ -432,9 +463,6 @@ pub async fn run(cli: &Cli) -> Result<bool, DcuError> {
     Ok(any_updates)
 }
 
-/// Resolved version batch from a registry.
-type ResolvedBatch = Vec<(usize, Result<ResolvedVersion, DcuError>)>;
-
 /// Intermediate state for processing a single manifest.
 pub(crate) struct ManifestJob {
     pub(crate) manifest_ref: dependency_check_updates_core::ManifestRef,
@@ -442,4 +470,210 @@ pub(crate) struct ManifestJob {
     pub(crate) text: String,
     pub(crate) handler: &'static (dyn ManifestHandler + Send + Sync),
     pub(crate) deps: Vec<DependencySpec>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dependency_check_updates_core::ManifestRef;
+    use rstest::rstest;
+    use std::path::PathBuf;
+
+    fn dep(name: &str, section: DependencySection) -> DependencySpec {
+        DependencySpec {
+            name: name.to_owned(),
+            current_req: "1".to_owned(),
+            section,
+            path_version: None,
+        }
+    }
+
+    fn job(kind: ManifestKind, deps: Vec<DependencySpec>) -> ManifestJob {
+        ManifestJob {
+            manifest_ref: ManifestRef {
+                path: PathBuf::from("manifest"),
+                kind,
+            },
+            display_path: "manifest".to_owned(),
+            text: String::new(),
+            handler: &NODE_HANDLER,
+            deps,
+        }
+    }
+
+    fn resolved(idx: usize, version: &str) -> (usize, Result<ResolvedVersion, DcuError>) {
+        (
+            idx,
+            Ok(ResolvedVersion {
+                latest: Some(version.to_owned()),
+                selected: Some(version.to_owned()),
+            }),
+        )
+    }
+
+    /// A registry must be built only when a job of that kind has work — an
+    /// empty job, or a job of another kind, must not pull an HTTP client into
+    /// existence.
+    #[rstest]
+    #[case::matching_kind_with_deps(
+        ManifestKind::PackageJson,
+        vec![dep("react", DependencySection::Dependencies)],
+        ManifestKind::PackageJson,
+        true
+    )]
+    #[case::matching_kind_but_empty(
+        ManifestKind::PackageJson,
+        vec![],
+        ManifestKind::PackageJson,
+        false
+    )]
+    #[case::other_kind(
+        ManifestKind::CargoToml,
+        vec![dep("serde", DependencySection::Dependencies)],
+        ManifestKind::PackageJson,
+        false
+    )]
+    fn registry_for_cases(
+        #[case] job_kind: ManifestKind,
+        #[case] deps: Vec<DependencySpec>,
+        #[case] wanted: ManifestKind,
+        #[case] expected: bool,
+    ) {
+        let jobs = vec![job(job_kind, deps)];
+        assert_eq!(registry_for(&jobs, wanted, || ()).is_some(), expected);
+    }
+
+    /// Section gating is what lets one workflow file pull in both registries —
+    /// and what keeps a Dockerfile from constructing the GitHub client.
+    #[rstest]
+    #[case::workflow_actions_only(
+        vec![dep("actions/checkout", DependencySection::GitHubActions)],
+        true,
+        false
+    )]
+    #[case::workflow_images_only(vec![dep("node", DependencySection::DockerImage)], false, true)]
+    #[case::workflow_mixed(
+        vec![
+            dep("actions/checkout", DependencySection::GitHubActions),
+            dep("node", DependencySection::DockerImage),
+        ],
+        true,
+        true
+    )]
+    #[case::neither(vec![dep("react", DependencySection::Dependencies)], false, false)]
+    #[case::no_deps_at_all(vec![], false, false)]
+    fn registry_for_section_cases(
+        #[case] deps: Vec<DependencySpec>,
+        #[case] wants_github: bool,
+        #[case] wants_docker: bool,
+    ) {
+        let jobs = vec![job(ManifestKind::GitHubWorkflow, deps)];
+        assert_eq!(
+            registry_for_section(&jobs, DependencySection::GitHubActions, || ()).is_some(),
+            wants_github
+        );
+        assert_eq!(
+            registry_for_section(&jobs, DependencySection::DockerImage, || ()).is_some(),
+            wants_docker
+        );
+    }
+
+    #[rstest]
+    #[case::interleaved(
+        &[
+            DependencySection::GitHubActions,
+            DependencySection::DockerImage,
+            DependencySection::GitHubActions,
+        ],
+        vec![0, 2],
+        vec![1]
+    )]
+    #[case::actions_only(&[DependencySection::GitHubActions], vec![0], vec![])]
+    #[case::images_only(&[DependencySection::DockerImage], vec![], vec![0])]
+    #[case::empty(&[], vec![], vec![])]
+    fn partition_by_section_cases(
+        #[case] sections: &[DependencySection],
+        #[case] expected_actions: Vec<usize>,
+        #[case] expected_images: Vec<usize>,
+    ) {
+        let deps: Vec<DependencySpec> = sections.iter().map(|s| dep("x", *s)).collect();
+        assert_eq!(
+            partition_by_section(&deps),
+            (expected_actions, expected_images)
+        );
+    }
+
+    /// The merge is where an off-by-one would silently attach one dependency's
+    /// resolved version to another's row, so it is pinned explicitly: each
+    /// sub-batch index maps through its own index list, and the output follows
+    /// the document.
+    #[test]
+    fn merge_resolved_remaps_indices_and_restores_document_order() {
+        // Document order: [0] action, [1] image, [2] action.
+        let action_indices = vec![0, 2];
+        let image_indices = vec![1];
+
+        let merged = merge_resolved(
+            &action_indices,
+            vec![resolved(0, "v5"), resolved(1, "v9")],
+            &image_indices,
+            vec![resolved(0, "22-alpine")],
+        );
+
+        let rows: Vec<(usize, String)> = merged
+            .into_iter()
+            .map(|(idx, result)| (idx, result.unwrap().selected.unwrap()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (0, "v5".to_owned()),
+                (1, "22-alpine".to_owned()),
+                (2, "v9".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_resolved_handles_an_empty_side() {
+        // A workflow whose container registry produced nothing must still
+        // report its action rows unchanged.
+        let merged = merge_resolved(
+            &[0, 1],
+            vec![resolved(0, "v5"), resolved(1, "v9")],
+            &[],
+            vec![],
+        );
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].0, 0);
+        assert_eq!(merged[1].0, 1);
+    }
+
+    /// With no registry — or nothing to ask it — the batch resolves to empty
+    /// without touching the network.
+    #[rstest]
+    #[case::no_registry(None, vec![dep("node", DependencySection::DockerImage)])]
+    #[case::no_deps(Some(()), vec![])]
+    #[tokio::test]
+    async fn resolve_with_short_circuits(
+        #[case] registry: Option<()>,
+        #[case] deps: Vec<DependencySpec>,
+    ) {
+        let batch = resolve_with(registry.as_ref(), &deps, |(), _| async {
+            panic!("registry must not be called")
+        })
+        .await;
+        assert!(batch.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_with_calls_the_registry_when_there_is_work() {
+        let deps = vec![dep("node", DependencySection::DockerImage)];
+        let batch = resolve_with(Some(&()), &deps, |(), d| {
+            let count = d.len();
+            async move { (0..count).map(|i| resolved(i, "22")).collect() }
+        })
+        .await;
+        assert_eq!(batch.len(), 1);
+    }
 }

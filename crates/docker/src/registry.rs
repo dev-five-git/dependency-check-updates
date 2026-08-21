@@ -202,6 +202,12 @@ impl DockerRegistry {
     }
 
     /// Resolve every dep in `deps`, fetching each unique repository once.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal tag cache is missing a key that
+    /// [`registry_target_of`] produced — an invariant violation, not a
+    /// user-input issue.
     pub async fn resolve_batch(
         &self,
         deps: &[DependencySpec],
@@ -244,18 +250,19 @@ impl DockerRegistry {
                     package: dep.name.clone(),
                     detail: "not a valid image reference".to_owned(),
                 }),
-                // Safe by construction: every parseable name produced a key in
-                // step 1, and step 2 inserted one entry per key.
-                Some((host, repository)) => match prepared.get(&cache_key(&host, &repository)) {
-                    None => Err(DcuError::RegistryLookup {
-                        package: dep.name.clone(),
-                        detail: "tag cache miss".to_owned(),
-                    }),
-                    Some(Err(detail)) => Err(DcuError::RegistryLookup {
+                // The `expect` is safe by construction: every parseable name
+                // produced a key in step 1, and step 2 inserted one entry per
+                // key. Asserting the invariant beats a defensive arm that no
+                // input can reach.
+                Some((host, repository)) => match prepared
+                    .get(&cache_key(&host, &repository))
+                    .expect("tag cache must contain every unique repository key")
+                {
+                    Err(detail) => Err(DcuError::RegistryLookup {
                         package: dep.name.clone(),
                         detail: detail.clone(),
                     }),
-                    Some(Ok(tags)) => {
+                    Ok(tags) => {
                         let resolved = tags.select(&dep.current_req, target);
                         trace!(
                             image = %dep.name,
@@ -494,6 +501,12 @@ mod tests {
     #[case::lowercase_scheme(
         r#"bearer realm="https://auth.example.com/token""#,
         Some(("https://auth.example.com/token", None, None))
+    )]
+    // Parameters this client does not consume are ignored rather than
+    // aborting the parse — registries append their own (`error=…`).
+    #[case::ignores_unknown_params(
+        r#"Bearer realm="https://ghcr.io/token",error="insufficient_scope",foo=bar"#,
+        Some(("https://ghcr.io/token", None, None))
     )]
     // Unusable challenges.
     #[case::basic_scheme(r#"Basic realm="registry""#, None)]
@@ -775,6 +788,79 @@ mod tests {
                 "expected `{needle}` in error: {detail}"
             );
         }
+    }
+
+    /// The challenge parses and the realm is reachable, but the token endpoint
+    /// itself refuses. The status must reach the user rather than being
+    /// swallowed into a generic "could not fetch tags".
+    #[tokio::test]
+    async fn resolve_batch_surfaces_a_failing_token_exchange() {
+        install_crypto_provider();
+        let mock = MockServer::start().await;
+        let realm = format!("{}/token", mock.uri());
+
+        Mock::given(method("GET"))
+            .and(match_path("/token"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(match_path("/v2/library/node/tags/list"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "WWW-Authenticate",
+                format!(r#"Bearer realm="{realm}""#).as_str(),
+            ))
+            .mount(&mock)
+            .await;
+
+        let registry = DockerRegistry::with_base_url(&mock.uri());
+        let results = registry
+            .resolve_batch(&[dep("node", "20")], TargetLevel::Latest)
+            .await;
+
+        let error = results[0]
+            .1
+            .as_ref()
+            .expect_err("a failing token exchange must surface");
+        let detail = format!("{error:?}");
+        assert!(detail.contains("token request failed"), "got: {detail}");
+        assert!(detail.contains("500"), "got: {detail}");
+    }
+
+    /// A token realm that answers 200 with a body carrying neither spelling of
+    /// the token field.
+    #[tokio::test]
+    async fn resolve_batch_errors_on_a_tokenless_token_response() {
+        install_crypto_provider();
+        let mock = MockServer::start().await;
+        let realm = format!("{}/token", mock.uri());
+
+        Mock::given(method("GET"))
+            .and(match_path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "expires_in": 300 })),
+            )
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(match_path("/v2/library/node/tags/list"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "WWW-Authenticate",
+                format!(r#"Bearer realm="{realm}""#).as_str(),
+            ))
+            .mount(&mock)
+            .await;
+
+        let registry = DockerRegistry::with_base_url(&mock.uri());
+        let results = registry
+            .resolve_batch(&[dep("node", "20")], TargetLevel::Latest)
+            .await;
+
+        let error = results[0]
+            .1
+            .as_ref()
+            .expect_err("a tokenless body is an error");
+        assert!(format!("{error:?}").contains("access_token"));
     }
 
     #[tokio::test]

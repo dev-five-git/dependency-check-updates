@@ -184,15 +184,17 @@ fn pick_existing_numeric(
 ) -> String {
     let segments: Vec<&str> = padded.split('.').filter(|s| !s.is_empty()).collect();
     let len = segments.len();
-    if len == 0 {
-        return padded.to_owned();
-    }
+    // `len.max(1)` keeps `clamp` well-formed — it panics when min > max — for a
+    // segment-less input. Every slice below then goes through `get`, so that
+    // degenerate case falls through to the closing fallback rather than needing
+    // an early return no caller can reach.
+    let start = count_numeric_segments(current_numeric).clamp(1, len.max(1));
 
-    let start = count_numeric_segments(current_numeric).clamp(1, len);
-
-    let current_prefix = segments[..start].join(".");
-    if current_numeric == current_prefix {
-        return current_prefix;
+    if let Some(prefix) = segments.get(..start) {
+        let current_prefix = prefix.join(".");
+        if current_numeric == current_prefix {
+            return current_prefix;
+        }
     }
 
     // Shortest form at or above the pin precision first, then the longest
@@ -202,7 +204,7 @@ fn pick_existing_numeric(
     (start..=len)
         .chain((1..start).rev())
         .find_map(|p| {
-            let candidate = segments[..p].join(".");
+            let candidate = segments.get(..p)?.join(".");
             numerics.contains(candidate.as_str()).then_some(candidate)
         })
         .unwrap_or_else(|| padded.to_owned())
