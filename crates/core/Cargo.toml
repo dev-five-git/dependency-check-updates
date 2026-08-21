@@ -1,6 +1,6 @@
 [package]
 name = "dependency-check-updates-core"
-version = "0.1.15"
+version = "0.2.0"
 description = "Shared traits and types for dependency-check-updates (ManifestHandler, Scanner)"
 edition.workspace = true
 rust-version.workspace = true

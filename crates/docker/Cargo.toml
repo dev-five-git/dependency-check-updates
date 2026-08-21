@@ -1,6 +1,6 @@
 [package]
 name = "dependency-check-updates-docker"
-version = "0.1.15"
+version = "0.2.0"
 description = "Container image support (Dockerfile, Docker Compose) for dependency-check-updates"
 edition.workspace = true
 rust-version.workspace = true
