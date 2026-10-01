@@ -351,6 +351,14 @@ impl Scanner {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn root_candidate_metadata_errors_are_not_silently_ignored() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("package.json");
+        std::os::unix::fs::symlink("package.json", &path).unwrap();
+        assert!(super::Scanner::scan_dir_checked(dir.path()).is_err());
+    }
     use super::*;
     use rstest::{fixture, rstest};
     use std::fs;

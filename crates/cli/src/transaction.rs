@@ -40,11 +40,15 @@ fn read_marker(path: &Path) -> Result<Option<TargetReceipt>, String> {
         .take(16 * 1024 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
+    decode_marker(&bytes).map(Some)
+}
+
+fn decode_marker(bytes: &[u8]) -> Result<TargetReceipt, String> {
     if bytes.len() > 16 * 1024 {
         return Err("target recovery marker exceeds size limit".into());
     }
     let marker: TargetReceipt =
-        serde_json::from_slice(&bytes).map_err(|_| "invalid target recovery marker")?;
+        serde_json::from_slice(bytes).map_err(|_| "invalid target recovery marker")?;
     if !marker.receipt.is_absolute()
         || !marker.receipt.file_name().is_some_and(|n| {
             n.to_string_lossy().starts_with(RECEIPT_PREFIX)
@@ -53,7 +57,7 @@ fn read_marker(path: &Path) -> Result<Option<TargetReceipt>, String> {
     {
         return Err("invalid target receipt path".into());
     }
-    Ok(Some(marker))
+    Ok(marker)
 }
 
 /// Read-only lookup: notices interrupted writes regardless of the caller's cwd.
@@ -989,6 +993,189 @@ mod tests {
             })
             .collect();
         (dir, changes)
+    }
+
+    #[test]
+    fn untrusted_marker_lock_and_receipt_shapes_are_rejected_before_writes() {
+        let (dir, changes) = fixture();
+        let path = &changes[0].path;
+        let marker = marker_path(path).unwrap();
+        std::fs::create_dir(&marker).unwrap();
+        assert!(read_marker(&marker).err().unwrap().contains("unsafe"));
+        std::fs::remove_dir(&marker).unwrap();
+        std::fs::write(&marker, vec![b' '; 16 * 1024 + 1]).unwrap();
+        assert!(read_marker(&marker).err().unwrap().contains("unsafe"));
+        assert!(
+            decode_marker(&vec![b' '; 16 * 1024 + 1])
+                .err()
+                .unwrap()
+                .contains("size limit")
+        );
+        assert!(
+            decode_marker(br#"{"receipt":"relative.json"}"#)
+                .err()
+                .unwrap()
+                .contains("path")
+        );
+        let lock_path = path.with_file_name(format!(
+            ".dcu-lock-{}",
+            digest(path.file_name().unwrap().as_encoded_bytes())
+        ));
+        std::fs::create_dir(&lock_path).unwrap();
+        assert!(
+            target_locks(std::iter::once(path.as_path()))
+                .err()
+                .unwrap()
+                .contains("unsafe")
+        );
+        assert!(
+            scoped(dir.path(), Path::new("relative"))
+                .err()
+                .unwrap()
+                .contains("escapes")
+        );
+        assert!(scoped(dir.path(), dir.path()).is_err());
+        let directory = dir.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(
+            scoped(&std::fs::canonicalize(dir.path()).unwrap(), &directory)
+                .err()
+                .unwrap()
+                .contains("regular")
+        );
+        let first = dir.path().join(".dcu-transaction-first.json");
+        let second = dir.path().join(".dcu-transaction-second.json");
+        std::fs::write(&first, b"{}").unwrap();
+        std::fs::write(&second, b"{}").unwrap();
+        assert!(recover(dir.path(), false).unwrap_err().contains("multiple"));
+        std::fs::remove_file(&second).unwrap();
+        std::fs::write(&first, vec![b' '; 4 * 1024 * 1024 + 1]).unwrap();
+        assert!(
+            recover(dir.path(), false)
+                .unwrap_err()
+                .contains("size limit")
+        );
+        std::fs::write(&first, br#"{"schemaVersion":2,"files":[]}"#).unwrap();
+        assert!(recover(dir.path(), false).unwrap_err().contains("schema"));
+        assert_eq!(std::fs::read(path).unwrap(), b"old\r\n");
+    }
+
+    #[test]
+    fn conflicting_pending_marker_cannot_be_attached_to_a_new_transaction() {
+        let (dir, changes) = fixture();
+        let receipt = dir.path().join(".dcu-transaction-existing.json");
+        std::fs::write(&receipt, b"{}").unwrap();
+        let marker = marker_path(&changes[0].path).unwrap();
+        std::fs::write(
+            &marker,
+            serde_json::to_vec(&TargetReceipt {
+                receipt: receipt.clone(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let staged = vec![Staged {
+            change: changes.into_iter().next().unwrap(),
+            stage: None,
+            backup: None,
+            committed: false,
+        }];
+        assert!(
+            target_markers(&staged, &receipt)
+                .err()
+                .unwrap()
+                .contains("pending update receipt")
+        );
+    }
+
+    #[test]
+    fn recovery_refuses_a_marker_owned_by_a_different_receipt() {
+        let dir = crashed_fixture();
+        let path = dir.path().join("a.toml");
+        let marker = marker_path(&path).unwrap();
+        std::fs::write(
+            &marker,
+            serde_json::to_vec(&TargetReceipt {
+                receipt: dir.path().join(".dcu-transaction-other.json"),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            recover(dir.path(), false)
+                .unwrap_err()
+                .contains("different recovery receipt")
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"new\r\n");
+    }
+
+    #[test]
+    fn empty_batches_and_out_of_scope_targets_have_no_side_effects() {
+        let (dir, changes) = fixture();
+        commit(dir.path(), Vec::new()).unwrap_or_else(|e| panic!("{}", e.detail));
+        let other = tempfile::TempDir::new().unwrap();
+        assert!(
+            commit(other.path(), changes)
+                .err()
+                .unwrap()
+                .detail
+                .contains("escapes")
+        );
+        assert_eq!(non_lock_files(dir.path()), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_rejects_hard_links_and_replacement_failures_keep_the_stage() {
+        let (dir, changes) = fixture();
+        let path = &changes[0].path;
+        let linked = dir.path().join("linked");
+        std::fs::hard_link(path, &linked).unwrap();
+        assert!(
+            scoped(&std::fs::canonicalize(dir.path()).unwrap(), &linked)
+                .unwrap_err()
+                .contains("hard-linked")
+        );
+        let mut stage = Some(
+            Builder::new()
+                .tempfile_in(dir.path())
+                .unwrap()
+                .into_temp_path(),
+        );
+        let stage_path = stage.as_ref().unwrap().to_owned();
+        let directory = dir.path().join("target-directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(replace(&mut stage, &directory).is_err());
+        assert!(stage.is_some());
+        assert!(stage_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_metadata_removes_stale_attributes_and_preserves_a_different_group() {
+        use std::os::unix::fs::{MetadataExt, chown};
+        let (dir, changes) = fixture();
+        let origin = &changes[0].path;
+        let destination = &changes[1].path;
+        let attribute = if cfg!(target_os = "macos") {
+            "com.dcu.stale"
+        } else {
+            "user.dcu.stale"
+        };
+        xattr::set(destination, attribute, b"stale").unwrap();
+        // Root-owned coverage containers can exercise a differing group. Other
+        // hosts still validate attribute removal without requiring elevation.
+        let metadata = std::fs::metadata(origin).unwrap();
+        if metadata.uid() == 0 {
+            chown(origin, None, Some(1)).unwrap();
+        }
+        preserve_unix_metadata(origin, destination).unwrap();
+        assert!(xattr::get(destination, attribute).unwrap().is_none());
+        assert_eq!(
+            std::fs::metadata(origin).unwrap().gid(),
+            std::fs::metadata(destination).unwrap().gid()
+        );
+        assert!(dir.path().is_dir());
     }
 
     #[cfg(unix)]

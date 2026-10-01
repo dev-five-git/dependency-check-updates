@@ -287,6 +287,32 @@ mod tests {
         assert!(report.json(OutputFormat::JsonLegacy).is_err());
     }
 
+    #[test]
+    fn local_rows_are_not_representable_in_legacy_output_and_diagnostics_survive_json() {
+        let report = RunReport {
+            items: vec![Item::Local(LocalRow {
+                name: "node".into(),
+                scope: "local".into(),
+                installed: None,
+                latest: None,
+                selected: None,
+                status: Status::Missing,
+                reason: Some("not installed".into()),
+                update_command: "installer".into(),
+                updated: false,
+            })],
+            diagnostics: vec![Diagnostic {
+                code: "probe".into(),
+                message: "failed".into(),
+                path: None,
+            }],
+            ..RunReport::default()
+        };
+        assert!(report.validate_legacy().is_err());
+        assert!(report.json(OutputFormat::JsonLegacy).is_err());
+        report.print_json(OutputFormat::Json).unwrap();
+    }
+
     fn contract_fields(schema: &Value, definition: &Value, value: &Value) {
         let expected: BTreeSet<_> = definition["required"]
             .as_array()

@@ -189,17 +189,16 @@ where
         report.print_json(cli.format)?;
     } else {
         for item in &report.items {
-            let Item::Local(row) = item else {
-                continue;
-            };
-            println!(
-                "{}: installed={} latest={} [{:?}]\n  {}",
-                row.name,
-                row.installed.as_deref().unwrap_or("unknown"),
-                row.latest.as_deref().unwrap_or("unknown"),
-                row.status,
-                row.reason.as_deref().unwrap_or(&row.update_command)
-            );
+            if let Item::Local(row) = item {
+                println!(
+                    "{}: installed={} latest={} [{:?}]\n  {}",
+                    row.name,
+                    row.installed.as_deref().unwrap_or("unknown"),
+                    row.latest.as_deref().unwrap_or("unknown"),
+                    row.status,
+                    row.reason.as_deref().unwrap_or(&row.update_command)
+                );
+            }
         }
     }
     Ok(report)

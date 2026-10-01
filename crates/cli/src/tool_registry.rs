@@ -682,3 +682,199 @@ fn xml_versions(text: &str, name: &str) -> Result<Vec<String>, DcuError> {
         .map(|c| c[1].to_owned())
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    fn entry(name: &str, version: &str, section: Section) -> Entry {
+        Entry {
+            requested: true,
+            dep: dependency_check_updates_core::DependencySpec {
+                name: name.into(),
+                current_req: version.into(),
+                section,
+                path_version: None,
+            },
+            span: None,
+            reason: None,
+            repositories: Vec::new(),
+            integrity: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn yarn_object_tags_invalid_metadata_and_rust_patch_index_are_fixed() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server = MockServer::start().await;
+        for (url, body) in [
+            ("/yarn", r#"{"tags":{"2.0.0":{},"2.1.0":{}}}"#),
+            ("/invalid-yarn", r#"{"tags":null}"#),
+            ("/rust", "[pkg.rust]\nversion = '1.88.2 (fixed)'\n"),
+            (
+                "/repos/rust-lang/rust/releases",
+                r#"[{"tag_name":"1.88.1"},{"tag_name":"1.88.2"}]"#,
+            ),
+        ] {
+            Mock::given(path(url))
+                .respond_with(ResponseTemplate::new(200).set_body_string(body))
+                .mount(&server)
+                .await;
+        }
+        let registry = ToolRegistry::with_endpoints(Endpoints {
+            yarn: format!("{}/yarn", server.uri()),
+            rust: format!("{}/rust", server.uri()),
+            github: server.uri(),
+            ..Endpoints::default()
+        });
+        assert_eq!(
+            registry
+                .resolve(
+                    &entry("yarn", "2.0.0", Section::Toolchain),
+                    TargetLevel::Latest
+                )
+                .await
+                .unwrap()
+                .selected
+                .as_deref(),
+            Some("2.1.0")
+        );
+        assert_eq!(
+            registry
+                .resolve(
+                    &entry("rust", "1.88.1", Section::Toolchain),
+                    TargetLevel::Patch
+                )
+                .await
+                .unwrap()
+                .selected
+                .as_deref(),
+            Some("1.88.2")
+        );
+        let invalid = ToolRegistry::with_endpoints(Endpoints {
+            yarn: format!("{}/invalid-yarn", server.uri()),
+            ..Endpoints::default()
+        });
+        assert!(
+            invalid
+                .resolve(
+                    &entry("yarn", "2.0", Section::Toolchain),
+                    TargetLevel::Latest
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            registry
+                .resolve(
+                    &entry("unknown", "1.0", Section::Toolchain),
+                    TargetLevel::Latest
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            registry
+                .candidates(
+                    &entry("unknown", "1.0", Section::Toolchain),
+                    TargetLevel::Latest,
+                    "1.0"
+                )
+                .await
+                .is_err()
+        );
+        assert!(choose(&[], "1.0", TargetLevel::Latest, None).is_err());
+        assert!(validate_xml("<root></wrong>", "xml").is_err());
+    }
+
+    #[tokio::test]
+    async fn maven_coordinate_missing_repository_and_404_are_not_current() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server = MockServer::start().await;
+        let registry = ToolRegistry::new();
+        let mut dep = entry("group:bad/artifact", "1.0", Section::Maven);
+        assert!(
+            registry
+                .maven(&dep, TargetLevel::Latest)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("coordinate")
+        );
+        dep.dep.name = "group:artifact".into();
+        assert!(
+            registry
+                .maven(&dep, TargetLevel::Latest)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("repository")
+        );
+        dep.repositories = vec![server.uri()];
+        assert!(
+            registry
+                .maven(&dep, TargetLevel::Latest)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("404")
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_checksum_hash_algorithm_and_untrusted_tarball_block_sidecars() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server = MockServer::start().await;
+        Mock::given(path("/gradle-9.0-bin.zip.sha256"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("invalid"))
+            .mount(&server)
+            .await;
+        Mock::given(path("/pnpm/2.0.0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"dist":{"tarball":"https://untrusted.example/pnpm.tgz"}}),
+            ))
+            .mount(&server)
+            .await;
+        let registry = ToolRegistry::with_endpoints(Endpoints {
+            distributions: server.uri(),
+            npm: server.uri(),
+            ..Endpoints::default()
+        });
+        let doc = crate::project::parse("distributionUrl=https\\://services.gradle.org/distributions/gradle-8.9-bin.zip\ndistributionSha256Sum=old\n", std::path::Path::new("gradle/wrapper/gradle-wrapper.properties")).unwrap();
+        let update = PlannedUpdate {
+            name: "gradle".into(),
+            from: "8.9".into(),
+            to: "9.0".into(),
+            section: Section::Toolchain,
+        };
+        assert!(
+            registry
+                .sidecars(&doc, &[update])
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("SHA-256")
+        );
+        for algo in ["unsupported", "sha256"] {
+            let text = format!(r#"{{"packageManager":"pnpm@1.0.0+{algo}.old"}}"#);
+            let doc = crate::project::parse(&text, std::path::Path::new("package.json")).unwrap();
+            let update = PlannedUpdate {
+                name: "pnpm".into(),
+                from: "1.0.0".into(),
+                to: "2.0.0".into(),
+                section: Section::Toolchain,
+            };
+            let error = registry
+                .sidecars(&doc, &[update])
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(if algo == "unsupported" {
+                "hash algorithm"
+            } else {
+                "untrusted"
+            }));
+        }
+    }
+}

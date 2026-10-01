@@ -1292,3 +1292,156 @@ pub(crate) fn guard_shared_versions(
     }
     errors
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_comments_and_quoted_fake_declarations_are_not_dependencies() {
+        let text = r#"/* outer /* implementation("fake:inside:1.0") */ end */
+val text = "escaped \" quote"
+val fake = '''
+ext['ver'] = '1.0'
+val sdk = 35
+id('fake.plugin') version '1.0'
+compileSdk = 35
+maven { url = 'https://fake.invalid' }
+'''
+"#;
+        let doc = parse(text, Path::new("build.gradle.kts")).unwrap();
+        assert!(doc.entries.is_empty());
+        assert!(doc.definitions.is_empty());
+        assert!(doc.repositories.is_empty());
+        assert!(
+            parse("irrelevant", Path::new("unknown.txt"))
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        let mut doc = parse("", Path::new("unknown.txt")).unwrap();
+        parse_tools(&mut doc).unwrap();
+    }
+
+    #[test]
+    fn gradle_repository_and_plugin_forms_have_explicit_static_boundaries() {
+        let text = r#"repositories {
+    google()
+    mavenCentral()
+    gradlePluginPortal()
+    maven { url = repositoryUrl }
+    maven(repositoryUrl)
+    exclusiveContent {}
+}
+extra['v'] = '1.0'
+id('literal.plugin') version '1.0' + suffix
+id('interpolated.plugin') version "$v"
+id('variable.plugin') version v
+implementation('bad:notation')
+"#;
+        let doc = parse(text, Path::new("build.gradle.kts")).unwrap();
+        assert_eq!(doc.references.len(), 2);
+        assert_eq!(doc.definitions.len(), 1);
+        assert_eq!(doc.entries.len(), 2);
+        assert!(doc.entries.iter().all(|e| e.reason.is_some()));
+        assert!(
+            doc.repositories
+                .iter()
+                .any(|r| r.contains("content filters"))
+        );
+        assert_eq!(
+            doc.repositories
+                .iter()
+                .filter(|r| r.contains("dynamic"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            doc.repositories
+                .iter()
+                .filter(|r| r.starts_with("https://"))
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn catalog_literal_rich_missing_and_escaped_versions_keep_their_meaning() {
+        let text = r#"[versions]
+escaped = "1.\u0030"
+[libraries]
+literal = "group:artifact:1.0"
+rich = { module = "group:rich", version = { strictly = "1.0" } }
+missing = { module = "group:missing" }
+unknown = { unsupported = "1.0" }
+"#;
+        let doc = parse(text, Path::new("gradle/libs.versions.toml")).unwrap();
+        assert_eq!(doc.entries.len(), 4);
+        assert!(doc.definitions.is_empty());
+        assert!(doc.entries[0].span.is_some());
+        assert!(doc.entries[1..].iter().all(|e| e.reason.is_some()));
+        assert_eq!(toml_string_span("'''1.0'''", 0..9, "1.0"), Some(3..6));
+        assert!(toml_string_span("x", 0..20, "x").is_none());
+    }
+
+    #[test]
+    fn package_manager_hashes_escaping_unknown_tools_and_complex_mise_are_preserved() {
+        for text in [
+            r#"{"packageManager":"bun@1.0.0+sha256.hash"}"#,
+            r#"{"packageManager":"pnpm@1.0.0+invalidhash"}"#,
+            r#"{"packageManager":"pnpm@1.\u0030.0"}"#,
+            r#"{"packageManager":"unsupported@1.0.0"}"#,
+        ] {
+            let doc = parse(text, Path::new("package.json")).unwrap();
+            assert_eq!(doc.entries.len(), 1);
+            assert!(doc.entries[0].reason.is_some());
+        }
+        let doc = parse(
+            "[tools]\nnode = ['20','22']\nunsupported = '1.0'\n",
+            Path::new("mise.toml"),
+        )
+        .unwrap();
+        assert_eq!(doc.entries.len(), 1);
+        assert!(doc.entries[0].reason.is_some());
+        let doc = parse(
+            "distributionUrl=https://mirror.example/custom.zip\n",
+            Path::new("gradle/wrapper/gradle-wrapper.properties"),
+        )
+        .unwrap();
+        assert!(doc.entries[0].reason.is_some());
+    }
+
+    #[test]
+    fn patcher_rejects_conflicting_source_updates_and_skips_unsupported_declarations() {
+        let path = Path::new("build.gradle.kts");
+        let text = "implementation(\"group:artifact:1.0\")\n";
+        let doc = parse(text, path).unwrap();
+        let update = PlannedUpdate {
+            name: "group:artifact".into(),
+            from: "1.0".into(),
+            to: "2.0".into(),
+            section: Section::Maven,
+        };
+        let handler = ProjectHandler(doc.clone());
+        assert!(
+            handler
+                .apply_updates(text, std::slice::from_ref(&update))
+                .unwrap()
+                .contains(":2.0")
+        );
+        let other = PlannedUpdate {
+            to: "3.0".into(),
+            ..update.clone()
+        };
+        assert!(
+            doc.apply(text, &[update.clone(), other], Vec::new())
+                .is_err()
+        );
+        let mut unsupported = doc;
+        unsupported.entries[0].reason = Some("dynamic".into());
+        assert_eq!(
+            unsupported.apply(text, &[update], Vec::new()).unwrap(),
+            text
+        );
+    }
+}
