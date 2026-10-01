@@ -362,10 +362,10 @@ jobs:
           publish_package "$RUNNER_TEMP/npm-publish/cli/"*.tgz
         working-directory: bridge/node
       - name: Upload Asset
-        uses: owjs3901/upload-github-release-asset@main
-        with:
-          upload_url: ${{ fromJson(needs.changepacks.outputs.release_assets_urls)['bridge/node/package.json'] }}
-          asset_path: bridge/node/npm/*/dependency-check-updates.*.node
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_UPLOAD_URL: ${{ fromJson(needs.changepacks.outputs.release_assets_urls)['bridge/node/package.json'] }}
+        run: bash .github/scripts/upload-release-assets.sh "$RELEASE_UPLOAD_URL" bridge/node/npm/*/dependency-check-updates.*.node
 
   python-publish:
     name: Python Publish
@@ -379,6 +379,7 @@ jobs:
       contents: write
       attestations: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v4
@@ -394,10 +395,10 @@ jobs:
       - name: List wheels
         run: ls -R .
       - name: Upload Asset
-        uses: owjs3901/upload-github-release-asset@main
-        with:
-          upload_url: ${{ fromJson(needs.changepacks.outputs.release_assets_urls)['bridge/python/pyproject.toml'] }}
-          asset_path: "*/*.whl"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_UPLOAD_URL: ${{ fromJson(needs.changepacks.outputs.release_assets_urls)['bridge/python/pyproject.toml'] }}
+        run: bash .github/scripts/upload-release-assets.sh "$RELEASE_UPLOAD_URL" wheels-*/*.whl
 
   finalize-releases:
     name: Finalize published releases
