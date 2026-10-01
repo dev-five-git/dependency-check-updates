@@ -712,6 +712,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("503"));
+        Mock::given(path("/available/g/a/maven-metadata.xml")).respond_with(ResponseTemplate::new(200).set_body_string("<metadata><versioning><versions><version>2.0</version></versions></versioning></metadata>")).mount(&server).await;
+        doc.entries[0]
+            .repositories
+            .push(format!("{}/available", server.uri()));
+        let error = registry
+            .resolve(&doc.entries[0], TargetLevel::Latest)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("503")); // A successful partial response is still unsafe.
     }
     use super::*;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};

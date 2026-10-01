@@ -1296,6 +1296,15 @@ mod tests {
         let doc = parse(text, Path::new("build.gradle.kts")).unwrap();
         assert!(doc.repositories.is_empty());
         assert!(doc.definitions.iter().all(|d| d.key != "fakeVersion"));
+        let unclosed =
+            "val documentation = \"\"\"\nimplementation(\"g:fake:1.0\")\n// still inside text\n";
+        assert!(
+            parse(unclosed, Path::new("build.gradle.kts"))
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        assert_eq!(uncomment(unclosed, true), unclosed);
     }
 
     #[test]

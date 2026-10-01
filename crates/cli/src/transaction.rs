@@ -244,15 +244,7 @@ fn scoped(root: &Path, path: &Path) -> Result<(), String> {
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err("transaction path is not a regular non-symlink file".into());
     }
-    #[cfg(windows)]
-    validate_windows_target(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.nlink() != 1 {
-            return Err("hard-linked recovery path is unsupported".into());
-        }
-    }
+    validate_native_target(path)?;
     Ok(())
 }
 
@@ -658,7 +650,7 @@ fn replace(file: &mut Option<TempPath>, path: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
-fn validate_windows_target(path: &Path) -> Result<(), String> {
+fn validate_native_target(path: &Path) -> Result<(), String> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
@@ -690,6 +682,23 @@ fn validate_windows_target(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn validate_native_target(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    if std::fs::metadata(path).map_err(|e| e.to_string())?.nlink() > 1 {
+        return Err(format!(
+            "hard-linked update target is unsupported: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn validate_native_target(_path: &Path) -> Result<(), String> {
+    Err("native update transactions are supported on Unix and Windows only".into())
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn commit_with(
     root: &Path,
@@ -715,10 +724,7 @@ pub(crate) fn commit_with(
     let canonical_root = std::fs::canonicalize(root).map_err(|e| simple(e.to_string()))?;
     for c in &changes {
         unchanged(&c.path, &c.original).map_err(simple)?;
-        #[cfg(windows)]
-        {
-            validate_windows_target(&c.path).map_err(simple)?;
-        }
+        validate_native_target(&c.path).map_err(simple)?;
         let identity = std::fs::canonicalize(&c.path).map_err(|e| simple(e.to_string()))?;
         if !identity.starts_with(&canonical_root) {
             return Err(simple(
@@ -730,20 +736,6 @@ pub(crate) fn commit_with(
                 "duplicate update target: {}",
                 c.path.display()
             )));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if std::fs::metadata(&c.path)
-                .map_err(|e| simple(e.to_string()))?
-                .nlink()
-                > 1
-            {
-                return Err(simple(format!(
-                    "hard-linked update target is unsupported: {}",
-                    c.path.display()
-                )));
-            }
         }
     }
     let _locks = target_locks(changes.iter().map(|c| c.path.as_path())).map_err(simple)?;
