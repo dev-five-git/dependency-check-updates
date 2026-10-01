@@ -449,7 +449,7 @@ checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
 
 [[package]]
 name = "dependency-check-updates"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "clap",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "futures",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-docker"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dependency-check-updates-core",
  "futures",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-github"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dependency-check-updates-core",
  "dependency-check-updates-docker",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-node"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "dependency-check-updates-core",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-python"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dependency-check-updates-core",
  "pep440_rs",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "dependency-check-updates-rust"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dependency-check-updates-core",
  "reqwest",
