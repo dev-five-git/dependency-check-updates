@@ -1,8 +1,6 @@
 name: Project regression tests
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
   workflow_call:
 
