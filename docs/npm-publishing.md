@@ -46,7 +46,9 @@ creation disabled. It checks that every target has a platform package with the
 CLI version, packs the native packages and CLI with `bun pm pack`, and inspects
 the actual tarballs for unresolved local dependency ranges and missing entry
 points or native binaries. Bun converts `workspace:` ranges before npm sees
-the tarballs. An existing output directory is rejected to prevent stale files
+the tarballs. The packing script runs on Node.js to expand Windows 8.3 path
+aliases before passing package directories to Bun, preserving workspace
+resolution on Windows CI runners. An existing output directory is rejected to prevent stale files
 from entering a release.
 
 CI completes all checks before publishing anything. It publishes the tarballs

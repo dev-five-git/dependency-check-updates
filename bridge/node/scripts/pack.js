@@ -1,14 +1,14 @@
 // Prepare every package without publishing, then verify the exact tarballs
 // handed to npm. Bun materializes workspace ranges; npm supplies OIDC.
 const { execFileSync } = require("node:child_process");
-const { mkdirSync, readFileSync, readdirSync } = require("node:fs");
+const { mkdirSync, readFileSync, readdirSync, realpathSync } = require("node:fs");
 const { basename, join, resolve } = require("node:path");
 const packageArg = require("npm-package-arg");
 
 const command = (args) => execFileSync(args[0], args.slice(1), { encoding: "utf8" });
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 const destination = process.argv[2];
-if (!destination) throw new Error("Usage: bun scripts/pack.js <new output directory>");
+if (!destination) throw new Error("Usage: node scripts/pack.js <new output directory>");
 
 command(["bun", "run", "prepublishOnly"]);
 const root = readJson("package.json");
@@ -34,7 +34,9 @@ for (const dir of [...nativeDirs, "."]) {
   mkdirSync(packDir, { recursive: true });
   const filename = resolve(packDir, command([
     "bun", "pm", "pack", "--quiet", "--ignore-scripts", "--destination", packDir,
-    "--cwd", resolve(dir),
+    // Node's native realpath expands Windows 8.3 aliases (e.g. RUNNER~1).
+    // Bun cannot locate the workspace lockfile when --cwd contains an alias.
+    "--cwd", realpathSync.native(resolve(dir)),
   ]).trim());
   const contents = command(["tar", "-xOf", filename, "package/package.json"]);
   const published = JSON.parse(contents);

@@ -4,7 +4,12 @@ const { delimiter, join } = require("node:path");
 const { tmpdir } = require("node:os");
 
 async function command(args, cwd, expectedStatus = 0) {
-  const child = Bun.spawn(args, { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, PATH: join(__dirname, "..", "node_modules", ".bin") + delimiter + process.env.PATH, NAPI_RS_ENFORCE_VERSION_CHECK: "1" } });
+  const env = { ...process.env, NAPI_RS_ENFORCE_VERSION_CHECK: "1" };
+  // Windows may name this variable Path. Duplicate Path/PATH keys cause Node's
+  // subprocesses to lose the local N-API binary directory.
+  const pathKey = Object.keys(env).find(key => key.toLowerCase() === "path") ?? "PATH";
+  env[pathKey] = join(__dirname, "..", "node_modules", ".bin") + delimiter + (env[pathKey] ?? "");
+  const child = Bun.spawn(args, { cwd, stdout: "pipe", stderr: "pipe", env });
   const [status, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
   expect(status, `${args.join(" ")}\n${stderr}\n${stdout}`).toBe(expectedStatus);
   return expectedStatus === 0 ? stdout : stderr;
@@ -33,7 +38,7 @@ test("packed npm CLI loads its separately installed native platform package", as
     await command(["bun", "x", "--no-install", "napi", "create-npm-dirs", "--cwd", copy], repo);
     await command(["bun", "x", "--no-install", "napi", "artifacts", "--cwd", copy, "--output-dir", "."], repo);
     const npm = process.platform === "win32" ? ["cmd.exe", "/d", "/c", "npm"] : ["npm"];
-    const packed = JSON.parse(await command(["bun", join(repo, "scripts", "pack.js"), join(root, "packed")], copy));
+    const packed = JSON.parse(await command(["node", join(repo, "scripts", "pack.js"), join(root, "packed")], copy));
     const cli = packed.find(p => p.name === "@dependency-check-updates/cli");
     const native = packed.find(p => p.name === `@dependency-check-updates/cli-${suffix}`);
     expect(packed.length).toBe(2);
@@ -44,7 +49,7 @@ test("packed npm CLI loads its separately installed native platform package", as
     for (const [index, range] of ["file:../fixture", "../fixture"].entries()) {
       local.devDependencies["@dcu-test/fixture"] = range;
       writeFileSync(join(copy, "package.json"), JSON.stringify(local));
-      expect(await command(["bun", join(repo, "scripts", "pack.js"), join(root, `rejected-${index}`)], copy, 1)).toContain("Unresolved local dependency");
+      expect(await command(["node", join(repo, "scripts", "pack.js"), join(root, `rejected-${index}`)], copy, 1)).toContain("Unresolved local dependency");
     }
     const installed = join(root, "installed"); mkdirSync(installed);
     await command([...npm, "install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--omit=dev", "--prefix", installed, cli.filename, native.filename], installed);
