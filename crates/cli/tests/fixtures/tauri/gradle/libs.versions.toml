@@ -1,0 +1,13 @@
+[versions]
+webkit = "1.6.1" # Shared version source
+agp = "8.5.1"
+kotlin = "1.9.25"
+
+[libraries]
+webkit = { module = "androidx.webkit:webkit", version.ref = "webkit" }
+webkit-alias = { group = "androidx.webkit", name = "webkit", version.ref = "webkit" }
+material = { module = "com.google.android.material:material", version = "1.8.0" }
+
+[plugins]
+android = { id = "com.android.application", version.ref = "agp" }
+kotlin = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

@@ -75,17 +75,17 @@ impl JsonPatcher {
 
                 // For each dependency in this section, find its value position
                 for (dep_name, dep_value) in deps {
-                    if let Some(version_str) = dep_value.as_str() {
-                        if let Some(loc) = find_dep_value_position(
+                    if let Some(version_str) = dep_value.as_str()
+                        && let Some(loc) = find_dep_value_position(
                             text,
                             obj_start,
                             obj_end,
                             dep_name,
                             version_str,
                             section,
-                        ) {
-                            locations.push(loc);
-                        }
+                        )
+                    {
+                        locations.push(loc);
                     }
                 }
             }

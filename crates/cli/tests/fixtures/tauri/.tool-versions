@@ -1,0 +1,5 @@
+# Project pins, not the locally installed versions
+nodejs 20.1.0
+java 17
+rust 1.85.0
+bun 1.1.0

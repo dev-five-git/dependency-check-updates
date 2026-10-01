@@ -64,15 +64,15 @@ impl CargoTomlManifest {
         }
 
         // Also check [workspace.dependencies]
-        if let Some(ws) = doc.get("workspace").and_then(Item::as_table) {
-            if let Some(ws_deps) = ws.get("dependencies").and_then(Item::as_table) {
-                Self::collect_from_table(
-                    ws_deps,
-                    DependencySection::WorkspaceDependencies,
-                    manifest_dir,
-                    &mut deps,
-                );
-            }
+        if let Some(ws) = doc.get("workspace").and_then(Item::as_table)
+            && let Some(ws_deps) = ws.get("dependencies").and_then(Item::as_table)
+        {
+            Self::collect_from_table(
+                ws_deps,
+                DependencySection::WorkspaceDependencies,
+                manifest_dir,
+                &mut deps,
+            );
         }
 
         deps
@@ -129,12 +129,11 @@ impl CargoTomlManifest {
                 DependencySection::BuildDependencies => "build-dependencies",
                 DependencySection::WorkspaceDependencies => {
                     // Handle workspace.dependencies separately
-                    if let Some(ws) = self.doc.get_mut("workspace").and_then(Item::as_table_mut) {
-                        if let Some(ws_deps) =
+                    if let Some(ws) = self.doc.get_mut("workspace").and_then(Item::as_table_mut)
+                        && let Some(ws_deps) =
                             ws.get_mut("dependencies").and_then(Item::as_table_mut)
-                        {
-                            Self::update_dep_in_table(ws_deps, &update.name, &update.to)?;
-                        }
+                    {
+                        Self::update_dep_in_table(ws_deps, &update.name, &update.to)?;
                     }
                     continue;
                 }
@@ -337,19 +336,17 @@ fn resolve_workspace_version(crate_dir: &Path) -> Option<String> {
     let mut dir = std::fs::canonicalize(crate_dir).ok()?;
     loop {
         let cargo_path = dir.join("Cargo.toml");
-        if let Ok(text) = std::fs::read_to_string(&cargo_path) {
-            if let Ok(doc) = text.parse::<DocumentMut>() {
-                if let Some(version) = doc
-                    .get("workspace")
-                    .and_then(Item::as_table)
-                    .and_then(|w| w.get("package"))
-                    .and_then(Item::as_table)
-                    .and_then(|p| p.get("version"))
-                    .and_then(Item::as_str)
-                {
-                    return Some(version.to_owned());
-                }
-            }
+        if let Ok(text) = std::fs::read_to_string(&cargo_path)
+            && let Ok(doc) = text.parse::<DocumentMut>()
+            && let Some(version) = doc
+                .get("workspace")
+                .and_then(Item::as_table)
+                .and_then(|w| w.get("package"))
+                .and_then(Item::as_table)
+                .and_then(|p| p.get("version"))
+                .and_then(Item::as_str)
+        {
+            return Some(version.to_owned());
         }
         if !dir.pop() {
             return None;

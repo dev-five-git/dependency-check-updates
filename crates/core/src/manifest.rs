@@ -71,6 +71,14 @@ impl Scanner {
     /// `read_dir` on every invocation just to catch a rare layout.
     #[must_use]
     pub fn scan_dir(root: &Path) -> Vec<ManifestRef> {
+        Self::scan_dir_checked(root).unwrap_or_default()
+    }
+
+    /// Scan without silently dropping filesystem errors.
+    ///
+    /// # Errors
+    /// Returns inaccessible candidate or workflow directory errors.
+    pub fn scan_dir_checked(root: &Path) -> Result<Vec<ManifestRef>, DcuError> {
         let mut manifests = Vec::new();
 
         let candidates = [
@@ -84,28 +92,60 @@ impl Scanner {
             "compose.yaml",
             "docker-compose.yml",
             "docker-compose.yaml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            "gradle.properties",
+            "gradle/libs.versions.toml",
+            "gradle/wrapper/gradle-wrapper.properties",
+            ".nvmrc",
+            ".node-version",
+            "rust-toolchain",
+            "rust-toolchain.toml",
+            ".tool-versions",
+            "mise.toml",
+            ".mise.toml",
         ];
 
         for filename in &candidates {
             let path = root.join(filename);
-            if path.is_file() {
-                if let Some(kind) = ManifestKind::from_path(&path) {
-                    manifests.push(ManifestRef { path, kind });
-                }
+            let metadata = match std::fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => return Err(DcuError::Io { path, source }),
+            };
+            if metadata.is_file()
+                && let Some(kind) = ManifestKind::from_path(&path)
+            {
+                manifests.push(ManifestRef { path, kind });
             }
         }
 
         // GitHub Actions: enumerate `.github/workflows/*.yml`/`*.yaml`.
         let workflows_dir = root.join(".github").join("workflows");
-        if let Ok(entries) = std::fs::read_dir(&workflows_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
+        match std::fs::read_dir(&workflows_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|source| DcuError::Io {
+                        path: workflows_dir.clone(),
+                        source,
+                    })?;
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    if let Some(kind) = ManifestKind::from_path(&path) {
+                        manifests.push(ManifestRef { path, kind });
+                    }
                 }
-                if let Some(kind) = ManifestKind::from_path(&path) {
-                    manifests.push(ManifestRef { path, kind });
-                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(DcuError::Io {
+                    path: workflows_dir,
+                    source,
+                });
             }
         }
 
@@ -118,7 +158,7 @@ impl Scanner {
         // Paths are unique (each manifest file appears at most once), so stable
         // ordering is unobservable; use sort_unstable_by for better performance.
         manifests.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-        manifests
+        Ok(manifests)
     }
 
     /// Find a specific manifest file.
@@ -153,6 +193,40 @@ impl Scanner {
     /// every GitHub Actions manifest.
     #[must_use]
     pub fn scan_deep(root: &Path) -> Vec<ManifestRef> {
+        Self::scan_deep_checked(root).unwrap_or_default()
+    }
+
+    /// Recursively scan while preserving traversal errors.
+    ///
+    /// # Errors
+    /// Returns filesystem and ignore-file errors from traversal.
+    pub fn scan_deep_checked(root: &Path) -> Result<Vec<ManifestRef>, DcuError> {
+        Self::walk(root, None)
+    }
+
+    /// Discover only files under `scopes` (directories or exact file paths).
+    /// Traverses their ancestor paths to apply the same ignore rules as a deep
+    /// scan, while pruning unrelated branches before entering them.
+    #[must_use]
+    pub fn scan_scoped(root: &Path, scopes: &[std::path::PathBuf]) -> Vec<ManifestRef> {
+        Self::scan_scoped_checked(root, scopes).unwrap_or_default()
+    }
+
+    /// Scope a recursive scan without discarding traversal errors.
+    ///
+    /// # Errors
+    /// Returns filesystem and ignore-file errors from traversal.
+    pub fn scan_scoped_checked(
+        root: &Path,
+        scopes: &[std::path::PathBuf],
+    ) -> Result<Vec<ManifestRef>, DcuError> {
+        Self::walk(root, Some(scopes.to_vec()))
+    }
+
+    fn walk(
+        root: &Path,
+        scopes: Option<Vec<std::path::PathBuf>>,
+    ) -> Result<Vec<ManifestRef>, DcuError> {
         use ignore::WalkBuilder;
 
         let walker = WalkBuilder::new(root)
@@ -162,13 +236,30 @@ impl Scanner {
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
-            .filter_entry(|entry| {
+            .filter_entry(move |entry| {
+                if let Some(scopes) = &scopes
+                    && !scopes.iter().any(|scope| {
+                        entry.path().starts_with(scope)
+                            || (entry.file_type().is_some_and(|ft| ft.is_dir())
+                                && scope.starts_with(entry.path()))
+                    })
+                {
+                    return false;
+                }
                 let name = entry.file_name().to_string_lossy();
                 // Skip common dependency/build directories and hidden dirs that
                 // are NOT `.github`. The leading-dot check lets `.github` and
                 // any descendants through while still pruning `.git`, `.venv`,
                 // `.idea`, etc.
-                if name.starts_with('.') && name.as_ref() != "." && name.as_ref() != ".github" {
+                if name.starts_with('.')
+                    && name.as_ref() != "."
+                    && name.as_ref() != ".github"
+                    && !(entry.file_type().is_some_and(|ft| ft.is_file())
+                        && matches!(
+                            name.as_ref(),
+                            ".nvmrc" | ".node-version" | ".tool-versions" | ".mise.toml"
+                        ))
+                {
                     return false;
                 }
                 !matches!(
@@ -192,7 +283,17 @@ impl Scanner {
         // here removes the previously-duplicated `manifest_names` list and
         // `is_workflow_yaml` parent-traversal block, and drops the per-file
         // `to_string_lossy()` allocation in the deep-walk hot path.
-        for entry in walker.flatten() {
+        for entry in walker {
+            let entry = entry.map_err(|source| DcuError::Io {
+                path: root.to_owned(),
+                source: std::io::Error::other(source.to_string()),
+            })?;
+            if let Some(source) = entry.error() {
+                return Err(DcuError::Io {
+                    path: entry.path().to_owned(),
+                    source: std::io::Error::other(source.to_string()),
+                });
+            }
             if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                 continue;
             }
@@ -207,7 +308,7 @@ impl Scanner {
         // Paths are unique (each manifest file appears at most once), so stable
         // ordering is unobservable; use sort_unstable_by for better performance.
         manifests.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-        manifests
+        Ok(manifests)
     }
 
     /// Find manifests, either from a specific path or by scanning the directory.
@@ -233,9 +334,9 @@ impl Scanner {
         }
 
         let manifests = if deep {
-            Self::scan_deep(root)
+            Self::scan_deep_checked(root)?
         } else {
-            Self::scan_dir(root)
+            Self::scan_dir_checked(root)?
         };
 
         if manifests.is_empty() {
@@ -250,6 +351,14 @@ impl Scanner {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn root_candidate_metadata_errors_are_not_silently_ignored() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("package.json");
+        std::os::unix::fs::symlink("package.json", &path).unwrap();
+        assert!(super::Scanner::scan_dir_checked(dir.path()).is_err());
+    }
     use super::*;
     use rstest::{fixture, rstest};
     use std::fs;
@@ -355,7 +464,7 @@ mod tests {
     fn test_scan_dir_ignores_unknown_files() {
         let dir = TempDir::new().unwrap();
         create_temp_manifest(dir.path(), "README.md", "# Hello");
-        create_temp_manifest(dir.path(), "build.gradle", "");
+        create_temp_manifest(dir.path(), "notes.gradle", "");
 
         let manifests = Scanner::scan_dir(dir.path());
         assert!(manifests.is_empty());
@@ -367,7 +476,7 @@ mod tests {
     /// non-existent path) does not share the fixture.
     #[rstest]
     #[case::valid_package_json("package.json", "{}", Some(ManifestKind::PackageJson))]
-    #[case::unknown_file("build.gradle", "", None)]
+    #[case::unknown_file("notes.gradle", "", None)]
     fn from_path_existing_file(
         tmp: TempDir,
         #[case] filename: &str,
@@ -621,4 +730,52 @@ mod tests {
             .count();
         assert_eq!(secret_count, 0, "other hidden dirs must stay hidden");
     }
+
+    #[test]
+    fn scoped_scan_prunes_unrelated_branches_and_preserves_ignore_rules() {
+        let dir = TempDir::new().unwrap();
+        for name in ["apps/a", "apps/b", "apps/a/build", "apps/a/.secret"] {
+            std::fs::create_dir_all(dir.path().join(name)).unwrap();
+        }
+        create_temp_manifest(dir.path(), ".tool-versions", "node 20\n");
+        create_temp_manifest(&dir.path().join("apps/a"), "build.gradle.kts", "");
+        create_temp_manifest(&dir.path().join("apps/a"), ".node-version", "20\n");
+        create_temp_manifest(
+            &dir.path().join("apps/a"),
+            "gradle.properties",
+            "ignoredVersion=1.0\n",
+        );
+        create_temp_manifest(&dir.path().join("apps/a"), ".ignore", "gradle.properties\n");
+        for folder in ["apps/b", "apps/a/build", "apps/a/.secret"] {
+            create_temp_manifest(&dir.path().join(folder), "package.json", "{}");
+        }
+        let paths: Vec<_> = Scanner::scan_scoped(
+            dir.path(),
+            &[dir.path().join("apps/a"), dir.path().join(".tool-versions")],
+        )
+        .into_iter()
+        .map(|m| m.path)
+        .collect();
+        assert_eq!(paths.len(), 3);
+        assert!(paths.contains(&dir.path().join(".tool-versions")));
+        assert!(paths.contains(&dir.path().join("apps/a/.node-version")));
+        assert!(paths.contains(&dir.path().join("apps/a/build.gradle.kts")));
+    }
+}
+#[test]
+fn checked_scans_report_traversal_and_workflow_errors() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(Scanner::scan_deep_checked(&dir.path().join("missing")).is_err());
+    std::fs::create_dir(dir.path().join(".github")).unwrap();
+    std::fs::write(dir.path().join(".github/workflows"), "not a directory").unwrap();
+    assert!(Scanner::scan_dir_checked(dir.path()).is_err());
+    assert!(Scanner::discover(dir.path(), None, false).is_err());
+}
+
+#[test]
+fn checked_scans_report_invalid_ignore_rules() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+    std::fs::write(dir.path().join(".ignore"), "[z-a]\n").unwrap();
+    assert!(Scanner::scan_deep_checked(dir.path()).is_err());
 }

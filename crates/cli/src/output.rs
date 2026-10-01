@@ -168,6 +168,7 @@ pub fn render_footer(path: &str, upgrading: bool, has_updates: bool, use_color: 
 /// keys are unique — last-write-wins on `to`. For consumers that need full
 /// `(name, from, to)` triples, use the table format and parse line-by-line.
 #[must_use]
+#[cfg(test)]
 pub fn render_json(updates: &[PlannedUpdate]) -> String {
     let mut map = serde_json::Map::with_capacity(updates.len());
     for update in updates {

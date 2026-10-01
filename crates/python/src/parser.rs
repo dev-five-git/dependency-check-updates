@@ -61,14 +61,14 @@ impl PyProjectManifest {
         // `DependencySection` literal, and the dev-loop's `python` skip
         // comment already mirrored the main-loop guard, signalling the
         // duplication. See 0007-analyze.md F1.
-        if let Some(tool) = doc.get("tool").and_then(Item::as_table) {
-            if let Some(poetry) = tool.get("poetry").and_then(Item::as_table) {
-                if let Some(t) = poetry.get("dependencies").and_then(Item::as_table) {
-                    collect_poetry_table(t, DependencySection::Dependencies, &mut deps);
-                }
-                if let Some(t) = poetry.get("dev-dependencies").and_then(Item::as_table) {
-                    collect_poetry_table(t, DependencySection::DevDependencies, &mut deps);
-                }
+        if let Some(tool) = doc.get("tool").and_then(Item::as_table)
+            && let Some(poetry) = tool.get("poetry").and_then(Item::as_table)
+        {
+            if let Some(t) = poetry.get("dependencies").and_then(Item::as_table) {
+                collect_poetry_table(t, DependencySection::Dependencies, &mut deps);
+            }
+            if let Some(t) = poetry.get("dev-dependencies").and_then(Item::as_table) {
+                collect_poetry_table(t, DependencySection::DevDependencies, &mut deps);
             }
         }
 
@@ -95,10 +95,10 @@ impl PyProjectManifest {
     fn apply_single_update(&mut self, update: &PlannedUpdate) {
         // Try PEP 621 project.dependencies (and optional-dependencies)
         if let Some(project) = self.doc.get_mut("project").and_then(Item::as_table_mut) {
-            if let Some(dep_array) = project.get_mut("dependencies").and_then(Item::as_array_mut) {
-                if apply_to_pep508_array(dep_array, update) {
-                    return;
-                }
+            if let Some(dep_array) = project.get_mut("dependencies").and_then(Item::as_array_mut)
+                && apply_to_pep508_array(dep_array, update)
+            {
+                return;
             }
             // PEP 621: [project.optional-dependencies] — one named array per
             // extra group; the matrix in 0027-analyze.md flagged this as a
@@ -109,10 +109,10 @@ impl PyProjectManifest {
                 .and_then(Item::as_table_mut)
             {
                 for (_group, items) in opt.iter_mut() {
-                    if let Some(arr) = items.as_array_mut() {
-                        if apply_to_pep508_array(arr, update) {
-                            return;
-                        }
+                    if let Some(arr) = items.as_array_mut()
+                        && apply_to_pep508_array(arr, update)
+                    {
+                        return;
                     }
                 }
             }
@@ -125,10 +125,10 @@ impl PyProjectManifest {
             .and_then(Item::as_table_mut)
         {
             for (_group, items) in groups.iter_mut() {
-                if let Some(arr) = items.as_array_mut() {
-                    if apply_to_pep508_array(arr, update) {
-                        return;
-                    }
+                if let Some(arr) = items.as_array_mut()
+                    && apply_to_pep508_array(arr, update)
+                {
+                    return;
                 }
             }
         }
@@ -140,19 +140,19 @@ impl PyProjectManifest {
         // silently dropped inline/full-table updates that `compute_updates`
         // had already planned, so `dcu -u` printed the row but left the file
         // unchanged. See 0036-analyze.md F1.
-        if let Some(tool) = self.doc.get_mut("tool").and_then(Item::as_table_mut) {
-            if let Some(poetry) = tool.get_mut("poetry").and_then(Item::as_table_mut) {
-                if let Some(deps) = poetry.get_mut("dependencies").and_then(Item::as_table_mut) {
-                    if apply_to_poetry_table(deps, &update.name, &update.to) {
-                        return;
-                    }
-                }
-                if let Some(deps) = poetry
-                    .get_mut("dev-dependencies")
-                    .and_then(Item::as_table_mut)
-                {
-                    apply_to_poetry_table(deps, &update.name, &update.to);
-                }
+        if let Some(tool) = self.doc.get_mut("tool").and_then(Item::as_table_mut)
+            && let Some(poetry) = tool.get_mut("poetry").and_then(Item::as_table_mut)
+        {
+            if let Some(deps) = poetry.get_mut("dependencies").and_then(Item::as_table_mut)
+                && apply_to_poetry_table(deps, &update.name, &update.to)
+            {
+                return;
+            }
+            if let Some(deps) = poetry
+                .get_mut("dev-dependencies")
+                .and_then(Item::as_table_mut)
+            {
+                apply_to_poetry_table(deps, &update.name, &update.to);
             }
         }
 
@@ -178,10 +178,10 @@ fn collect_pep508_array(
     deps: &mut Vec<DependencySpec>,
 ) {
     for item in arr {
-        if let Some(spec_str) = item.as_str() {
-            if let Some(dep) = parse_pep508_spec(spec_str, section) {
-                deps.push(dep);
-            }
+        if let Some(spec_str) = item.as_str()
+            && let Some(dep) = parse_pep508_spec(spec_str, section)
+        {
+            deps.push(dep);
         }
     }
 }

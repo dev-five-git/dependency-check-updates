@@ -21,13 +21,41 @@ pub struct Cli {
     /// Package names to check (acts as filter)
     pub filter: Vec<String>,
 
-    /// Update package file with new versions
+    /// Apply project-file updates as a recoverable multi-file batch
     #[arg(short, long)]
     pub upgrade: bool,
 
     /// Recursively scan subdirectories for manifests
     #[arg(short, long)]
     pub deep: bool,
+
+    /// Recover an interrupted project update, validating all hashes before writing
+    #[arg(long, value_enum, conflicts_with_all = ["upgrade", "deep", "local_tools", "manifest", "rm", "remove_lockfile", "remove_installed", "filter", "reject", "strict_compatibility", "maven_config", "compatibility_file", "compatible", "target"])]
+    pub recover: Option<RecoveryMode>,
+
+    /// Explicit Maven repository allowlist and environment-variable credential names (JSON)
+    #[arg(long, conflicts_with = "local_tools")]
+    pub maven_config: Option<PathBuf>,
+
+    /// Validated compatibility rule extensions from a local JSON file
+    #[arg(long, conflicts_with = "local_tools")]
+    pub compatibility_file: Option<PathBuf>,
+
+    /// Inspect installed Node, Bun, pnpm, Rust and JDK; never install or modify tools
+    #[arg(long, conflicts_with_all = ["upgrade", "rm", "remove_lockfile", "remove_installed", "manifest", "deep"])]
+    pub local_tools: bool,
+
+    /// Exit 2 on incomplete checks; with -u, abort all writes before applying
+    #[arg(long)]
+    pub fail_on_incomplete: bool,
+
+    /// Block changes to coupled Gradle tools whose compatibility is unverified
+    #[arg(long, conflicts_with = "local_tools")]
+    pub strict_compatibility: bool,
+
+    /// Select a verified bounded Gradle-tool combination, without changing channels or filters
+    #[arg(long, conflicts_with = "local_tools")]
+    pub compatible: bool,
 
     /// Target version level
     #[arg(short, long, default_value = "latest", value_parser = parse_target_level)]
@@ -78,7 +106,8 @@ pub struct Cli {
     #[arg(long = "rm")]
     pub rm: bool,
 
-    /// Exit code behavior: 1 = exit 0 always, 2 = exit 1 if upgrades exist
+    /// Update-availability policy: 1 = no failure, 2 = exit 1 if updates exist;
+    /// execution failures and --fail-on-incomplete take priority
     #[arg(short, long, default_value = "1")]
     pub error_level: u8,
 
@@ -107,13 +136,32 @@ impl Cli {
 }
 
 /// How results are rendered to stdout.
-#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum OutputFormat {
     /// Human-readable ncu-style table (default).
     #[default]
     Table,
-    /// Machine-readable JSON object (`{ "name": "to" }`).
+    /// Declaration-status JSON array; run-level diagnostics use stderr.
     Json,
+    /// Versioned JSON report with summary, items, diagnostics and apply outcome.
+    JsonReport,
+    /// Legacy update-only object; requires one effective project manifest.
+    JsonLegacy,
+}
+
+/// Explicit recovery action for an interrupted project update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum RecoveryMode {
+    /// Restore every recorded target to its original bytes
+    Rollback,
+    /// Finish the already-prepared update without fetching new versions
+    Finish,
+}
+
+impl OutputFormat {
+    pub(crate) fn is_json(self) -> bool {
+        self != Self::Table
+    }
 }
 
 /// Parse a `TargetLevel` from a string.

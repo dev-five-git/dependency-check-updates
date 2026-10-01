@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dependency-check-updates:report:v2",
+  "title": "dependency-check-updates versioned report v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "summary", "items", "diagnostics", "applyOutcome", "compatibilityRules"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "summary": { "$ref": "#/$defs/summary" },
+    "items": { "type": "array", "items": { "oneOf": [{ "$ref": "#/$defs/project" }, { "$ref": "#/$defs/local" }] } },
+    "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
+    "compatibilityRules": { "type": "array", "items": { "$ref": "#/$defs/provenance" } },
+    "applyOutcome": { "enum": ["not-requested", "no-changes", "committed", "aborted", "rolled-back", "recovery-required"] }
+  },
+  "$defs": {
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verifiedAt", "sources", "userSupplied", "ageDays", "stale", "future"],
+      "properties": {
+        "verifiedAt": { "type": "string", "format": "date" },
+        "sources": { "type": "array", "items": { "type": "string", "format": "uri" } },
+        "userSupplied": { "type": "boolean" },
+        "ageDays": { "type": "integer" },
+        "stale": { "type": "boolean" },
+        "future": { "type": "boolean" }
+      }
+    },
+    "nullableString": { "type": ["string", "null"] },
+    "status": { "enum": ["update", "current", "channel", "unsupported", "failed", "blocked", "unverified", "missing"] },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifests", "checked", "updates", "updated", "incomplete"],
+      "properties": {
+        "manifests": { "type": "integer", "minimum": 0 },
+        "checked": { "type": "integer", "minimum": 0 },
+        "updates": { "type": "integer", "minimum": 0 },
+        "updated": { "type": "integer", "minimum": 0 },
+        "incomplete": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest", "name", "section", "from", "to", "latest", "selected", "compatible", "status", "reason", "compatibility", "selectionPolicy", "updated"],
+      "properties": {
+        "manifest": { "type": "string" },
+        "name": { "type": "string" },
+        "section": { "type": "string" },
+        "from": { "type": "string" },
+        "to": { "$ref": "#/$defs/nullableString" },
+        "latest": { "$ref": "#/$defs/nullableString" },
+        "selected": { "$ref": "#/$defs/nullableString" },
+        "compatible": { "$ref": "#/$defs/nullableString" },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "$ref": "#/$defs/nullableString" },
+        "compatibility": { "$ref": "#/$defs/nullableString" },
+        "selectionPolicy": { "$ref": "#/$defs/nullableString" },
+        "updated": { "type": "boolean" }
+      }
+    },
+    "local": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "scope", "installed", "latest", "selected", "status", "reason", "updateCommand", "updated"],
+      "properties": {
+        "name": { "type": "string" },
+        "scope": { "const": "local" },
+        "installed": { "$ref": "#/$defs/nullableString" },
+        "latest": { "$ref": "#/$defs/nullableString" },
+        "selected": { "$ref": "#/$defs/nullableString" },
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "$ref": "#/$defs/nullableString" },
+        "updateCommand": { "type": "string" },
+        "updated": { "const": false }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "path"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "path": { "$ref": "#/$defs/nullableString" }
+      }
+    }
+  }
+}

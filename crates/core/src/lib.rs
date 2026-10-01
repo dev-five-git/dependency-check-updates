@@ -9,6 +9,7 @@
 pub mod error;
 pub mod http;
 pub mod manifest;
+pub mod metadata;
 pub mod patch;
 pub mod toml_decor;
 pub mod types;
@@ -22,6 +23,7 @@ pub use http::{
     DEFAULT_MAX_CONCURRENT_REQUESTS, build_client, resolve_batch_concurrent, send_checked,
 };
 pub use manifest::{ManifestHandler, ParsedManifest, Scanner};
+pub use metadata::MetadataCache;
 pub use patch::{Patch, apply_byte_patches};
 pub use toml_decor::replace_string_preserving_decor;
 pub use types::{

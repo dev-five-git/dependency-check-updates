@@ -63,10 +63,16 @@ pub(crate) fn targets_for_job(
     targets
 }
 
-pub(crate) async fn cleanup_with_progress(targets: Vec<CleanupTarget>) -> String {
+#[derive(Default)]
+pub(crate) struct CleanupReport {
+    pub summary: String,
+    pub diagnostics: Vec<crate::report::Diagnostic>,
+}
+
+pub(crate) async fn cleanup_with_progress(targets: Vec<CleanupTarget>) -> CleanupReport {
     let len = targets.len();
     if len == 0 {
-        return String::new();
+        return CleanupReport::default();
     }
 
     let pb = ProgressBar::new(len as u64);
@@ -81,13 +87,28 @@ pub(crate) async fn cleanup_with_progress(targets: Vec<CleanupTarget>) -> String
 
     let mut removals = FuturesUnordered::new();
     for target in targets {
-        removals.push(tokio::task::spawn_blocking(move || remove_target(target)));
+        removals.push(async move {
+            let worker_target = target.clone();
+            (
+                target,
+                tokio::task::spawn_blocking(move || remove_target(worker_target)).await,
+            )
+        });
     }
 
     let mut removed = Vec::with_capacity(len);
     let mut total_bytes = 0_u64;
+    let mut diagnostics = Vec::new();
 
-    while let Some(outcome) = removals.next().await {
+    while let Some((target, outcome)) = removals.next().await {
+        let error = removal_error(&outcome);
+        if let Some(error) = error {
+            diagnostics.push(crate::report::Diagnostic {
+                code: "cleanup-failed".into(),
+                message: format!("{}: {error}", target.label),
+                path: Some(target.path.display().to_string()),
+            });
+        }
         if let Some(message) = absorb_outcome(outcome, &mut removed, &mut total_bytes) {
             pb.set_message(message);
         }
@@ -95,7 +116,11 @@ pub(crate) async fn cleanup_with_progress(targets: Vec<CleanupTarget>) -> String
     }
 
     pb.finish_and_clear();
-    render_cleanup_summary(&mut removed, total_bytes)
+    diagnostics.sort_by(|a, b| a.path.cmp(&b.path));
+    CleanupReport {
+        summary: render_cleanup_summary(&mut removed, total_bytes),
+        diagnostics,
+    }
 }
 
 /// Fold one worker's result into the running tally, returning the progress
@@ -106,6 +131,16 @@ pub(crate) async fn cleanup_with_progress(targets: Vec<CleanupTarget>) -> String
 /// which cannot be provoked by driving the public entry point — [`remove_target`]
 /// has no panic path — but is trivially constructed by awaiting a task that
 /// does panic.
+fn removal_error(
+    outcome: &Result<Option<Result<RemovalOutcome, io::Error>>, tokio::task::JoinError>,
+) -> Option<String> {
+    match outcome {
+        Ok(Some(Err(e))) => Some(e.to_string()),
+        Err(e) => Some(e.to_string()),
+        _ => None,
+    }
+}
+
 fn absorb_outcome(
     outcome: Result<Option<Result<RemovalOutcome, io::Error>>, tokio::task::JoinError>,
     removed: &mut Vec<RemovalOutcome>,
@@ -413,7 +448,9 @@ mod tests {
         let join_error = tokio::task::spawn_blocking(|| panic!("worker exploded"))
             .await
             .expect_err("the worker panicked");
-        assert!(absorb_outcome(Err(join_error), &mut removed, &mut total).is_none());
+        let outcome = Err(join_error);
+        assert!(removal_error(&outcome).unwrap().contains("worker exploded"));
+        assert!(absorb_outcome(outcome, &mut removed, &mut total).is_none());
 
         assert!(removed.is_empty());
         assert_eq!(total, 0);
@@ -421,7 +458,9 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_with_progress_is_silent_when_there_is_nothing_to_remove() {
-        assert_eq!(cleanup_with_progress(Vec::new()).await, "");
+        let report = cleanup_with_progress(Vec::new()).await;
+        assert_eq!(report.summary, "");
+        assert!(report.diagnostics.is_empty());
     }
 
     #[tokio::test]
@@ -467,6 +506,10 @@ mod tests {
 
         // Only the two successful removals are listed, sorted by label, and
         // the total is their sum.
+        assert_eq!(summary.diagnostics.len(), 1);
+        assert_eq!(summary.diagnostics[0].code, "cleanup-failed");
+        assert_eq!(summary.diagnostics[0].path.as_deref(), undeletable.to_str());
+        let summary = summary.summary;
         let lines: Vec<&str> = summary.lines().collect();
         assert_eq!(lines.len(), 3, "got: {summary}");
         assert!(lines[0].contains("app:bun.lock"));
@@ -487,8 +530,9 @@ mod tests {
             },
             display_path: String::new(),
             text: String::new(),
-            handler: &dependency_check_updates_node::NodeHandler,
+            handler: Box::new(dependency_check_updates_node::NodeHandler),
             deps: Vec::new(),
+            document: None,
         };
 
         assert!(targets_for_job(&job, true, true).is_empty());
@@ -516,8 +560,9 @@ mod tests {
             },
             display_path: "package.json".to_owned(),
             text: String::new(),
-            handler: &dependency_check_updates_node::NodeHandler,
+            handler: Box::new(dependency_check_updates_node::NodeHandler),
             deps: Vec::new(),
+            document: None,
         };
 
         let targets = targets_for_job(&job, true, true);

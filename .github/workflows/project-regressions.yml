@@ -1,0 +1,66 @@
+name: Project regression tests
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  minimum-rust:
+    name: Minimum Rust 1.88
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+      - run: cargo check --locked --workspace --all-targets --all-features
+      - run: cargo test --locked --workspace
+
+  project-regressions:
+    name: Deterministic regressions (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Fixed-response tests and native filesystem regressions
+        run: cargo test --locked --workspace
+      - name: Both CLI aliases
+        run: |
+          cargo run --locked -p dependency-check-updates --bin dcu -- --help
+          cargo run --locked -p dependency-check-updates --bin dependency-check-updates -- --help
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Fixed-response native bridge and packed npm installation
+        run: |
+          bun install --frozen-lockfile --ignore-scripts
+          bun run --cwd bridge/node test
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: false
+      - name: Build and install Python wheel, exercise both aliases
+        run: |
+          uvx --from "maturin>=1.8,<2" maturin build --locked --manifest-path bridge/python/Cargo.toml --out target/wheel-smoke
+          uv run --no-project python bridge/python/test_wheel.py target/wheel-smoke
+
+  crate-packaging:
+    name: Verify distributable Rust crates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo package --locked --workspace --exclude dependency-check-updates-napi --exclude dependency-check-updates-python-bridge

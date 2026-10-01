@@ -273,10 +273,10 @@ impl GitHubActionsRegistry {
         let mut seen: HashSet<&str> = HashSet::with_capacity(deps.len());
         let mut unique_repos: Vec<String> = Vec::with_capacity(deps.len());
         for dep in deps {
-            if let Some(key) = Self::repo_key(&dep.name) {
-                if seen.insert(key) {
-                    unique_repos.push(key.to_owned());
-                }
+            if let Some(key) = Self::repo_key(&dep.name)
+                && seen.insert(key)
+            {
+                unique_repos.push(key.to_owned());
             }
         }
 
