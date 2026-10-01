@@ -1,5 +1,5 @@
 const { expect, test } = require("bun:test");
-const { mkdtempSync, cpSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync } = require("node:fs");
+const { mkdtempSync, cpSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync, realpathSync } = require("node:fs");
 const { delimiter, join } = require("node:path");
 const { tmpdir } = require("node:os");
 
@@ -17,7 +17,9 @@ async function command(args, cwd, expectedStatus = 0) {
 
 test("packed npm CLI loads its separately installed native platform package", async () => {
   const repo = join(__dirname, "..");
-  const root = mkdtempSync(join(tmpdir(), "dcu-npm-pack-"));
+  // Windows runners expose an 8.3 TEMP path (RUNNER~1). Bun records canonical
+  // workspace paths, so use that spelling before creating or installing them.
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "dcu-npm-pack-")));
   const copy = join(root, "package"); mkdirSync(copy);
   try {
     const suffix = { "win32-x64": "win32-x64-msvc", "darwin-x64": "darwin-x64", "darwin-arm64": "darwin-arm64", "linux-x64": "linux-x64-gnu" }[`${process.platform}-${process.arch}`];
