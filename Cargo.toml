@@ -11,7 +11,7 @@ default-members = ["crates/cli", "crates/core", "crates/node", "crates/rust", "c
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/dev-five-git/dependency-check-updates"
 homepage = "https://github.com/dev-five-git/dependency-check-updates"

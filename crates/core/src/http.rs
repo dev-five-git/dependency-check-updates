@@ -35,7 +35,12 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// TLS backend at the platform level, not a recoverable runtime condition.
 #[must_use]
 pub fn build_client() -> Client {
+    build_client_with_redirects(reqwest::redirect::Policy::limited(10))
+}
+
+pub(crate) fn build_client_with_redirects(policy: reqwest::redirect::Policy) -> Client {
     Client::builder()
+        .redirect(policy)
         .timeout(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
         .user_agent(concat!(
             "dependency-check-updates/",

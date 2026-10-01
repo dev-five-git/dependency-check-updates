@@ -11,6 +11,7 @@ documentation.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories = ["command-line-utilities", "development-tools"]
+include = ["src/**", "tests/**", "data/**", "schemas/**", "Cargo.toml"]
 
 [[bin]]
 name = "dependency-check-updates"
@@ -34,6 +35,7 @@ dependency-check-updates-docker.workspace = true
 rustls.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -41,10 +43,25 @@ futures.workspace = true
 owo-colors.workspace = true
 semver.workspace = true
 indicatif.workspace = true
+reqwest.workspace = true
+toml_edit.workspace = true
+regex = "1.12"
+quick-xml = "0.39"
+sha2 = "0.10"
+sha1 = "0.10"
+tempfile.workspace = true
+fs2 = "0.4.3"
+base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization"] }
+
+[target.'cfg(unix)'.dependencies]
+xattr = "1.6.1"
 
 [dev-dependencies]
 rstest.workspace = true
-tempfile.workspace = true
+wiremock.workspace = true
 
 [lints]
 workspace = true

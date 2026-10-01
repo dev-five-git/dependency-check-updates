@@ -4,21 +4,20 @@ use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
-use reqwest::Client;
 use serde::Deserialize;
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use tokio::sync::Semaphore;
 use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
-    DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, current_req_is_prerelease, send_checked,
+    DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, MetadataCache, ResolvedVersion,
+    TargetLevel, current_req_is_prerelease,
 };
 
 /// npm registry client for looking up package versions.
 #[derive(Clone)]
 pub struct NpmRegistry {
-    client: Client,
+    cache: MetadataCache,
     semaphore: Arc<Semaphore>,
     base_url: Arc<str>,
 }
@@ -105,8 +104,14 @@ impl NpmRegistry {
     /// Panics if the HTTP client cannot be built (should never happen with default settings).
     #[must_use]
     pub fn with_base_url(base_url: &str) -> Self {
+        Self::with_cache(base_url, MetadataCache::new())
+    }
+
+    /// Construct a registry sharing run-scoped metadata with other clients.
+    #[must_use]
+    pub fn with_cache(base_url: &str, cache: MetadataCache) -> Self {
         Self {
-            client: build_client(),
+            cache,
             semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS)),
             base_url: Arc::from(base_url.trim_end_matches('/')),
         }
@@ -151,10 +156,13 @@ impl NpmRegistry {
             "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*"
         };
 
-        let request = self.client.get(&url).header("Accept", accept);
-        let response = send_checked(request, name).await?;
-
-        response.json().await.map_err(|e| DcuError::RegistryLookup {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("accept", accept.parse().expect("static Accept header"));
+        let response = self
+            .cache
+            .get(&url, headers, MetadataCache::METADATA_LIMIT, name)
+            .await?;
+        serde_json::from_slice(&response).map_err(|e| DcuError::RegistryLookup {
             package: name.to_owned(),
             detail: format!("failed to parse response: {e}"),
         })

@@ -14,8 +14,10 @@ pub(crate) fn init_tracing(verbose: u8) {
         .unwrap_or_else(|_| EnvFilter::new(format!("dependency_check_updates={level}")));
 
     fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(filter)
         .with_target(false)
         .compact()
-        .init();
+        .try_init()
+        .ok();
 }

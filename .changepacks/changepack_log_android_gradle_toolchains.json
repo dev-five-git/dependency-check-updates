@@ -1,0 +1,15 @@
+{
+  "changes": {
+    "bridge/node/package.json": "Minor",
+    "bridge/python/pyproject.toml": "Minor",
+    "crates/cli/Cargo.toml": "Minor",
+    "crates/core/Cargo.toml": "Minor",
+    "crates/node/Cargo.toml": "Minor",
+    "crates/rust/Cargo.toml": "Minor",
+    "crates/python/Cargo.toml": "Minor",
+    "crates/github/Cargo.toml": "Minor",
+    "crates/docker/Cargo.toml": "Minor"
+  },
+  "note": "Add static Android/Gradle and project toolchain updates, explicit local tool queries, compatibility-aware selection, integrity checks, recoverable transactions, structured diagnostics, and deterministic cross-platform packaging regressions. Minimum supported Rust is now 1.88; legacy JSON output remains available with --json-legacy.",
+  "date": "2026-10-01T01:43:51Z"
+}

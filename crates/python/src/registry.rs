@@ -3,20 +3,19 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
-    DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, current_req_is_prerelease, parse_and_select, send_checked,
+    DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, MetadataCache, ResolvedVersion,
+    TargetLevel, current_req_is_prerelease, parse_and_select,
 };
 
 /// `PyPI` registry client.
 #[derive(Clone)]
 pub struct PyPiRegistry {
-    client: Client,
+    cache: MetadataCache,
     semaphore: Arc<Semaphore>,
     base_url: Arc<str>,
 }
@@ -70,8 +69,14 @@ impl PyPiRegistry {
     /// Panics if the HTTP client cannot be built.
     #[must_use]
     pub fn with_base_url(base_url: &str) -> Self {
+        Self::with_cache(base_url, MetadataCache::new())
+    }
+
+    /// Share run-scoped, bounded metadata requests with other registry clients.
+    #[must_use]
+    pub fn with_cache(base_url: &str, cache: MetadataCache) -> Self {
         Self {
-            client: build_client(),
+            cache,
             semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS)),
             base_url: Arc::from(base_url.trim_end_matches('/')),
         }
@@ -93,10 +98,16 @@ impl PyPiRegistry {
         let url = format!("{}/{normalized}/json", self.base_url);
         debug!(package = name, %url, "fetching PyPI package info");
 
-        let request = self.client.get(&url);
-        let response = send_checked(request, name).await?;
-
-        response.json().await.map_err(|e| DcuError::RegistryLookup {
+        let response = self
+            .cache
+            .get(
+                &url,
+                reqwest::header::HeaderMap::new(),
+                MetadataCache::METADATA_LIMIT,
+                name,
+            )
+            .await?;
+        serde_json::from_slice(&response).map_err(|e| DcuError::RegistryLookup {
             package: name.to_owned(),
             detail: format!("failed to parse response: {e}"),
         })
@@ -268,6 +279,30 @@ mod tests {
             section: DependencySection::ProjectDependencies,
             path_version: None,
         }
+    }
+
+    #[tokio::test]
+    async fn shared_metadata_keeps_normalized_names_and_pin_specific_targets() {
+        install_crypto_provider();
+        let server = MockServer::start().await;
+        Mock::given(path("/my-package/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "info":{"version":"2.0.1"},"releases":{"1.0.1":[{}],"1.2.0":[{}],"2.0.1":[{}]}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let cache = dependency_check_updates_core::MetadataCache::new();
+        let one = PyPiRegistry::with_cache(&server.uri(), cache.clone());
+        let two = PyPiRegistry::with_cache(&server.uri(), cache);
+        let first = make_dep("My_Package", "1.0.0");
+        let second = make_dep("my-package", "2.0.0");
+        let (a, b) = tokio::join!(
+            one.resolve_version(&first, TargetLevel::Patch),
+            two.resolve_version(&second, TargetLevel::Patch)
+        );
+        assert_eq!(a.unwrap().selected.as_deref(), Some("1.0.1"));
+        assert_eq!(b.unwrap().selected.as_deref(), Some("2.0.1"));
     }
 
     #[test]

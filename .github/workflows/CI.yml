@@ -19,6 +19,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  project-regressions:
+    uses: ./.github/workflows/project-regressions.yml
+
   test:
     name: Test
     runs-on: ${{ matrix.platform }}
@@ -111,6 +114,7 @@ jobs:
       pull-requests: write
       contents: write
     needs:
+      - project-regressions
       - test
       - coverage-test
     steps:

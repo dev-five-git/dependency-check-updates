@@ -3,6 +3,7 @@ name = "dependency-check-updates-python-bridge"
 version = "0.1.0"
 description = "Python bridge for dependency-check-updates (standalone binary)"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

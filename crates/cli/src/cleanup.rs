@@ -21,9 +21,14 @@ pub(crate) fn lockfiles_for(kind: ManifestKind) -> &'static [&'static str] {
         ManifestKind::PyProjectToml => &["uv.lock", "poetry.lock", "Pipfile.lock"],
         // Workflow and container manifests have no companion lockfile: the
         // resolved digest lives in the registry, not in the working tree.
-        ManifestKind::GitHubWorkflow | ManifestKind::Dockerfile | ManifestKind::DockerCompose => {
-            &[]
-        }
+        ManifestKind::GitHubWorkflow
+        | ManifestKind::Dockerfile
+        | ManifestKind::DockerCompose
+        | ManifestKind::Gradle
+        | ManifestKind::GradleCatalog
+        | ManifestKind::GradleProperties
+        | ManifestKind::GradleWrapper
+        | ManifestKind::ToolVersions => &[],
     }
 }
 
@@ -43,9 +48,14 @@ pub(crate) fn installed_dirs_for(kind: ManifestKind) -> &'static [&'static str] 
         // Nothing is installed next to a workflow or container manifest.
         // Removing an image's local layers is `docker image prune`'s job, and
         // wiping it here would silently force a multi-gigabyte re-pull.
-        ManifestKind::GitHubWorkflow | ManifestKind::Dockerfile | ManifestKind::DockerCompose => {
-            &[]
-        }
+        ManifestKind::GitHubWorkflow
+        | ManifestKind::Dockerfile
+        | ManifestKind::DockerCompose
+        | ManifestKind::Gradle
+        | ManifestKind::GradleCatalog
+        | ManifestKind::GradleProperties
+        | ManifestKind::GradleWrapper
+        | ManifestKind::ToolVersions => &[],
     }
 }
 

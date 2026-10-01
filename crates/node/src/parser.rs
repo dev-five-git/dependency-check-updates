@@ -47,15 +47,15 @@ impl PackageJsonManifest {
         for &(section, key) in DEPENDENCY_SECTIONS {
             if let Some(Value::Object(map)) = root.get(key) {
                 for (name, value) in map {
-                    if let Some(version_str) = value.as_str() {
-                        if is_version_spec(version_str) {
-                            deps.push(DependencySpec {
-                                name: name.clone(),
-                                current_req: version_str.to_owned(),
-                                section,
-                                path_version: None,
-                            });
-                        }
+                    if let Some(version_str) = value.as_str()
+                        && is_version_spec(version_str)
+                    {
+                        deps.push(DependencySpec {
+                            name: name.clone(),
+                            current_req: version_str.to_owned(),
+                            section,
+                            path_version: None,
+                        });
                     }
                     // Non-string values (object form like { "version": "^1.0" }) are skipped.
                 }

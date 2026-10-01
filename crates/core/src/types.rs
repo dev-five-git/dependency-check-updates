@@ -22,6 +22,16 @@ pub enum ManifestKind {
     /// Docker Compose project file (`compose.y(a)ml`,
     /// `docker-compose.y(a)ml`, and their `.<profile>.` variants).
     DockerCompose,
+    /// Gradle Groovy or Kotlin build/settings scripts.
+    Gradle,
+    /// Gradle version catalog.
+    GradleCatalog,
+    /// Project Gradle properties (version references only).
+    GradleProperties,
+    /// Gradle distribution and optional checksum.
+    GradleWrapper,
+    /// Project development tool pins and channels.
+    ToolVersions,
 }
 
 impl ManifestKind {
@@ -38,6 +48,21 @@ impl ManifestKind {
         let file_name = path.file_name()?.to_str()?;
         match file_name {
             "package.json" => Some(Self::PackageJson),
+            "build.gradle" | "build.gradle.kts" | "settings.gradle" | "settings.gradle.kts" => {
+                Some(Self::Gradle)
+            }
+            "libs.versions.toml" if path.parent()?.file_name()?.to_str()? == "gradle" => {
+                Some(Self::GradleCatalog)
+            }
+            "gradle.properties" => Some(Self::GradleProperties),
+            "gradle-wrapper.properties" => Some(Self::GradleWrapper),
+            ".nvmrc"
+            | ".node-version"
+            | "rust-toolchain"
+            | "rust-toolchain.toml"
+            | ".tool-versions"
+            | "mise.toml"
+            | ".mise.toml" => Some(Self::ToolVersions),
             "Cargo.toml" => Some(Self::CargoToml),
             "pyproject.toml" => Some(Self::PyProjectToml),
             "action.yml" | "action.yaml" => Some(Self::GitHubWorkflow),
@@ -114,6 +139,11 @@ impl std::fmt::Display for ManifestKind {
             Self::GitHubWorkflow => write!(f, "GitHub workflow"),
             Self::Dockerfile => write!(f, "Dockerfile"),
             Self::DockerCompose => write!(f, "Docker Compose"),
+            Self::Gradle => write!(f, "Gradle"),
+            Self::GradleCatalog => write!(f, "Gradle version catalog"),
+            Self::GradleProperties => write!(f, "Gradle properties"),
+            Self::GradleWrapper => write!(f, "Gradle wrapper"),
+            Self::ToolVersions => write!(f, "Development tools"),
         }
     }
 }
@@ -149,6 +179,14 @@ pub enum DependencySection {
     /// Container image references: Dockerfile `FROM` instructions and the
     /// `image:` key of Compose services / workflow job containers.
     DockerImage,
+    /// Maven artifact declarations.
+    Maven,
+    /// Gradle plugin marker declarations.
+    GradlePlugin,
+    /// Android compile/target SDK levels, never minSdk.
+    AndroidSdk,
+    /// Project tool version pins (not support ranges).
+    Toolchain,
 }
 
 impl DependencySection {
@@ -165,6 +203,10 @@ impl DependencySection {
             Self::ProjectDependencies => "project.dependencies",
             Self::GitHubActions => "uses",
             Self::DockerImage => "image",
+            Self::Maven => "maven",
+            Self::GradlePlugin => "plugins",
+            Self::AndroidSdk => "android-sdk",
+            Self::Toolchain => "toolchain",
         }
     }
 }

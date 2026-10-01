@@ -1,0 +1,4 @@
+[tools]
+node = "20"
+rust = "stable" # Moving channel remains stable
+pnpm = "10.12.1"

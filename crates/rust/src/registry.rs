@@ -2,20 +2,19 @@
 
 use std::sync::Arc;
 
-use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tracing::{debug, trace};
 
 use dependency_check_updates_core::{
-    DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, ResolvedVersion, TargetLevel,
-    build_client, send_checked,
+    DEFAULT_MAX_CONCURRENT_REQUESTS, DcuError, DependencySpec, MetadataCache, ResolvedVersion,
+    TargetLevel,
 };
 
 /// crates.io registry client.
 #[derive(Clone)]
 pub struct CratesIoRegistry {
-    client: Client,
+    cache: MetadataCache,
     semaphore: Arc<Semaphore>,
     base_url: Arc<str>,
 }
@@ -49,8 +48,14 @@ impl CratesIoRegistry {
     /// Panics if the HTTP client cannot be built.
     #[must_use]
     pub fn with_base_url(base_url: &str) -> Self {
+        Self::with_cache(base_url, MetadataCache::new())
+    }
+
+    /// Share run-scoped, bounded metadata requests with other registry clients.
+    #[must_use]
+    pub fn with_cache(base_url: &str, cache: MetadataCache) -> Self {
         Self {
-            client: build_client(),
+            cache,
             semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS)),
             base_url: Arc::from(base_url.trim_end_matches('/')),
         }
@@ -70,17 +75,20 @@ impl CratesIoRegistry {
         let url = format!("{}/crates/{name}/versions", self.base_url);
         debug!(crate_name = name, %url, "fetching crate versions");
 
-        let request = self.client.get(&url);
-        let response = send_checked(request, name).await?;
-
+        let response = self
+            .cache
+            .get(
+                &url,
+                reqwest::header::HeaderMap::new(),
+                MetadataCache::METADATA_LIMIT,
+                name,
+            )
+            .await?;
         let resp: CratesIoResponse =
-            response
-                .json()
-                .await
-                .map_err(|e| DcuError::RegistryLookup {
-                    package: name.to_owned(),
-                    detail: format!("failed to parse response: {e}"),
-                })?;
+            serde_json::from_slice(&response).map_err(|e| DcuError::RegistryLookup {
+                package: name.to_owned(),
+                detail: format!("failed to parse response: {e}"),
+            })?;
 
         Ok(resp.versions)
     }
@@ -245,6 +253,26 @@ mod tests {
             section: DependencySection::Dependencies,
             path_version: None,
         }
+    }
+
+    #[tokio::test]
+    async fn shared_metadata_preserves_pin_specific_targets_with_one_request() {
+        install_tls_provider();
+        let server = MockServer::start().await;
+        Mock::given(path("/crates/serde/versions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"versions":[
+            {"num":"1.0.1","yanked":false},{"num":"1.2.0","yanked":false},{"num":"2.0.1","yanked":false}
+        ]}))).expect(1).mount(&server).await;
+        let cache = MetadataCache::new();
+        let one = CratesIoRegistry::with_cache(&server.uri(), cache.clone());
+        let two = CratesIoRegistry::with_cache(&server.uri(), cache);
+        let first = serde_dep("1.0.0");
+        let second = serde_dep("2.0.0");
+        let (a, b) = tokio::join!(
+            one.resolve_version(&first, TargetLevel::Patch),
+            two.resolve_version(&second, TargetLevel::Patch)
+        );
+        assert_eq!(a.unwrap().selected.as_deref(), Some("1.0.1"));
+        assert_eq!(b.unwrap().selected.as_deref(), Some("2.0.1"));
     }
 
     async fn mock_versions_endpoint(
