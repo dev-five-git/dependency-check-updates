@@ -129,6 +129,7 @@ jobs:
     outputs:
       changepacks: ${{ steps.changepacks.outputs.changepacks }}
       release_assets_urls: ${{ steps.changepacks.outputs.release_assets_urls }}
+      pending_releases: ${{ steps.changepacks.outputs.pending_releases }}
 
   # node
   node-build:
@@ -366,6 +367,31 @@ jobs:
         with:
           upload_url: ${{ fromJson(needs.changepacks.outputs.release_assets_urls)['bridge/python/pyproject.toml'] }}
           asset_path: "*/*.whl"
+
+  finalize-releases:
+    name: Finalize published releases
+    runs-on: ubuntu-latest
+    needs: [changepacks, node-publish, python-publish, upload-assets]
+    permissions:
+      contents: write
+    # Current changepacks creates durable draft receipts for downstream npm/PyPI
+    # publishers. Publish those releases only after their packages and assets
+    # are available; failed publication must leave the drafts recoverable.
+    if: >-
+      ${{ always() && github.ref == 'refs/heads/main'
+          && needs.changepacks.result == 'success'
+          && needs.changepacks.outputs.pending_releases != ''
+          && needs.changepacks.outputs.pending_releases != '{}'
+          && (needs.node-publish.result == 'success'
+              || !contains(needs.changepacks.outputs.pending_releases, 'bridge/node/package.json'))
+          && (needs.python-publish.result == 'success'
+              || !contains(needs.changepacks.outputs.pending_releases, 'bridge/python/pyproject.toml'))
+          && (needs.upload-assets.result == 'success'
+              || !contains(needs.changepacks.outputs.changepacks, 'crates/cli/Cargo.toml')) }}
+    steps:
+      - uses: changepacks/action@main
+        with:
+          finalize_releases: ${{ needs.changepacks.outputs.pending_releases }}
 
   upload-assets:
     needs: changepacks
