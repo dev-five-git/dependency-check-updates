@@ -336,6 +336,34 @@ pub(crate) fn check_with_rules(values: &[(&str, &str)], rules: &Rules) -> String
 mod tests {
     use super::*;
     #[test]
+    fn undocumented_sdk_kotlin_and_jdk_versions_remain_unverified() {
+        let base = [
+            ("com.android.tools.build:gradle", "8.7.2"),
+            ("gradle", "8.9"),
+            ("jdk", "17"),
+        ];
+        for item in [
+            ("android.compileSdk", "999"),
+            ("android.targetSdk", "preview"),
+            ("org.jetbrains.kotlin:kotlin-gradle-plugin", "99.0.0"),
+            ("org.jetbrains.kotlin:kotlin-gradle-plugin", "2.1.99"),
+            ("jdk", "99"),
+        ] {
+            let mut values = base.to_vec();
+            values.push(item);
+            assert!(check(&values).starts_with("unverified:"), "{item:?}");
+        }
+        assert!(
+            check(&[
+                ("org.jetbrains.kotlin:kotlin-gradle-plugin", "2.1.21"),
+                ("gradle", "1.0"),
+                ("jdk", "17")
+            ])
+            .starts_with("conflict:")
+        );
+        assert!(check(&[("gradle", "9.0"), ("jdk", "11")]).starts_with("conflict:"));
+    }
+    #[test]
     fn known_conflicts_and_unknown() {
         assert!(
             check(&[

@@ -284,6 +284,46 @@ fn merge_map<K: Ord, V: PartialEq>(
 mod tests {
     use super::*;
     #[test]
+    fn kotlin_extension_bounds_overlap_and_file_limits_are_enforced() {
+        let text = include_str!("../data/compatibility-v1.json");
+        let mut value: serde_json::Value = serde_json::from_str(text).unwrap();
+        let original = value["kotlin"][0].clone();
+        value["kotlin"]
+            .as_array_mut()
+            .unwrap()
+            .push(original.clone());
+        assert!(Rules::parse(&value.to_string()).is_err());
+        value["kotlin"] = serde_json::json!([original.clone()]);
+        value["kotlin"][0]["maxGradle"] = "1.0".into();
+        assert!(Rules::parse(&value.to_string()).is_err());
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("rules.json");
+        value["kotlin"] = serde_json::json!([original.clone()]);
+        value["kotlin"][0]["bytecodeMinAgp"] = "8.1".into();
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert!(Rules::load(Some(&path)).is_err());
+        value["kotlin"] = serde_json::json!([original]);
+        for key in ["from", "to"] {
+            value["kotlin"][0][key] = "99.0.0".into();
+        }
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert!(
+            Rules::load(Some(&path))
+                .unwrap()
+                .kotlin
+                .iter()
+                .any(|r| r.from == "99.0.0")
+        );
+        std::fs::write(&path, vec![b' '; 1024 * 1024 + 1]).unwrap();
+        assert!(
+            Rules::load(Some(&path))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("size limit")
+        );
+    }
+    #[test]
     fn gregorian_dates_and_freshness_are_checked_deterministically() {
         for invalid in [
             "2026-99-99",

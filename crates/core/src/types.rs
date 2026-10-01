@@ -314,6 +314,17 @@ pub enum BumpType {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_manifest_names_are_distinct_and_human_readable() {
+        for (kind, label) in [
+            (super::ManifestKind::GradleCatalog, "Gradle version catalog"),
+            (super::ManifestKind::GradleProperties, "Gradle properties"),
+            (super::ManifestKind::GradleWrapper, "Gradle wrapper"),
+            (super::ManifestKind::ToolVersions, "Development tools"),
+        ] {
+            assert_eq!(kind.to_string(), label);
+        }
+    }
     use super::*;
     use rstest::rstest;
     use std::str::FromStr;

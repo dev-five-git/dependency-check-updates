@@ -122,6 +122,47 @@ fn parse(
 mod tests {
     use super::*;
     #[test]
+    fn basic_anonymous_duplicate_and_invalid_auth_configurations() {
+        let config = serde_json::json!({"schemaVersion":1,"repositories":[
+            {"url":"https://repo.example/maven", "usernameEnv":"USER", "passwordEnv":"PASS"},
+            {"url":"https://repo.example/public"}
+        ]});
+        let text = config.to_string();
+        let parsed = parse(&text, |name| {
+            Some(if name == "USER" { "user" } else { "pass" }.into())
+        })
+        .unwrap();
+        assert_eq!(
+            parsed["https://repo.example/maven"][AUTHORIZATION],
+            "Basic dXNlcjpwYXNz"
+        );
+        assert!(parsed["https://repo.example/public"].is_empty());
+        for repositories in [
+            serde_json::json!([{"url":"https://repo.example/","tokenEnv":"BAD-NAME"}]),
+            serde_json::json!([{"url":"https://repo.example/","usernameEnv":"USER"}]),
+            serde_json::json!([{"url":"https://repo.example/"},{"url":"https://repo.example/"}]),
+        ] {
+            assert!(
+                parse(
+                    &serde_json::json!({"schemaVersion":1,"repositories":repositories}).to_string(),
+                    |_| Some("value".into())
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            parse(
+                &text.replace("\"schemaVersion\":1", "\"schemaVersion\":2"),
+                |_| Some("value".into())
+            )
+            .is_err()
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, vec![b' '; 1024 * 1024 + 1]).unwrap();
+        assert!(load(&path).unwrap_err().to_string().contains("size limit"));
+    }
+    #[test]
     fn explicit_auth_validation_never_prints_secrets() {
         let config = r#"{"schemaVersion":1,"repositories":[{"url":"https://repo.example/maven/","tokenEnv":"TOKEN"}]}"#;
         let result = parse(config, |_| Some("secret-token".into())).unwrap();

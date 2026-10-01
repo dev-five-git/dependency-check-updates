@@ -113,3 +113,46 @@ where
     }))
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    #[tokio::test]
+    async fn checked_requests_preserve_success_and_report_http_and_network_failures() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server = MockServer::start().await;
+        Mock::given(path("/ok"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(path("/missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let client = build_client();
+        assert!(
+            send_checked(client.get(format!("{}/ok", server.uri())), "pkg")
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        assert!(
+            send_checked(client.get(format!("{}/missing", server.uri())), "pkg")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("404")
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        assert!(
+            send_checked(client.get(format!("http://{address}/")), "pkg")
+                .await
+                .is_err()
+        );
+    }
+}

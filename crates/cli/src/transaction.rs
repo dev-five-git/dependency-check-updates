@@ -157,7 +157,25 @@ fn digest(bytes: &[u8]) -> String {
 // Stable sibling lock identities survive atomic target replacement. Do not
 // unlink them: unlinking a locked inode allows a second process to lock a new
 // inode with the same name. OS locks themselves vanish when a process dies.
-fn target_locks<'a>(paths: impl Iterator<Item = &'a Path>) -> Result<Vec<std::fs::File>, String> {
+// Explicit unlock matters on Unix: a concurrent fork may briefly inherit the
+// open-file description before exec closes it. Closing only the parent's fd
+// can otherwise leave a completed transaction apparently locked by that child.
+struct FileLock(std::fs::File);
+
+impl FileLock {
+    fn acquire(file: std::fs::File) -> Result<Self, std::io::Error> {
+        fs2::FileExt::try_lock_exclusive(&file)?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
+fn target_locks<'a>(paths: impl Iterator<Item = &'a Path>) -> Result<Vec<FileLock>, String> {
     let mut paths: Vec<_> = paths
         .map(std::fs::canonicalize)
         .collect::<Result<_, _>>()
@@ -181,9 +199,10 @@ fn target_locks<'a>(paths: impl Iterator<Item = &'a Path>) -> Result<Vec<std::fs
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| e.to_string())?;
-        fs2::FileExt::try_lock_exclusive(&file)
-            .map_err(|_| format!("update target is busy: {}", path.display()))?;
-        locks.push(file);
+        locks.push(
+            FileLock::acquire(file)
+                .map_err(|_| format!("update target is busy: {}", path.display()))?,
+        );
     }
     Ok(locks)
 }
@@ -252,7 +271,7 @@ pub(crate) fn recover(root: &Path, finish: bool) -> Result<bool, String> {
         .write(true)
         .open(receipt_path)
         .map_err(|e| e.to_string())?;
-    fs2::FileExt::try_lock_exclusive(&handle)
+    let _receipt_lock = FileLock::acquire(handle.try_clone().map_err(|e| e.to_string())?)
         .map_err(|_| "transaction is still active or recovery is already running")?;
     let mut bytes = Vec::new();
     std::io::Read::by_ref(&mut handle)
@@ -769,7 +788,13 @@ fn commit_with(
         .suffix("active.json")
         .tempfile_in(root)
         .map_err(|e| simple(e.to_string()))?;
-    fs2::FileExt::try_lock_exclusive(receipt.as_file()).map_err(|e| simple(e.to_string()))?;
+    let _receipt_lock = FileLock::acquire(
+        receipt
+            .as_file()
+            .try_clone()
+            .map_err(|e| simple(e.to_string()))?,
+    )
+    .map_err(|e| simple(e.to_string()))?;
     let entries: Vec<_> = staged
         .iter()
         .map(|s| ReceiptEntry {
@@ -964,6 +989,26 @@ mod tests {
             })
             .collect();
         (dir, changes)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_lock_is_released_even_if_an_inherited_description_remains_open() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("lock");
+        let file = std::fs::File::create(&path).unwrap();
+        let inherited = file.try_clone().unwrap();
+        let guard = FileLock::acquire(file).unwrap();
+        let second = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(fs2::FileExt::try_lock_exclusive(&second).is_err());
+        drop(guard);
+        fs2::FileExt::try_lock_exclusive(&second).unwrap();
+        fs2::FileExt::unlock(&second).unwrap();
+        drop(inherited);
     }
 
     #[test]

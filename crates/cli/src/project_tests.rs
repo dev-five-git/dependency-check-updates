@@ -111,6 +111,7 @@ fn fixture(server: &MockServer) -> TempDir {
                 .replace("google()", &format!("maven(\"{}\")", server.uri()))
                 .replace("mavenCentral()", "")
                 .replace("gradlePluginPortal()", "")
+                .replace("\r\n", "\n")
                 .replace('\n', "\r\n"),
         );
     }

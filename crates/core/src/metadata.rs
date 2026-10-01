@@ -312,6 +312,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chunked_bodies_cannot_bypass_the_response_size_limit() {
+        use std::io::{Read, Write};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/stream", listener.local_addr().unwrap());
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\na\r\n1234567890\r\n0\r\n\r\n").unwrap();
+        });
+        let cache = MetadataCache::default();
+        assert!(
+            cache
+                .get(&url, HeaderMap::new(), 4, "streamed")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("size limit")
+        );
+        peer.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn authorization_and_repository_urls_are_distinct_cache_keys() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let server = MockServer::start().await;
