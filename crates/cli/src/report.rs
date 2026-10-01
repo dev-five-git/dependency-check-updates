@@ -103,7 +103,7 @@ pub(crate) struct Summary {
     pub incomplete: usize,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ApplyOutcome {
     #[default]

@@ -214,6 +214,7 @@ async fn registry() -> (MockServer, ToolRegistry) {
         npm: uri,
         yarn: format!("{}/yarn-tags", server.uri()),
         yarn_downloads: server.uri(),
+        ..Endpoints::default()
     });
     (server, registry)
 }
@@ -453,7 +454,7 @@ async fn compatible_tools_keep_short_pins_filters_targets_and_unknown_states() {
 
 #[tokio::test]
 async fn compatible_selection_isolates_unconnected_builds() {
-    let (_, registry) = registry().await;
+    let (_server, registry) = registry().await;
     let tmp = TempDir::new().unwrap();
     for build in ["a", "b"] {
         write(
@@ -491,7 +492,7 @@ async fn compatible_selection_isolates_unconnected_builds() {
 
 #[tokio::test]
 async fn stale_and_future_rule_sources_are_reported_and_cannot_approve_updates() {
-    let (_, registry) = registry().await;
+    let (_server, registry) = registry().await;
     for date in ["1900-01-01", "9999-12-31"] {
         let tmp = TempDir::new().unwrap();
         let wrapper =

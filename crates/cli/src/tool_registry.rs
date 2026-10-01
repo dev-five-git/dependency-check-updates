@@ -28,6 +28,9 @@ pub(crate) struct Endpoints {
     pub android: String,
     pub jdk: String,
     pub npm: String,
+    pub crates_io: String,
+    pub pypi: String,
+    pub docker: Option<String>,
     pub yarn: String,
     pub yarn_downloads: String,
 }
@@ -43,6 +46,9 @@ impl Default for Endpoints {
             android: "https://dl.google.com/android/repository/repository2-1.xml".into(),
             jdk: "https://api.adoptium.net/v3/info/release_versions?image_type=jdk&release_type=ga&page_size=50&sort_method=DATE&sort_order=DESC".into(),
             npm: "https://registry.npmjs.org".into(),
+            crates_io: "https://crates.io/api/v1".into(),
+            pypi: "https://pypi.org/pypi".into(),
+            docker: None,
             yarn: "https://repo.yarnpkg.com/tags".into(),
             yarn_downloads: "https://repo.yarnpkg.com".into(),
         }

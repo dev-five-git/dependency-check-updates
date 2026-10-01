@@ -133,6 +133,8 @@ pub(crate) struct Failure {
 pub(crate) enum Step {
     Stage,
     Commit,
+    BeforeReplace,
+    AfterReplace,
     Rollback,
     Finalize,
 }
@@ -689,7 +691,7 @@ fn validate_windows_target(path: &Path) -> Result<(), String> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn commit_with(
+pub(crate) fn commit_with(
     root: &Path,
     mut changes: Vec<Change>,
     mut hook: impl FnMut(Step, usize, &Path) -> Result<(), String>,
@@ -831,7 +833,9 @@ fn commit_with(
             .and_then(|()| unchanged(&s.change.path, &s.change.original))
             .and_then(|()| {
                 attempted = true;
-                replace(&mut s.stage, &s.change.path)
+                hook(Step::BeforeReplace, i, &s.change.path)?;
+                replace(&mut s.stage, &s.change.path)?;
+                hook(Step::AfterReplace, i, &s.change.path)
             });
         match result {
             Ok(()) => s.committed = true,
@@ -864,9 +868,6 @@ fn commit_with(
                 if let Some(f) = s.backup {
                     let _ = f.keep();
                 }
-                if let Some(f) = s.stage {
-                    let _ = f.keep();
-                }
             }
             return Err(Failure {
                 detail: format!(
@@ -897,11 +898,6 @@ fn commit_with(
             if let Some(backup) = target.backup.take() {
                 backup.close().map_err(|e| {
                     completed(format!("files committed but backup cleanup failed: {e}"))
-                })?;
-            }
-            if let Some(stage) = target.stage.take() {
-                stage.close().map_err(|e| {
-                    completed(format!("files committed but stage cleanup failed: {e}"))
                 })?;
             }
             sync_directory(target.change.path.parent().unwrap()).map_err(completed)?;
@@ -1124,6 +1120,48 @@ mod tests {
         assert_eq!(non_lock_files(dir.path()), 2);
     }
 
+    #[test]
+    fn replacement_errors_reconcile_original_replaced_and_external_bytes() {
+        for step in [Step::BeforeReplace, Step::AfterReplace] {
+            let (dir, changes) = fixture();
+            let error = commit_with(dir.path(), changes, |at, _, _| {
+                if at == step {
+                    Err("replacement error".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .err()
+            .unwrap();
+            assert!(!error.recovery_required);
+            assert_eq!(
+                std::fs::read(dir.path().join("a.toml")).unwrap(),
+                b"old\r\n"
+            );
+        }
+        let (dir, changes) = fixture();
+        let error = commit_with(dir.path(), changes, |at, _, path| {
+            if at == Step::BeforeReplace {
+                std::fs::write(path, b"external").unwrap();
+                return Err("replacement state uncertain".into());
+            }
+            Ok(())
+        })
+        .err()
+        .unwrap();
+        assert!(error.recovery_required);
+        assert!(error.detail.contains("uncertain replacement state"));
+        assert_eq!(
+            std::fs::read(dir.path().join("a.toml")).unwrap(),
+            b"external"
+        );
+        assert!(
+            recover(dir.path(), false)
+                .unwrap_err()
+                .contains("external edit")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn recovery_rejects_hard_links_and_replacement_failures_keep_the_stage() {
@@ -1142,7 +1180,7 @@ mod tests {
                 .unwrap()
                 .into_temp_path(),
         );
-        let stage_path = stage.as_ref().unwrap().to_owned();
+        let stage_path = stage.as_ref().unwrap().to_path_buf();
         let directory = dir.path().join("target-directory");
         std::fs::create_dir(&directory).unwrap();
         assert!(replace(&mut stage, &directory).is_err());

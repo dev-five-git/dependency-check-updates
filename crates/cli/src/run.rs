@@ -202,6 +202,57 @@ where
     }
 }
 
+fn docker_registry(endpoint: Option<&str>) -> DockerRegistry {
+    endpoint.map_or_else(DockerRegistry::new, DockerRegistry::with_base_url)
+}
+
+async fn resolve_individual_job(
+    job: &ManifestJob,
+    npm: Option<&NpmRegistry>,
+    crates_io: Option<&CratesIoRegistry>,
+    pypi: Option<&PyPiRegistry>,
+    registry: &ToolRegistry,
+    target: TargetLevel,
+) -> ResolvedBatch {
+    match job.manifest_ref.kind {
+        ManifestKind::PackageJson => {
+            let ordinary: Vec<_> = job
+                .deps
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.section != DependencySection::Toolchain)
+                .collect();
+            let specs: Vec<_> = ordinary.iter().map(|(_, d)| (*d).clone()).collect();
+            let mut batch = resolve_with(npm, &specs, |r, deps| r.resolve_batch(deps, target))
+                .await
+                .into_iter()
+                .map(|(i, result)| (ordinary[i].0, result))
+                .collect::<Vec<_>>();
+            batch.extend(resolve_project(job, registry, target).await);
+            batch.sort_by_key(|(i, _)| *i);
+            batch
+        }
+        ManifestKind::CargoToml => {
+            resolve_with(crates_io, &job.deps, |r, deps| {
+                r.resolve_batch(deps, target)
+            })
+            .await
+        }
+        ManifestKind::PyProjectToml => {
+            resolve_with(pypi, &job.deps, |r, deps| r.resolve_batch(deps, target)).await
+        }
+        // These jobs are aggregated by remote_specs, never queried twice.
+        ManifestKind::GitHubWorkflow | ManifestKind::Dockerfile | ManifestKind::DockerCompose => {
+            Vec::new()
+        }
+        ManifestKind::Gradle
+        | ManifestKind::GradleCatalog
+        | ManifestKind::GradleProperties
+        | ManifestKind::GradleWrapper
+        | ManifestKind::ToolVersions => resolve_project(job, registry, target).await,
+    }
+}
+
 /// Run the dependency-check-updates CLI with the given configuration.
 ///
 /// # Errors
@@ -299,13 +350,26 @@ pub(crate) async fn run_at(
     Ok(report.has_updates())
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) async fn execute_at(
     cli: &Cli,
     root: &std::path::Path,
     tool_registry: &ToolRegistry,
     use_color: bool,
 ) -> Result<RunReport, DcuError> {
+    execute_at_with_commit(cli, root, tool_registry, use_color, transaction::commit).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn execute_at_with_commit<F>(
+    cli: &Cli,
+    root: &std::path::Path,
+    tool_registry: &ToolRegistry,
+    use_color: bool,
+    commit: F,
+) -> Result<RunReport, DcuError>
+where
+    F: FnOnce(&std::path::Path, Vec<transaction::Change>) -> Result<(), transaction::Failure>,
+{
     if let Some(mode) = cli.recover {
         let changed = transaction::recover(root, mode == crate::cli::RecoveryMode::Finish)
             .map_err(|e| project::error("recovery", e))?;
@@ -461,24 +525,25 @@ pub(crate) async fn execute_at(
         NpmRegistry::with_cache(&tool_registry.endpoints.npm, tool_registry.cache.clone())
     });
     let crates_registry = registry_for(&manifest_jobs, ManifestKind::CargoToml, || {
-        CratesIoRegistry::with_cache("https://crates.io/api/v1", tool_registry.cache.clone())
+        CratesIoRegistry::with_cache(
+            &tool_registry.endpoints.crates_io,
+            tool_registry.cache.clone(),
+        )
     });
     let pypi_registry = registry_for(&manifest_jobs, ManifestKind::PyProjectToml, || {
-        PyPiRegistry::with_cache("https://pypi.org/pypi", tool_registry.cache.clone())
+        PyPiRegistry::with_cache(&tool_registry.endpoints.pypi, tool_registry.cache.clone())
     });
     // The last two are gated by dependency section, not manifest kind: a
     // workflow can contribute `uses:` refs, container images, or both, and a
     // Dockerfile / Compose file contributes only images.
-    let github_registry = registry_for_section(
-        &manifest_jobs,
-        DependencySection::GitHubActions,
-        GitHubActionsRegistry::new,
-    );
-    let docker_registry = registry_for_section(
-        &manifest_jobs,
-        DependencySection::DockerImage,
-        DockerRegistry::new,
-    );
+    let github_registry =
+        registry_for_section(&manifest_jobs, DependencySection::GitHubActions, || {
+            GitHubActionsRegistry::with_base_url(&tool_registry.endpoints.github)
+        });
+    let docker_registry =
+        registry_for_section(&manifest_jobs, DependencySection::DockerImage, || {
+            docker_registry(tool_registry.endpoints.docker.as_deref())
+        });
 
     let mut resolve_futures = Vec::with_capacity(manifest_jobs.len());
     // Keep the existing GitHub/OCI repository/auth-aware batch deduplication,
@@ -496,59 +561,10 @@ pub(crate) async fn execute_at(
             let npm = npm_registry.as_ref();
             let crates_io = crates_registry.as_ref();
             let pypi = pypi_registry.as_ref();
-            let github = github_registry.as_ref();
-            let docker = docker_registry.as_ref();
             resolve_futures.push(async move {
-                // The gating above guarantees the registry matching this job's
-                // kind is `Some`; the `None` arms are unreachable for a
-                // non-empty job and return an empty batch without panicking.
-                let resolved = match job.manifest_ref.kind {
-                    ManifestKind::PackageJson => {
-                        let ordinary: Vec<_> = job
-                            .deps
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, d)| d.section != DependencySection::Toolchain)
-                            .collect();
-                        let specs: Vec<_> = ordinary.iter().map(|(_, d)| (*d).clone()).collect();
-                        let mut batch = match npm {
-                            Some(npm) => npm
-                                .resolve_batch(&specs, cli.target)
-                                .await
-                                .into_iter()
-                                .map(|(i, r)| (ordinary[i].0, r))
-                                .collect::<Vec<_>>(),
-                            None => Vec::new(),
-                        };
-                        batch.extend(resolve_project(job, tool_registry, cli.target).await);
-                        batch.sort_by_key(|(i, _)| *i);
-                        batch
-                    }
-                    ManifestKind::CargoToml => match crates_io {
-                        Some(crates_io) => crates_io.resolve_batch(&job.deps, cli.target).await,
-                        None => Vec::new(),
-                    },
-                    ManifestKind::PyProjectToml => match pypi {
-                        Some(pypi) => pypi.resolve_batch(&job.deps, cli.target).await,
-                        None => Vec::new(),
-                    },
-                    // A workflow can hold both ecosystems, so it fans out to
-                    // both registries and merges the results.
-                    ManifestKind::GitHubWorkflow => {
-                        resolve_workflow(&job.deps, github, docker, cli.target).await
-                    }
-                    ManifestKind::Dockerfile | ManifestKind::DockerCompose => match docker {
-                        Some(docker) => docker.resolve_batch(&job.deps, cli.target).await,
-                        None => Vec::new(),
-                    },
-                    ManifestKind::Gradle
-                    | ManifestKind::GradleCatalog
-                    | ManifestKind::GradleProperties
-                    | ManifestKind::GradleWrapper
-                    | ManifestKind::ToolVersions => {
-                        resolve_project(job, tool_registry, cli.target).await
-                    }
-                };
+                let resolved =
+                    resolve_individual_job(job, npm, crates_io, pypi, tool_registry, cli.target)
+                        .await;
                 (job_idx, resolved)
             });
         }
@@ -812,7 +828,7 @@ pub(crate) async fn execute_at(
                         })
                 })
                 .collect();
-            match transaction::commit(root, changes) {
+            match commit(root, changes) {
                 Ok(()) => {
                     report.outcome = ApplyOutcome::Committed;
                     for item in &mut report.items {
@@ -1211,6 +1227,235 @@ mod tests {
     use dependency_check_updates_core::ManifestRef;
     use rstest::rstest;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn update_failure_reports_match_actual_transaction_outcomes() {
+        use crate::tool_registry::Endpoints;
+        use clap::Parser;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server = MockServer::start().await;
+        Mock::given(path("/node"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{ "version":"v22.0.0", "lts":"Fixed" }])),
+            )
+            .mount(&server)
+            .await;
+        let registry = ToolRegistry::with_endpoints(Endpoints {
+            node: format!("{}/node", server.uri()),
+            ..Endpoints::default()
+        });
+        for (step, expected, committed) in [
+            (transaction::Step::Stage, ApplyOutcome::Aborted, false),
+            (transaction::Step::Commit, ApplyOutcome::RolledBack, false),
+            (
+                transaction::Step::Finalize,
+                ApplyOutcome::RecoveryRequired,
+                true,
+            ),
+            (
+                transaction::Step::AfterReplace,
+                ApplyOutcome::Committed,
+                true,
+            ),
+        ] {
+            let dir = tempfile::TempDir::new().unwrap();
+            for name in [".nvmrc", ".node-version"] {
+                std::fs::write(dir.path().join(name), "20.0.0\n").unwrap();
+            }
+            let cli = Cli::parse_from(["dcu", "-d", "-u", "--format", "json-report"]);
+            let report =
+                execute_at_with_commit(&cli, dir.path(), &registry, false, |root, changes| {
+                    if step == transaction::Step::AfterReplace {
+                        transaction::commit(root, changes)?;
+                        return Err(transaction::Failure {
+                            detail: "post-commit cleanup failed".into(),
+                            committed: true,
+                            recovery_required: false,
+                            rolled_back: false,
+                        });
+                    }
+                    transaction::commit_with(root, changes, |at, i, _| {
+                        if at == step && (step != transaction::Step::Commit || i == 1) {
+                            Err("injected failure".into())
+                        } else {
+                            Ok(())
+                        }
+                    })
+                })
+                .await
+                .unwrap();
+            assert_eq!(report.outcome, expected);
+            assert!(report.execution_failed);
+            assert_eq!(report.exit_code(&cli), 1);
+            assert!(
+                report
+                    .items
+                    .iter()
+                    .all(|item| matches!(item, Item::Project(row) if row.updated == committed))
+            );
+            for name in [".nvmrc", ".node-version"] {
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join(name)).unwrap(),
+                    if committed { "22.0.0\n" } else { "20.0.0\n" }
+                );
+            }
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".dcu-transaction-blocked.json"), "{}").unwrap();
+        let cli = Cli::parse_from(["dcu", "-u"]);
+        assert!(
+            run_at(&cli, dir.path(), &registry, false)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("patch")
+        );
+        for error in [
+            DcuError::PatchFailed {
+                path: PathBuf::from("file"),
+                detail: "specific detail".into(),
+            },
+            DcuError::ManifestParse {
+                path: PathBuf::from("file"),
+                detail: "specific detail".into(),
+            },
+        ] {
+            assert!(diagnostic_message(&error).contains("specific detail"));
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_metadata_updates_all_existing_ecosystems_through_the_pipeline() {
+        use crate::tool_registry::Endpoints;
+        use clap::Parser;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server = MockServer::start().await;
+        for (url, body) in [
+            (
+                "/npm/react",
+                serde_json::json!({"dist-tags":{"latest":"2.0.0"},"versions":{"1.0.0":{},"2.0.0":{}}}),
+            ),
+            (
+                "/crates/serde/versions",
+                serde_json::json!({"versions":[{"num":"1.0.0","yanked":false},{"num":"2.0.0","yanked":false}]}),
+            ),
+            (
+                "/pytest/json",
+                serde_json::json!({"info":{"version":"2.0.0"},"releases":{"1.0.0":[{}],"2.0.0":[{}]}}),
+            ),
+            (
+                "/repos/actions/checkout/tags",
+                serde_json::json!([{"name":"v4"},{"name":"v5"}]),
+            ),
+            (
+                "/v2/library/node/tags/list",
+                serde_json::json!({"name":"library/node","tags":["20","22"]}),
+            ),
+        ] {
+            Mock::given(path(url))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+        }
+        let registry = ToolRegistry::with_endpoints(Endpoints {
+            npm: format!("{}/npm", server.uri()),
+            crates_io: server.uri(),
+            pypi: server.uri(),
+            github: server.uri(),
+            docker: Some(server.uri()),
+            ..Endpoints::default()
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        for (name, text) in [
+            ("package.json", r#"{"dependencies":{"react":"^1.0.0"}}"#),
+            (
+                "Cargo.toml",
+                "[package]\nname='fixture'\nversion='0.1.0'\n[dependencies]\nserde='1.0.0'\n",
+            ),
+            (
+                "pyproject.toml",
+                "[project]\nname='fixture'\ndependencies=['pytest>=1.0.0']\n",
+            ),
+            ("Dockerfile", "FROM node:20\n"),
+            ("compose.yml", "services:\n  app:\n    image: node:20\n"),
+            (
+                ".github/workflows/test.yml",
+                "jobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:20\n    steps:\n      - uses: actions/checkout@v4\n",
+            ),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let cli = Cli::parse_from(["dcu", "-d", "-u", "--format", "json-report"]);
+        let report = execute_at(&cli, dir.path(), &registry, false)
+            .await
+            .unwrap();
+        assert_eq!(report.outcome, ApplyOutcome::Committed);
+        assert_eq!(report.items.len(), 7);
+        assert!(!report.incomplete());
+        assert!(
+            report
+                .items
+                .iter()
+                .all(|item| matches!(item, Item::Project(row) if row.updated))
+        );
+        assert!(
+            std::fs::read_to_string(dir.path().join("Cargo.toml"))
+                .unwrap()
+                .contains("2.0.0")
+        );
+        assert!(
+            std::fs::read_to_string(dir.path().join("pyproject.toml"))
+                .unwrap()
+                .contains("2.0.0")
+        );
+        let _ = docker_registry(None); // Client construction never sends a request.
+        let remote = job(
+            ManifestKind::GitHubWorkflow,
+            vec![dep("actions/checkout", DependencySection::GitHubActions)],
+        );
+        assert!(
+            resolve_individual_job(&remote, None, None, None, &registry, TargetLevel::Latest)
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_sources_and_missing_candidates_are_incomplete_not_current() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let job = job(
+            ManifestKind::Gradle,
+            vec![dep("group:artifact", DependencySection::Maven)],
+        );
+        let rows = report_rows(&job, &[], &[], None, None, false);
+        assert_eq!(rows[0].status, Status::Failed);
+        let batch = vec![(
+            0,
+            Ok(ResolvedVersion {
+                latest: None,
+                selected: None,
+            }),
+        )];
+        assert_eq!(
+            report_rows(&job, &batch, &[], None, None, false)[0].status,
+            Status::Unverified
+        );
+        let registry = ToolRegistry::new();
+        let result = resolve_project(&job, &registry, TargetLevel::Latest).await;
+        assert!(
+            result[0]
+                .1
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("source declaration")
+        );
+    }
 
     fn dep(name: &str, section: DependencySection) -> DependencySpec {
         DependencySpec {

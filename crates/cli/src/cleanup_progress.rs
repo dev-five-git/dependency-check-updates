@@ -101,11 +101,7 @@ pub(crate) async fn cleanup_with_progress(targets: Vec<CleanupTarget>) -> Cleanu
     let mut diagnostics = Vec::new();
 
     while let Some((target, outcome)) = removals.next().await {
-        let error = match &outcome {
-            Ok(Some(Err(e))) => Some(e.to_string()),
-            Err(e) => Some(e.to_string()),
-            _ => None,
-        };
+        let error = removal_error(&outcome);
         if let Some(error) = error {
             diagnostics.push(crate::report::Diagnostic {
                 code: "cleanup-failed".into(),
@@ -135,6 +131,16 @@ pub(crate) async fn cleanup_with_progress(targets: Vec<CleanupTarget>) -> Cleanu
 /// which cannot be provoked by driving the public entry point — [`remove_target`]
 /// has no panic path — but is trivially constructed by awaiting a task that
 /// does panic.
+fn removal_error(
+    outcome: &Result<Option<Result<RemovalOutcome, io::Error>>, tokio::task::JoinError>,
+) -> Option<String> {
+    match outcome {
+        Ok(Some(Err(e))) => Some(e.to_string()),
+        Err(e) => Some(e.to_string()),
+        _ => None,
+    }
+}
+
 fn absorb_outcome(
     outcome: Result<Option<Result<RemovalOutcome, io::Error>>, tokio::task::JoinError>,
     removed: &mut Vec<RemovalOutcome>,
@@ -442,7 +448,9 @@ mod tests {
         let join_error = tokio::task::spawn_blocking(|| panic!("worker exploded"))
             .await
             .expect_err("the worker panicked");
-        assert!(absorb_outcome(Err(join_error), &mut removed, &mut total).is_none());
+        let outcome = Err(join_error);
+        assert!(removal_error(&outcome).unwrap().contains("worker exploded"));
+        assert!(absorb_outcome(outcome, &mut removed, &mut total).is_none());
 
         assert!(removed.is_empty());
         assert_eq!(total, 0);
