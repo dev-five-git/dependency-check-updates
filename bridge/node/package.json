@@ -58,7 +58,7 @@
     "build:debug": "napi build --platform",
     "lint": "echo 'lint'",
     "prepublishOnly": "napi prepublish -t npm --skip-optional-publish --no-gh-release",
-    "pack:publish": "node scripts/pack.js",
+    "pack:publish": "bun scripts/pack.js",
     "test": "bun run build:debug && bun test"
   },
   "devDependencies": {

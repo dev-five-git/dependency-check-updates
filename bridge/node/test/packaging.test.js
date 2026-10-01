@@ -19,7 +19,8 @@ test("packed npm CLI loads its separately installed native platform package", as
   const repo = join(__dirname, "..");
   // Windows runners expose an 8.3 TEMP path (RUNNER~1). Bun records canonical
   // workspace paths, so use that spelling before creating or installing them.
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "dcu-npm-pack-")));
+  const tempRoot = mkdtempSync(join(tmpdir(), "dcu-npm-pack-"));
+  const root = realpathSync.native(tempRoot);
   const copy = join(root, "package"); mkdirSync(copy);
   try {
     const suffix = { "win32-x64": "win32-x64-msvc", "darwin-x64": "darwin-x64", "darwin-arm64": "darwin-arm64", "linux-x64": "linux-x64-gnu" }[`${process.platform}-${process.arch}`];
@@ -40,7 +41,10 @@ test("packed npm CLI loads its separately installed native platform package", as
     await command(["bun", "x", "--no-install", "napi", "create-npm-dirs", "--cwd", copy], repo);
     await command(["bun", "x", "--no-install", "napi", "artifacts", "--cwd", copy, "--output-dir", "."], repo);
     const npm = process.platform === "win32" ? ["cmd.exe", "/d", "/c", "npm"] : ["npm"];
-    const packed = JSON.parse(await command(["node", join(repo, "scripts", "pack.js"), join(root, "packed")], copy));
+    // Keep the caller's original spelling: the packing script must also handle
+    // an 8.3 cwd, even though the fixture was installed through its real path.
+    const packCwd = join(tempRoot, "package");
+    const packed = JSON.parse(await command(["bun", join(repo, "scripts", "pack.js"), join(root, "packed")], packCwd));
     const cli = packed.find(p => p.name === "@dependency-check-updates/cli");
     const native = packed.find(p => p.name === `@dependency-check-updates/cli-${suffix}`);
     expect(packed.length).toBe(2);
@@ -51,7 +55,7 @@ test("packed npm CLI loads its separately installed native platform package", as
     for (const [index, range] of ["file:../fixture", "../fixture"].entries()) {
       local.devDependencies["@dcu-test/fixture"] = range;
       writeFileSync(join(copy, "package.json"), JSON.stringify(local));
-      expect(await command(["node", join(repo, "scripts", "pack.js"), join(root, `rejected-${index}`)], copy, 1)).toContain("Unresolved local dependency");
+      expect(await command(["bun", join(repo, "scripts", "pack.js"), join(root, `rejected-${index}`)], packCwd, 1)).toContain("Unresolved local dependency");
     }
     const installed = join(root, "installed"); mkdirSync(installed);
     await command([...npm, "install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--omit=dev", "--prefix", installed, cli.filename, native.filename], installed);
