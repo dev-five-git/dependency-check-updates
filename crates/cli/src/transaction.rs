@@ -716,7 +716,9 @@ pub(crate) fn commit_with(
     for c in &changes {
         unchanged(&c.path, &c.original).map_err(simple)?;
         #[cfg(windows)]
-        validate_windows_target(&c.path).map_err(simple)?;
+        {
+            validate_windows_target(&c.path).map_err(simple)?;
+        }
         let identity = std::fs::canonicalize(&c.path).map_err(|e| simple(e.to_string()))?;
         if !identity.starts_with(&canonical_root) {
             return Err(simple(
@@ -958,6 +960,13 @@ pub(crate) fn commit_with(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn marker_metadata_errors_are_reported_without_following_looping_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("loop", dir.path().join("loop")).unwrap();
+        assert!(read_marker(&dir.path().join("loop/marker.json")).is_err());
+    }
     use super::*;
 
     fn non_lock_files(root: &Path) -> usize {

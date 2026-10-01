@@ -63,6 +63,29 @@ fn rx(pattern: &str) -> Regex {
     Regex::new(pattern).expect("static parser regex")
 }
 
+/// Find the end of a quoted region without interpreting Gradle expressions.
+/// Triple-quoted prose is opaque, including its embedded quotes and comments.
+fn quoted_end(bytes: &[u8], start: usize) -> usize {
+    let quote = bytes[start];
+    let triple = bytes.get(start..start + 3) == Some(&[quote; 3]);
+    let width = if triple { 3 } else { 1 };
+    let mut i = start + width;
+    while i < bytes.len() {
+        if bytes
+            .get(i..i + width)
+            .is_some_and(|s| s.iter().all(|b| *b == quote))
+        {
+            return i + width;
+        }
+        i = if !triple && bytes[i] == b'\\' {
+            (i + 2).min(bytes.len())
+        } else {
+            i + 1
+        };
+    }
+    bytes.len()
+}
+
 pub(crate) fn error(name: &str, detail: impl Into<String>) -> DcuError {
     DcuError::RegistryLookup {
         package: name.to_owned(),
@@ -76,19 +99,7 @@ fn uncomment(text: &str, slash: bool) -> String {
     let mut i = 0;
     while i < b.len() {
         if matches!(b[i], b'\'' | b'"') {
-            let quote = b[i];
-            i += 1;
-            while i < b.len() {
-                if b[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if b[i] == quote {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
+            i = quoted_end(&b, i);
         } else if slash && i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'*' {
             b[i] = b' ';
             b[i + 1] = b' ';
@@ -274,20 +285,8 @@ fn outside_strings(text: &str) -> Vec<bool> {
     let mut i = 0;
     while i < bytes.len() {
         if matches!(bytes[i], b'\'' | b'"') {
-            let quote = bytes[i];
             let start = i;
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' {
-                    i = (i + 2).min(bytes.len());
-                    continue;
-                }
-                if bytes[i] == quote {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
+            i = quoted_end(bytes, i);
             outside[start..i].fill(false);
         } else {
             i += 1;
@@ -996,9 +995,7 @@ pub(crate) fn load_with_discovery(
     }
     let mut shared_roots = Vec::new();
     for path in &selected {
-        let Some(doc) = documents.get(path) else {
-            continue;
-        };
+        let doc = &documents[path];
         let own = build_root(path, root);
         for reference in &doc.references {
             if let Some((source, _)) = reference_source(&documents, path, root, &reference.key) {
@@ -1066,9 +1063,7 @@ pub(crate) fn load_with_discovery(
     let mut context_paths: Vec<_> = snapshot.keys().cloned().collect();
     context_paths.sort();
     for path in context_paths {
-        let Some(original) = snapshot.get(&path) else {
-            continue;
-        };
+        let original = &snapshot[&path];
         let mut repos = Vec::new();
         let boundary = build_root(&path, root);
         for parent in path
@@ -1295,6 +1290,68 @@ pub(crate) fn guard_shared_versions(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn quoted_repository_and_definition_text_is_not_executable_gradle() {
+        let text = "val documentation = \"\"\"\nmaven { url = uri(\"https://fake.example\") }\nval fakeVersion = \"1.0\"\n\"\"\"\n";
+        let doc = parse(text, Path::new("build.gradle.kts")).unwrap();
+        assert!(doc.repositories.is_empty());
+        assert!(doc.definitions.iter().all(|d| d.key != "fakeVersion"));
+    }
+
+    #[test]
+    fn absent_and_ambiguous_gradle_property_sources_are_never_guessed() {
+        let root = Path::new("project");
+        let path = root.join("app/build.gradle.kts");
+        let doc = parse("val pin = providers.gradleProperty(\"sharedVersion\").get()\nimplementation(\"g:a:$pin\")\n", &path).unwrap();
+        assert_eq!(doc.property_bindings.len(), 1);
+        let mut docs = HashMap::from([(path.clone(), doc)]);
+        assert!(reference_source(&docs, &path, root, "pin").is_none());
+        assert!(reference_source(&docs, &path, root, "unknown").is_none());
+        let props = root.join("app/gradle.properties");
+        docs.insert(
+            props.clone(),
+            parse("sharedVersion=1.0\nsharedVersion=2.0\n", &props).unwrap(),
+        );
+        assert!(reference_source(&docs, &path, root, "pin").is_none());
+    }
+
+    #[test]
+    fn shared_source_discovery_loads_a_consumed_catalog_in_another_nested_build() {
+        use dependency_check_updates_core::ManifestRef;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for (file, text) in [
+            ("build.gradle.kts", "val sharedVersion = \"1.0\"\n"),
+            ("a/settings.gradle.kts", "rootProject.name = \"a\"\n"),
+            (
+                "a/build.gradle.kts",
+                "implementation(\"g:a:$sharedVersion\")\n",
+            ),
+            ("b/settings.gradle.kts", "rootProject.name = \"b\"\n"),
+            ("b/build.gradle.kts", "implementation(libs.shared)\n"),
+            (
+                "b/gradle/libs.versions.toml",
+                "[libraries]\nshared = { module = \"g:a\", version = \"1.0\" }\n",
+            ),
+        ] {
+            let p = root.join(file);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        let selected = ManifestRef {
+            path: root.join("a/build.gradle.kts"),
+            kind: ManifestKind::Gradle,
+        };
+        let docs = load_with_discovery(&[selected], root, false).unwrap();
+        assert!(docs.contains_key(&root.join("b/gradle/libs.versions.toml")));
+        assert_eq!(
+            docs[&root.join("b/build.gradle.kts")].resolved_uses[0]
+                .1
+                .name,
+            "g:a"
+        );
+        assert!(!docs[&root.join("b/gradle/libs.versions.toml")].entries[0].requested);
+    }
     use super::*;
 
     #[test]

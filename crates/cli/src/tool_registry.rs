@@ -691,6 +691,28 @@ fn xml_versions(text: &str, name: &str) -> Result<Vec<String>, DcuError> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn supported_repository_failures_do_not_report_no_versions_as_current() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server = MockServer::start().await;
+        Mock::given(path("/g/a/maven-metadata.xml"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let mut doc = crate::project::parse(
+            "implementation(\"g:a:1.0\")\n",
+            std::path::Path::new("build.gradle.kts"),
+        )
+        .unwrap();
+        doc.entries[0].repositories = vec![server.uri()];
+        let registry = ToolRegistry::new();
+        let error = registry
+            .resolve(&doc.entries[0], TargetLevel::Latest)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("503"));
+    }
     use super::*;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 

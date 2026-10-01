@@ -1229,6 +1229,186 @@ mod tests {
     use std::path::PathBuf;
 
     #[tokio::test]
+    async fn recovery_notices_receipts_from_parent_transactions_and_late_concurrent_writes() {
+        use crate::tool_registry::Endpoints;
+        use clap::Parser;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let node = child.join(".nvmrc");
+        std::fs::write(&node, "20\n").unwrap();
+        let registry = ToolRegistry::with_endpoints(Endpoints {
+            node: format!("{}/node", server.uri()),
+            ..Endpoints::default()
+        });
+        let failure = transaction::commit_with(
+            dir.path(),
+            vec![transaction::Change {
+                path: node.clone(),
+                original: b"20\n".to_vec(),
+                replacement: b"22\n".to_vec(),
+            }],
+            |step, _, _| {
+                if step == transaction::Step::Finalize {
+                    Err("interrupted finalize".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(failure.recovery_required);
+        let cli = Cli::parse_from(["dcu", "-u", "--format", "json-report"]);
+        let report = execute_at(&cli, &child, &registry, false).await.unwrap();
+        assert_eq!(report.outcome, ApplyOutcome::Aborted);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "pending-recovery")
+        );
+        transaction::recover(dir.path(), false).unwrap();
+        let late_receipt = child.join(".dcu-transaction-concurrent.json");
+        Mock::given(path("/node"))
+            .respond_with(move |_: &wiremock::Request| {
+                std::fs::write(&late_receipt, "another process owns this receipt").unwrap();
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{"version":"v22.0.0","lts":true}]))
+            })
+            .mount(&server)
+            .await;
+        let report = execute_at(&cli, &child, &registry, false).await.unwrap();
+        assert_eq!(report.outcome, ApplyOutcome::Aborted);
+        assert!(report.execution_failed);
+        assert_eq!(std::fs::read_to_string(node).unwrap(), "20\n");
+    }
+
+    #[tokio::test]
+    async fn table_recovery_and_json_cleanup_report_the_actual_outcome() {
+        use crate::tool_registry::Endpoints;
+        use clap::Parser;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cli = Cli::parse_from(["dcu", "--recover", "rollback"]);
+        let registry = ToolRegistry::with_endpoints(Endpoints {
+            npm: server.uri(),
+            ..Endpoints::default()
+        });
+        assert_eq!(
+            execute_at(&cli, dir.path(), &registry, false)
+                .await
+                .unwrap()
+                .outcome,
+            ApplyOutcome::NoChanges
+        );
+        Mock::given(path("/react")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"dist-tags":{"latest":"2.0.0"},"versions":{"1.0.0":{},"2.0.0":{}}}))).mount(&server).await;
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"dependencies":{"react":"1.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("bun.lock"), "test lock").unwrap();
+        let cli = Cli::parse_from(["dcu", "-u", "--rm", "--format", "json-report"]);
+        assert_eq!(
+            execute_at(&cli, dir.path(), &registry, false)
+                .await
+                .unwrap()
+                .outcome,
+            ApplyOutcome::Committed
+        );
+        assert!(!dir.path().join("bun.lock").exists());
+    }
+
+    #[tokio::test]
+    async fn compatible_mode_does_not_claim_unverified_current_pins_are_current() {
+        use crate::tool_registry::Endpoints;
+        use clap::Parser;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server = MockServer::start().await;
+        Mock::given(path("/gradle"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{"version":"8.9"}])),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("gradle/wrapper")).unwrap();
+        std::fs::write(
+            dir.path().join("gradle/wrapper/gradle-wrapper.properties"),
+            "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.9-bin.zip\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("build.gradle.kts"),
+            "includeBuild(dynamicPath)\n",
+        )
+        .unwrap();
+        let cli = Cli::parse_from(["dcu", "-d", "--compatible", "--format", "json-report"]);
+        let registry = ToolRegistry::with_endpoints(Endpoints {
+            gradle: format!("{}/gradle", server.uri()),
+            ..Endpoints::default()
+        });
+        let report = execute_at(&cli, dir.path(), &registry, false)
+            .await
+            .unwrap();
+        let row = report
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Project(r) if r.name == "gradle" => Some(r),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(row.status, Status::Unverified);
+        assert!(row.reason.as_ref().unwrap().contains("unverified"));
+        std::fs::write(dir.path().join("build.gradle.kts"), format!("repositories {{ maven(\"{}\") }}\nclasspath(\"org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.25\")\nplugins {{ id(\"org.jetbrains.kotlin.jvm\") version \"2.0.0\" }}\n", server.uri())).unwrap();
+        std::fs::write(
+            dir.path().join("gradle/wrapper/gradle-wrapper.properties"),
+            "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.0-bin.zip\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(".tool-versions"), "java 17\n").unwrap();
+        Mock::given(path("/jdk"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"versions":[{"semver":"17.0.0"}]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(path("/gradle-two"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{"version":"8.0"}])),
+            )
+            .mount(&server)
+            .await;
+        let registry = ToolRegistry::with_endpoints(Endpoints {
+            gradle: format!("{}/gradle-two", server.uri()),
+            jdk: format!("{}/jdk", server.uri()),
+            ..Endpoints::default()
+        });
+        Mock::given(path("/org/jetbrains/kotlin/kotlin-gradle-plugin/maven-metadata.xml")).respond_with(ResponseTemplate::new(200).set_body_string("<metadata><versioning><versions><version>1.9.25</version><version>2.0.0</version></versions></versioning></metadata>")).mount(&server).await;
+        let cli = Cli::parse_from([
+            "dcu",
+            "-d",
+            "--compatible",
+            "--target",
+            "patch",
+            "--format",
+            "json-report",
+        ]);
+        let report = execute_at(&cli, dir.path(), &registry, false)
+            .await
+            .unwrap();
+        assert!(report.items.iter().any(|i| matches!(i, Item::Project(row) if row.status == Status::Unverified && row.reason.as_ref().is_some_and(|r| r.contains("no verified combination")))));
+    }
+
+    #[tokio::test]
     async fn update_failure_reports_match_actual_transaction_outcomes() {
         use crate::tool_registry::Endpoints;
         use clap::Parser;
@@ -1454,6 +1634,13 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("source declaration")
+        );
+        block_failed_shared_queries(
+            &[job],
+            &[Some(result)],
+            &std::collections::HashMap::new(),
+            &mut compatibility::Plans::new(),
+            &mut std::collections::HashMap::new(),
         );
     }
 

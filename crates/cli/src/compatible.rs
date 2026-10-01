@@ -441,6 +441,179 @@ mod tests {
     use dependency_check_updates_core::DependencySection;
 
     #[test]
+    fn candidate_limit_keeps_the_current_pin_as_a_non_mutating_fallback() {
+        let mut candidates: Vec<_> = (0..=MAX_CANDIDATES).map(|i| format!("9.0.{i}")).collect();
+        candidates.push("8.9".into());
+        let input = Input {
+            job: 0,
+            dep_index: 0,
+            path: PathBuf::from("wrapper"),
+            dep: DependencySpec {
+                name: "gradle".into(),
+                current_req: "8.9".into(),
+                section: DependencySection::Toolchain,
+                path_version: None,
+            },
+            candidates,
+        };
+        let dims = dimensions(
+            &[input],
+            &[Build {
+                fixed: Vec::new(),
+                variables: vec![0],
+            }],
+        );
+        assert_eq!(dims[0].candidates.len(), MAX_CANDIDATES + 1);
+        assert_eq!(dims[0].candidates.last().unwrap(), "8.9");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn suggestion_failures_report_lookup_and_search_limits_without_choices() {
+        use crate::{project, tool_registry::Endpoints};
+        use dependency_check_updates_core::{ManifestKind, ManifestRef};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server = MockServer::start().await;
+        let gradle: Vec<_> = (0..65)
+            .map(|i| serde_json::json!({"version":format!("8.14.{i}")}))
+            .collect();
+        let jdk: Vec<_> = (0..65)
+            .map(|i| serde_json::json!({"semver":format!("17.0.{i}")}))
+            .collect();
+        let sdk = (1..=65).fold(String::new(), |mut xml, i| {
+            use std::fmt::Write;
+            write!(
+                xml,
+                "<remotePackage path=\"platforms;android-{i}\"></remotePackage>"
+            )
+            .unwrap();
+            xml
+        });
+        for (route, body) in [
+            ("/gradle", serde_json::to_string(&gradle).unwrap()),
+            ("/jdk", serde_json::json!({"versions":jdk}).to_string()),
+            ("/sdk", sdk),
+        ] {
+            Mock::given(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_string(body))
+                .mount(&server)
+                .await;
+        }
+        let registry = ToolRegistry::with_endpoints(Endpoints {
+            gradle: format!("{}/gradle", server.uri()),
+            jdk: format!("{}/jdk", server.uri()),
+            android: format!("{}/sdk", server.uri()),
+            ..Endpoints::default()
+        });
+        let root = tempfile::tempdir().unwrap();
+        let mut jobs = Vec::new();
+        let mut documents = HashMap::new();
+        for (file, text, kind) in [
+            (
+                "gradle/wrapper/gradle-wrapper.properties",
+                "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.0-bin.zip\n",
+                ManifestKind::GradleWrapper,
+            ),
+            (
+                ".tool-versions",
+                "java 17.0.0\n",
+                ManifestKind::ToolVersions,
+            ),
+            (
+                "build.gradle.kts",
+                "compileSdk = 1\nincludeBuild(dynamicPath)\n",
+                ManifestKind::Gradle,
+            ),
+        ] {
+            let file_path = root.path().join(file);
+            let doc = project::parse(text, &file_path).unwrap();
+            documents.insert(file_path.clone(), doc.clone());
+            jobs.push(ManifestJob {
+                manifest_ref: ManifestRef {
+                    path: file_path,
+                    kind,
+                },
+                display_path: file.into(),
+                text: text.into(),
+                deps: doc.dependencies(),
+                handler: Box::new(project::ProjectHandler(doc.clone())),
+                document: Some(doc),
+            });
+        }
+        assert!(documents.values().any(|d| !d.context_issues.is_empty()));
+        let resolved: Vec<_> = ["8.14.64", "17.0.64", "65"]
+            .into_iter()
+            .zip(&jobs)
+            .map(|(selected, job)| {
+                Some(vec![(
+                    job.deps
+                        .iter()
+                        .position(|d| compatibility::related(&d.name))
+                        .unwrap(),
+                    Ok(ResolvedVersion {
+                        latest: Some(selected.into()),
+                        selected: Some(selected.into()),
+                    }),
+                )])
+            })
+            .collect();
+        let result = suggest(
+            &jobs,
+            &resolved,
+            &documents,
+            &registry,
+            TargetLevel::Latest,
+            &Rules::builtin(),
+        )
+        .await;
+        assert!(result.choices.is_empty());
+        assert_eq!(result.coupled.len(), 3);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "compatible-search-limit")
+        );
+        let failed = ToolRegistry::with_endpoints(Endpoints {
+            gradle: format!("{}/missing", server.uri()),
+            ..Endpoints::default()
+        });
+        let result = suggest(
+            &jobs[..1],
+            &resolved[..1],
+            &documents,
+            &failed,
+            TargetLevel::Latest,
+            &Rules::builtin(),
+        )
+        .await;
+        assert!(result.choices.is_empty());
+        assert_eq!(result.diagnostics[0].code, "compatible-lookup-failed");
+        let result = suggest(
+            &jobs[..1],
+            &[None],
+            &documents,
+            &registry,
+            TargetLevel::Latest,
+            &Rules::builtin(),
+        )
+        .await;
+        assert!(result.choices.is_empty());
+        jobs[0].document.as_mut().unwrap().entries[0].span = None;
+        let result = suggest(
+            &jobs[..1],
+            &resolved[..1],
+            &documents,
+            &registry,
+            TargetLevel::Latest,
+            &Rules::builtin(),
+        )
+        .await;
+        assert!(result.coupled.is_empty());
+    }
+
+    #[test]
     fn incomplete_combinations_exhaust_a_bounded_budget_without_leaving_assignments() {
         let inputs: Vec<_> = (0..5)
             .map(|i| Input {
