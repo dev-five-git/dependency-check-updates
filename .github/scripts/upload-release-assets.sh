@@ -8,7 +8,9 @@ release_id="${release_id%%/*}"
 [[ "$release_id" =~ ^[0-9]+$ ]] || { echo "Invalid release upload URL" >&2; exit 1; }
 
 release_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .tag_name)
-existing_assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" --paginate --jq '.[].name')
+# Failed uploads can retain a name in the starter state. Only completed,
+# nonempty binary/wheel assets may be skipped; collisions otherwise fail safely.
+existing_assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" --paginate --jq '.[] | select(.state == "uploaded" and .size > 0) | .name')
 
 for asset in "$@"; do
   [[ -f "$asset" ]] || { echo "Missing release asset: $asset" >&2; exit 1; }
